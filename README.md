@@ -57,6 +57,19 @@ baseline actual no está probado en instalación limpia.
 - [`docs/configuracion-pruebas-limitaciones-fuentes.md`](docs/configuracion-pruebas-limitaciones-fuentes.md):
   configuración aplicada, estado de validación, limitaciones y fuentes.
 
+## Validación estática local
+
+El repositorio incluye un validador local de solo lectura:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\validate-baseline.ps1
+```
+
+Comprueba la estructura del repositorio, la sintaxis del XML y del PowerShell
+embebido, `ventoy.json`, los hashes documentados, los finales de línea y la
+coherencia documental. No ejecuta los scripts embebidos y no sustituye una
+instalación limpia real.
+
 ## Decisiones principales del perfil
 
 - Microsoft Defender conservado.
@@ -96,7 +109,8 @@ ventoy.json
 docs/
   preparacion-previa-instalacion.md
   configuracion-pruebas-limitaciones-fuentes.md
-scripts/ (futuro)
+scripts/
+  validate-baseline.ps1
 ```
 
 ## Licencias y fuentes

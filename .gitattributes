@@ -2,3 +2,4 @@ autounattend.xml text eol=lf
 ventoy.json text eol=crlf
 README.md text eol=lf
 docs/*.md text eol=lf
+scripts/*.ps1 text eol=lf

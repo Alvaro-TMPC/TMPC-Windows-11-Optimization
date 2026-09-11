@@ -71,6 +71,9 @@ Sobre los archivos reales del repositorio:
 - Los hallazgos F1, F2 y F3 de la auditoría interna están corregidos y
   comprobados estáticamente.
 - Los scripts embebidos analizados no se han ejecutado sobre ningún sistema.
+- El validador estático local `scripts/validate-baseline.ps1` reproduce estas
+  comprobaciones en modo de solo lectura y sin ejecutar los scripts embebidos;
+  no sustituye una instalación limpia real.
 
 Hashes SHA-256 del baseline actual:
 
