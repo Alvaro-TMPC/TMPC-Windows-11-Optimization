@@ -1,0 +1,2304 @@
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <!-- FINAL profile: Gaming + Programming, aggressive app debloat, no Game Pass/Microsoft Store gaming, no OneDrive, minimal Windows notifications with critical Windows Security alerts preserved, conservative performance defaults, Windows locking and printing preserved. -->
+  <settings pass="offlineServicing"></settings>
+  <settings pass="windowsPE">
+    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <UserData>
+        <ProductKey>
+          <Key>00000-00000-00000-00000-00000</Key>
+          <WillShowUI>Always</WillShowUI>
+        </ProductKey>
+        <AcceptEula>true</AcceptEula>
+      </UserData>
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Order 1-6: Skip Windows 11 Hardware Requirement Checks</Description>
+          <Path>reg.exe add "HKLM\SYSTEM\Setup\LabConfig" /v BypassTPMCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Path>reg.exe add "HKLM\SYSTEM\Setup\LabConfig" /v BypassSecureBootCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Path>reg.exe add "HKLM\SYSTEM\Setup\LabConfig" /v BypassStorageCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Path>reg.exe add "HKLM\SYSTEM\Setup\LabConfig" /v BypassCPUCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>5</Order>
+          <Path>reg.exe add "HKLM\SYSTEM\Setup\LabConfig" /v BypassRAMCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>6</Order>
+          <Path>reg.exe add "HKLM\SYSTEM\Setup\LabConfig" /v BypassDiskCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+  <settings pass="generalize"></settings>
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Loads Scripts in this XML File</Description>
+          <Path>powershell.exe -NoProfile -WindowStyle Hidden -Command "$xml = [xml]::new(); $xml.Load('C:\Windows\Panther\unattend.xml'); $sb = [scriptblock]::Create( $xml.unattend.Extensions.ExtractScript ); Invoke-Command -ScriptBlock $sb -ArgumentList $xml;"</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Description>Registry Entry to Create a Local Account during OOBE</Description>
+          <Path>reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE" /v BypassNRO /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Description>Disable All Network Adapters Temporarily so Windows Doesn't Update During OOBE and to Allow Local Account Creation</Description>
+          <Path>powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "Get-NetAdapter | Disable-NetAdapter -Confirm:$false"</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Description>Enables .NET Framework 3.5 from Windows Installation Media</Description>
+          <Path>powershell.exe -NoProfile -WindowStyle Hidden -Command "foreach($d in 'C','D','E','F','G','H','I','J','K'){$src=Join-Path ($d+':') 'sources\sxs';if(Test-Path $src\*.cab){dism /Online /Enable-Feature /FeatureName:NetFx3 /All /LimitAccess /Source:$src;break}}"</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>5</Order>
+          <Description>Runs Autounattend Script System Wide Operations like App Uninstalls, HKLM Registry entries etc.</Description>
+          <Path>powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\ProgramData\Autounattend\Unattend\Scripts\SystemCustomizations.ps1"</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+  <settings pass="auditSystem"></settings>
+  <settings pass="auditUser"></settings>
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+      <FirstLogonCommands>
+        <SynchronousCommand>
+        <Order>1</Order>
+        <Description>Enables Network Adapters After OOBE Completes</Description>
+        <CommandLine>powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "Get-NetAdapter | Enable-NetAdapter -Confirm:$false"</CommandLine>
+        </SynchronousCommand>
+    </FirstLogonCommands>
+    </component>
+  </settings>
+  <Extensions xmlns="urn:Autounattend:unattend">
+    <ExtractScript>
+param(
+    [xml] $Document
+);
+
+$scriptsDir = 'C:\ProgramData\Autounattend\Unattend\Scripts\';
+foreach( $file in $Document.unattend.Extensions.File ) {
+    $path = [System.Environment]::ExpandEnvironmentVariables(
+        $file.GetAttribute( 'path' )
+    );
+    if( $path.StartsWith( $scriptsDir ) ) {
+        mkdir -Path $scriptsDir -ErrorAction 'SilentlyContinue';
+    }
+    $encoding = switch( [System.IO.Path]::GetExtension( $path ) ) {
+        { $_ -in '.ps1', '.xml' } { [System.Text.Encoding]::UTF8; }
+        { $_ -in '.reg', '.vbs', '.js' } { [System.Text.UnicodeEncoding]::new( $false, $true ); }
+        default { [System.Text.Encoding]::Default; }
+    };
+    [System.IO.File]::WriteAllBytes( $path, ( $encoding.GetPreamble() + $encoding.GetBytes( $file.InnerText.Trim() ) ) );
+}
+		</ExtractScript>
+    <File path="C:\ProgramData\Autounattend\Unattend\Scripts\SystemCustomizations.ps1"><![CDATA[<#
+.SYNOPSIS
+    Autounattend Windows 10/11 Customization and Optimization Script
+.DESCRIPTION
+    Applies registry settings, UWP app removals, optimizations and customizations based on Windows version detection
+.NOTES
+    Requires Administrator privileges
+    Compatible with Windows 10 and Windows 11
+    Logs all activities to C:\ProgramData\Autounattend\Unattend\Logs\CustomizationLog.txt
+.PARAMETER UserCustomizations
+    When specified, applies ONLY HKCU (user-specific) registry settings.
+    When not specified, applies all settings EXCEPT HKCU entries.
+    Note: User customizations are tracked and will only apply once per user.
+    To re-apply, delete: HKCU\Software\Autounattend\UserCustomizationsApplied
+.EXAMPLE
+    .\SystemCustomizations.ps1
+    Runs in normal mode - applies all system-wide settings (HKLM) but skips user settings (HKCU)
+.EXAMPLE
+    .\SystemCustomizations.ps1 -UserCustomizations
+    Runs in user mode - applies ONLY user-specific settings (HKCU)
+#>
+
+param(
+    [switch]$UserCustomizations
+)
+
+# ============================================================================
+# LOGGING SETUP
+# ============================================================================
+
+$LogPath = 'C:\ProgramData\Autounattend\Unattend\Logs\CustomizationLog.txt'
+$null = New-Item -Path (Split-Path $LogPath) -ItemType Directory -Force
+
+function Write-Log {
+    param(
+        [string]$Message,
+        [ValidateSet("INFO", "SUCCESS", "WARNING", "ERROR")]
+        [string]$Level = "INFO"
+    )
+
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $LogEntry = "[$Timestamp] [$Level] $Message"
+
+    # Write to log file
+    Add-Content -Path $LogPath -Value $LogEntry -Encoding UTF8
+
+    # Optional: Also write to console for real-time monitoring
+    # Uncomment the next line if you want console output during testing
+    # Write-Host $LogEntry
+}
+
+# Initialize log file
+Write-Log "=================================================================================" "INFO"
+Write-Log "Autounattend Windows Optimization & Customization Script Started" "INFO"
+Write-Log "Script Path: $($MyInvocation.MyCommand.Path)" "INFO"
+Write-Log "Log File: $LogPath" "INFO"
+if ($UserCustomizations) {
+    Write-Log "MODE: User Customizations Only (HKCU registry entries)" "INFO"
+} else {
+    Write-Log "MODE: System Customizations (All settings except HKCU entries)" "INFO"
+}
+Write-Log "=================================================================================" "INFO"
+
+$script:CustomizationHadErrors = $false
+
+
+function Get-TargetUser {
+    try {
+        $user = Get-WmiObject Win32_ComputerSystem | Select-Object -ExpandProperty UserName
+        if ($user -and $user -ne "NT AUTHORITY\SYSTEM") {
+            $username = $user.Split('\')[1]
+            if ($username -ne "defaultuser0") {
+                return $username
+            }
+        }
+    } catch { }
+
+    try {
+        $explorer = Get-CimInstance Win32_Process -Filter "Name = 'explorer.exe'" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($explorer) {
+            $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction Stop
+            if ($owner.ReturnValue -eq 0 -and $owner.User -and $owner.User -ne "defaultuser0") {
+                return $owner.User
+            }
+        }
+    } catch { }
+
+    return $null
+}
+
+function Get-UserSID {
+    param($Username)
+    try {
+        $profListPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+        foreach ($key in Get-ChildItem $profListPath -ErrorAction SilentlyContinue) {
+            $profPath = (Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
+            if ($profPath -and $profPath.EndsWith("\$Username")) {
+                return $key.PSChildName
+            }
+        }
+        return $null
+    } catch {
+        return $null
+    }
+}
+
+function Set-RegistryValue {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [string]$Type,
+        $Value,
+        [string]$Description
+    )
+
+    try {
+        if (-not (Test-Path $Path)) {
+            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+        }
+        Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force -ErrorAction Stop
+        Write-Log "$Description | $Path\$Name = $Value" "SUCCESS"
+    }
+    catch {
+        $script:CustomizationHadErrors = $true
+        Write-Log "Failed to set $Path\$Name : $($_.Exception.Message)" "ERROR"
+    }
+}
+
+function Remove-RegistryValue {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [string]$Description
+    )
+
+    try {
+        if (Test-Path $Path) {
+            $existingValue = Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
+            if ($existingValue) {
+                Remove-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
+                Write-Log "$Description | Removed $Path\$Name" "SUCCESS"
+            }
+        }
+    }
+    catch {
+        $script:CustomizationHadErrors = $true
+        Write-Log "Failed to remove $Path\$Name : $($_.Exception.Message)" "ERROR"
+    }
+}
+
+function Remove-RegistryKey {
+    param(
+        [string]$Path,
+        [string]$Description
+    )
+
+    try {
+        if (Test-Path $Path) {
+            Remove-Item -Path $Path -Recurse -Force -ErrorAction Stop
+            Write-Log "$Description | Removed key $Path" "SUCCESS"
+        }
+    }
+    catch {
+        $script:CustomizationHadErrors = $true
+        Write-Log "Failed to remove key $Path : $($_.Exception.Message)" "ERROR"
+    }
+}
+
+function New-RegistryKey {
+    param(
+        [string]$Path,
+        [string]$Description
+    )
+
+    try {
+        if (-not (Test-Path $Path)) {
+            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+            Write-Log "$Description | Created key $Path" "SUCCESS"
+        }
+    }
+    catch {
+        $script:CustomizationHadErrors = $true
+        Write-Log "Failed to create key $Path : $($_.Exception.Message)" "ERROR"
+    }
+}
+
+function Set-BinaryBit {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [int]$ByteIndex,
+        [byte]$BitMask,
+        [bool]$SetBit,
+        [string]$Description
+    )
+
+    try {
+        if (-not (Test-Path $Path)) {
+            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+        }
+
+        $currentValue = Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
+        if ($null -eq $currentValue -or $null -eq $currentValue.$Name) {
+            $bytes = New-Object byte[] ([Math]::Max(12, $ByteIndex + 1))
+        } else {
+            $bytes = $currentValue.$Name
+            if ($bytes.Length -le $ByteIndex) {
+                $newBytes = New-Object byte[] ($ByteIndex + 1)
+                [Array]::Copy($bytes, $newBytes, $bytes.Length)
+                $bytes = $newBytes
+            }
+        }
+
+        if ($SetBit) {
+            $bytes[$ByteIndex] = $bytes[$ByteIndex] -bor $BitMask
+        } else {
+            $bytes[$ByteIndex] = $bytes[$ByteIndex] -band (-bnot $BitMask)
+        }
+
+        Set-ItemProperty -Path $Path -Name $Name -Value $bytes -Type Binary -Force -ErrorAction Stop
+        Write-Log "$Description | $Path\$Name bit mask 0x$($BitMask.ToString('X2')) at byte $ByteIndex = $SetBit" "SUCCESS"
+    }
+    catch {
+        $script:CustomizationHadErrors = $true
+        Write-Log "Failed to modify binary bit $Path\$Name : $($_.Exception.Message)" "ERROR"
+    }
+}
+
+function Set-BinaryByte {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [int]$ByteIndex,
+        [byte]$ByteValue,
+        [string]$Description
+    )
+
+    try {
+        if (-not (Test-Path $Path)) {
+            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+        }
+
+        $currentValue = Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
+        if ($null -eq $currentValue -or $null -eq $currentValue.$Name) {
+            $bytes = New-Object byte[] ([Math]::Max(12, $ByteIndex + 1))
+        } else {
+            $bytes = $currentValue.$Name
+            if ($bytes.Length -le $ByteIndex) {
+                $newBytes = New-Object byte[] ($ByteIndex + 1)
+                [Array]::Copy($bytes, $newBytes, $bytes.Length)
+                $bytes = $newBytes
+            }
+        }
+
+        $bytes[$ByteIndex] = $ByteValue
+        Set-ItemProperty -Path $Path -Name $Name -Value $bytes -Type Binary -Force -ErrorAction Stop
+        Write-Log "$Description | $Path\$Name byte $ByteIndex = 0x$($ByteValue.ToString('X2'))" "SUCCESS"
+    }
+    catch {
+        $script:CustomizationHadErrors = $true
+        Write-Log "Failed to modify binary byte $Path\$Name : $($_.Exception.Message)" "ERROR"
+    }
+}
+
+
+function Register-AutounattendUserCustomizationsTask {
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File C:\ProgramData\Autounattend\Unattend\Scripts\SystemCustomizations.ps1 -UserCustomizations"
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null
+    $registeredTask = Get-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -ErrorAction Stop
+    if (-not $registeredTask) {
+        throw "AutounattendUserCustomizations was not found after registration."
+    }
+}
+
+
+function Start-ProcessAsUser {
+    param([string]$CommandLine)
+
+    if (-not ([System.Management.Automation.PSTypeName]'Autounattend.TL'.Type)) {
+        Add-Type -MemberDefinition @'
+[DllImport("advapi32.dll",SetLastError=true)]public static extern bool OpenProcessToken(IntPtr h,uint a,out IntPtr t);
+[DllImport("advapi32.dll",SetLastError=true)]public static extern bool GetTokenInformation(IntPtr t,int c,IntPtr i,int l,out int r);
+[DllImport("advapi32.dll",SetLastError=true)]public static extern bool DuplicateTokenEx(IntPtr t,uint a,IntPtr s,int il,int tt,out IntPtr n);
+[DllImport("advapi32.dll",SetLastError=true,CharSet=CharSet.Unicode)]public static extern bool CreateProcessAsUserW(IntPtr t,string app,string cmd,IntPtr pa,IntPtr ta,bool ih,int cf,IntPtr env,string dir,ref SI si,out PI pi);
+[DllImport("kernel32.dll",SetLastError=true)]public static extern bool CloseHandle(IntPtr h);
+[DllImport("kernel32.dll")]public static extern uint WTSGetActiveConsoleSessionId();
+[DllImport("kernel32.dll",SetLastError=true)]public static extern bool ProcessIdToSessionId(uint p,out uint s);
+[DllImport("kernel32.dll",SetLastError=true)]public static extern uint WaitForSingleObject(IntPtr h,uint ms);
+[DllImport("kernel32.dll",SetLastError=true)]public static extern bool GetExitCodeProcess(IntPtr h,out uint c);
+[DllImport("userenv.dll",SetLastError=true)]public static extern bool CreateEnvironmentBlock(out IntPtr env,IntPtr token,bool inherit);
+[DllImport("userenv.dll",SetLastError=true)]public static extern bool DestroyEnvironmentBlock(IntPtr env);
+[StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]public struct SI{public int cb;public string r1,d,t;public int x,y,w,h,cc,cr,fa,fl;public short sw,r2;public IntPtr r3,i,o,e;}
+[StructLayout(LayoutKind.Sequential)]public struct PI{public IntPtr hp,ht;public int pid,tid;}
+'@ -Name TL -Namespace Autounattend -ErrorAction Stop
+    }
+
+    $T = [Autounattend.TL]
+    $tok = $dup = $envBlock = [IntPtr]::Zero
+    $pi = New-Object Autounattend.TL+PI
+    $launched = $false
+
+    try {
+        $cs = $T::WTSGetActiveConsoleSessionId()
+        if ($cs -eq 0xFFFFFFFF) { Write-Log "No active console session" "ERROR"; return $false }
+
+        $ep = $null
+        foreach ($p in (Get-Process explorer -ErrorAction SilentlyContinue)) {
+            $s = [uint32]0
+            if ($T::ProcessIdToSessionId([uint32]$p.Id, [ref]$s) -and $s -eq $cs) { $ep = $p; break }
+        }
+        if (-not $ep) { Write-Log "No explorer.exe in session $cs" "ERROR"; return $false }
+
+        if (-not $T::OpenProcessToken($ep.Handle, 0x000A, [ref]$tok)) {
+            Write-Log "OpenProcessToken failed (err $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))" "ERROR"; return $false
+        }
+
+        # If user is admin with UAC, get the linked elevated token (TokenElevationType=18, TokenLinkedToken=19)
+        $dupSrc = $tok; $linked = [IntPtr]::Zero
+        $eb = [Runtime.InteropServices.Marshal]::AllocHGlobal(4); $rl = 0
+        if ($T::GetTokenInformation($tok, 18, $eb, 4, [ref]$rl) -and [Runtime.InteropServices.Marshal]::ReadInt32($eb) -eq 3) {
+            $lb = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
+            if ($T::GetTokenInformation($tok, 19, $lb, [IntPtr]::Size, [ref]$rl)) {
+                $linked = [Runtime.InteropServices.Marshal]::ReadIntPtr($lb)
+                $dupSrc = $linked
+                Write-Log "Using elevated linked token for admin user" "INFO"
+            }
+            [Runtime.InteropServices.Marshal]::FreeHGlobal($lb)
+        }
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($eb)
+
+        if (-not $T::DuplicateTokenEx($dupSrc, 0xF01FF, [IntPtr]::Zero, 2, 1, [ref]$dup)) {
+            Write-Log "DuplicateTokenEx failed (err $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))" "ERROR"; return $false
+        }
+        if ($linked -ne [IntPtr]::Zero) { $null = $T::CloseHandle($linked) }
+
+        $null = $T::CreateEnvironmentBlock([ref]$envBlock, $dup, $false)
+
+        $si = New-Object Autounattend.TL+SI
+        $si.cb = [Runtime.InteropServices.Marshal]::SizeOf($si)
+        $si.d = "winsta0\default"
+        $psExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+        if (-not $T::CreateProcessAsUserW($dup, $psExe, $CommandLine, [IntPtr]::Zero, [IntPtr]::Zero, $false, 0x08000400, $envBlock, $env:SystemRoot, [ref]$si, [ref]$pi)) {
+            Write-Log "CreateProcessAsUserW failed (err $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))" "ERROR"; return $false
+        }
+
+        $launched = $true
+        Write-Log "Launched child process as user (PID $($pi.pid))" "INFO"
+
+        $wait = $T::WaitForSingleObject($pi.hp, 600000)
+        if ($wait -ne 0) { Write-Log "Child process timed out" "ERROR"; return $false }
+
+        $ec = [uint32]0
+        $null = $T::GetExitCodeProcess($pi.hp, [ref]$ec)
+        Write-Log "Child process exited with code $ec" "INFO"
+        return ($ec -eq 0)
+    }
+    catch { Write-Log "Start-ProcessAsUser: $($_.Exception.Message)" "ERROR"; return $false }
+    finally {
+        if ($launched) {
+            if ($pi.ht -ne [IntPtr]::Zero) { $null = $T::CloseHandle($pi.ht) }
+            if ($pi.hp -ne [IntPtr]::Zero) { $null = $T::CloseHandle($pi.hp) }
+        }
+        if ($envBlock -ne [IntPtr]::Zero) { $null = $T::DestroyEnvironmentBlock($envBlock) }
+        if ($dup -ne [IntPtr]::Zero) { $null = $T::CloseHandle($dup) }
+        if ($tok -ne [IntPtr]::Zero) { $null = $T::CloseHandle($tok) }
+    }
+}
+
+
+if (-not $UserCustomizations) {
+
+    $scriptsDir = "C:\ProgramData\Autounattend\Scripts"
+    if (!(Test-Path $scriptsDir)) {
+        New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
+        Write-Log "Created scripts directory: $scriptsDir" "SUCCESS"
+    } else {
+        Write-Log "Scripts directory already exists: $scriptsDir" "INFO"
+    }
+
+    # ============================================================================
+    # WINDOWS APPS REMOVAL
+    # ============================================================================
+
+    # Create BloatRemoval.ps1 script
+    $bloatRemovalContent = @'
+<#
+  .SYNOPSIS
+      Removes Windows bloatware apps, legacy capabilities, and optional features from Windows 10/11 systems.
+      Script Version: 2.3
+
+  .DESCRIPTION
+      This script removes selected Windows components including:
+      - Appx packages (UWP apps like Calculator, Weather, etc.)
+      - Legacy Windows capabilities
+      - Optional Windows features
+      - Special apps requiring custom uninstall procedures (e.g., OneNote)
+
+      Provisioned packages are removed first to ensure Remove-AppxPackage -AllUsers succeeds on Win10.
+      This script is designed to run in any context: user sessions, SYSTEM account, or scheduled tasks.
+
+  .NOTES
+      Source: https://github.com/memstechtips/Autounattend
+
+      Requirements:
+      - Windows 10/11
+      - Administrator privileges (script will auto-elevate)
+      - PowerShell 5.1 or higher
+#>
+
+# Check if script is running as Administrator
+If (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator")) {
+    Try {
+        Start-Process PowerShell.exe -ArgumentList ("-NoProfile -ExecutionPolicy Bypass -File `"{0}`"" -f $PSCommandPath) -Verb RunAs
+        Exit
+    }
+    Catch {
+        Write-Host "Failed to run as Administrator. Please rerun with elevated privileges."
+        Exit
+    }
+}
+
+# Setup logging
+$logFolder = "C:\ProgramData\Autounattend\Logs"
+$logFile = "$logFolder\BloatRemovalLog.txt"
+$script:HadErrors = $false
+
+if (!(Test-Path $logFolder)) {
+    New-Item -ItemType Directory -Path $logFolder -Force | Out-Null
+}
+
+function Write-Log {
+    param ([string]$Message)
+    if ((Test-Path $logFile) -and (Get-Item $logFile).Length -gt 512000) {
+        Remove-Item $logFile -Force -ErrorAction SilentlyContinue
+        "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Log rotated - previous log exceeded 500KB" | Out-File -FilePath $logFile
+    }
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $Message" | Out-File -FilePath $logFile -Append
+    Write-Host $Message
+}
+
+function Invoke-RunspacePool {
+    param (
+        [array]$Items,
+        [scriptblock]$ScriptBlock,
+        [int]$MaxThreads = 10,
+        [string]$Label,
+        [string]$SuccessFormat,
+        [string]$FailFormat
+    )
+    if ($Items.Count -eq 0) { return }
+
+    try {
+        $threadCount = [Math]::Min($Items.Count, $MaxThreads)
+        Write-Log "Removing $($Items.Count) $Label via runspace pool (threads=$threadCount)..."
+        $pool = [RunspaceFactory]::CreateRunspacePool(1, $threadCount)
+        $pool.Open()
+        $jobs = [System.Collections.Generic.List[object]]::new()
+
+        foreach ($item in $Items) {
+            $ps = [PowerShell]::Create().AddScript($ScriptBlock).AddArgument($item)
+            $ps.RunspacePool = $pool
+            $jobs.Add(@{ Pipe = $ps; Handle = $ps.BeginInvoke() })
+        }
+
+        foreach ($job in $jobs) {
+            $result = $job.Pipe.EndInvoke($job.Handle)
+            foreach ($r in $result) {
+                if ($r.Success) { Write-Log ($SuccessFormat -f $r.Name) }
+                else {
+                    Write-Log ($FailFormat -f $r.Name, $r.Error)
+                    $script:HadErrors = $true
+                }
+            }
+            $job.Pipe.Dispose()
+        }
+        $pool.Close()
+        $pool.Dispose()
+        Write-Log "Parallel $Label removal completed"
+    } catch {
+        Write-Log "Parallel execution unavailable, falling back to sequential removal for $Label..."
+        foreach ($item in $Items) {
+            $r = & $ScriptBlock $item
+            if ($r.Success) { Write-Log ($SuccessFormat -f $r.Name) }
+            else {
+                Write-Log ($FailFormat -f $r.Name, $r.Error)
+                $script:HadErrors = $true
+            }
+        }
+        Write-Log "Sequential $Label removal completed"
+    }
+}
+
+# ============================================================================
+# DATA
+# ============================================================================
+
+$packages = @(
+    'Microsoft.Microsoft3DViewer'
+    'Microsoft.MixedReality.Portal'
+    'Microsoft.BingSearch'
+    'Microsoft.BingNews'
+    'Microsoft.BingWeather'
+    'Microsoft.WindowsCamera'
+    'Clipchamp.Clipchamp'
+    'Microsoft.WindowsAlarms'
+    'Microsoft.549981C3F5F10'
+    'Microsoft.GetHelp'
+    'Microsoft.Windows.DevHome'
+    'MicrosoftCorporationII.MicrosoftFamily'
+    'microsoft.windowscommunicationsapps'
+    'Microsoft.SkypeApp'
+    'MSTeams'
+    'Microsoft.WindowsFeedbackHub'
+    'Microsoft.WindowsMaps'
+    'Microsoft.MicrosoftOfficeHub'
+    'Microsoft.OutlookForWindows'
+    # 'Microsoft.MSPaint'  # Keep Paint-related legacy package if present
+    # 'Microsoft.Paint'  # Keep Paint
+    # 'Microsoft.Windows.Photos'  # Keep Microsoft Photos as the default built-in image viewer
+    'Microsoft.People'
+    'Microsoft.PowerAutomateDesktop'
+    'MicrosoftCorporationII.QuickAssist'
+    'Microsoft.MicrosoftSolitaireCollection'
+    'Microsoft.GamingApp'
+    'Microsoft.XboxApp'
+    'Microsoft.XboxIdentityProvider'
+    'Microsoft.XboxGameOverlay'
+    'Microsoft.Xbox.TCUI'
+    'Microsoft.XboxGamingOverlay'
+    # 'Microsoft.WindowsStore'  # Kept for Windows/AppX compatibility and repair/install dependencies
+    'Microsoft.ZuneMusic'
+    'Microsoft.ZuneVideo'
+    'Microsoft.WindowsSoundRecorder'
+    'Microsoft.MicrosoftStickyNotes'
+    'Microsoft.Getstarted'
+    'Microsoft.Todos'
+    'Microsoft.YourPhone'
+    'Microsoft.Copilot'
+    'Microsoft.Windows.Ai.Copilot.Provider'
+    'Microsoft.Copilot_8wekyb3d8bbwe'
+    'Microsoft.Office.OneNote'
+)
+
+$capabilities = @(
+    'Microsoft.Windows.PowerShell.ISE'
+    'App.Support.QuickAssist'
+    'App.StepsRecorder'
+    'Microsoft.Windows.WordPad'
+    # 'Microsoft.Windows.MSPaint'  # Keep Paint capability if present
+)
+
+$optionalFeatures = @(
+    'Recall'
+)
+
+$specialApps = @(
+    'OneNote'
+)
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+Write-Log "Starting bloat removal process"
+# Discover all packages upfront (single query each)
+Write-Log "Discovering all packages..."
+$allInstalled = Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+$allProvisioned = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+
+$packagesToRemove = @()
+$provisionedToRemove = @()
+$notFound = @()
+
+foreach ($package in $packages) {
+    $installed = @($allInstalled | Where-Object Name -eq $package)
+    $provisioned = @($allProvisioned | Where-Object DisplayName -eq $package)
+
+    if ($installed) {
+        foreach ($pkg in $installed) { Write-Log "Queuing installed package: $($pkg.PackageFullName)" }
+        $packagesToRemove += $installed.PackageFullName
+    }
+    if ($provisioned) {
+        foreach ($pkg in $provisioned) { Write-Log "Queuing provisioned package: $($pkg.PackageName)" }
+        $provisionedToRemove += $provisioned.PackageName
+    }
+
+    if (-not $installed -and -not $provisioned) { $notFound += $package }
+}
+
+if ($notFound.Count -gt 0) { Write-Log "Packages not found: $($notFound -join ', ')" }
+
+# Deprovision first — critical for Win10 (Remove-AppxPackage -AllUsers fails with 0x80070002 otherwise)
+Invoke-RunspacePool -Items $provisionedToRemove -MaxThreads 10 -Label "provisioned packages" `
+    -ScriptBlock {
+        param($p)
+        try {
+            Remove-AppxProvisionedPackage -Online -PackageName $p -ErrorAction Stop | Out-Null
+            @{ Name = $p; Success = $true; Error = $null }
+        } catch {
+            @{ Name = $p; Success = $false; Error = $_.Exception.Message }
+        }
+    } `
+    -SuccessFormat "Deprovisioned: {0}" `
+    -FailFormat "Failed to deprovision {0}: {1}"
+
+# Remove installed packages (for all users)
+Invoke-RunspacePool -Items $packagesToRemove -MaxThreads 10 -Label "installed packages" `
+    -ScriptBlock {
+        param($p)
+        try {
+            Remove-AppxPackage -Package $p -AllUsers -ErrorAction Stop
+            @{ Name = $p; Success = $true; Error = $null }
+        } catch {
+            @{ Name = $p; Success = $false; Error = $_.Exception.Message }
+        }
+    } `
+    -SuccessFormat "Removed installed package: {0}" `
+    -FailFormat "Failed to remove installed package {0}: {1}"
+
+# Capabilities — single DISM enumeration, then parallel removal
+Write-Log "Processing capabilities..."
+$allCaps = Get-WindowsCapability -Online -ErrorAction SilentlyContinue
+$capNamesToRemove = @()
+
+foreach ($capability in $capabilities) {
+    $matching = @($allCaps | Where-Object { $_.Name -like "$capability*" -and $_.State -eq "Installed" })
+    if ($matching) {
+        $matching | ForEach-Object { Write-Log "Queuing capability: $($_.Name)" }
+        $capNamesToRemove += $matching.Name
+    } else {
+        Write-Log "Capability not found or not installed: $capability"
+    }
+}
+
+Invoke-RunspacePool -Items $capNamesToRemove -MaxThreads 5 -Label "capabilities" `
+    -ScriptBlock {
+        param($name)
+        try {
+            Remove-WindowsCapability -Online -Name $name -ErrorAction Stop | Out-Null
+            @{ Name = $name; Success = $true; Error = $null }
+        } catch {
+            @{ Name = $name; Success = $false; Error = $_.Exception.Message }
+        }
+    } `
+    -SuccessFormat "Removed capability: {0}" `
+    -FailFormat "Failed to remove capability {0}: {1}"
+
+# Optional features — batch disable
+Write-Log "Processing optional features..."
+$enabledFeatures = @()
+foreach ($feature in $optionalFeatures) {
+    $existing = Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction SilentlyContinue
+    if ($existing -and $existing.State -eq "Enabled") {
+        $enabledFeatures += $feature
+    } else {
+        Write-Log "Feature not found or not enabled: $feature"
+    }
+}
+
+if ($enabledFeatures.Count -gt 0) {
+    Write-Log "Disabling features: $($enabledFeatures -join ', ')"
+    try {
+        Disable-WindowsOptionalFeature -Online -FeatureName $enabledFeatures -NoRestart -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Log "Failed to disable optional features: $($_.Exception.Message)"
+        $script:HadErrors = $true
+    }
+}
+
+# Special apps — registry-based uninstall
+if ($specialApps.Count -gt 0) {
+    Write-Log "Processing special apps..."
+
+    $uninstallPaths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+    )
+
+    foreach ($specialApp in $specialApps) {
+        Write-Log "Processing special app: $specialApp"
+
+        $processNames = switch ($specialApp) {
+            'OneNote' { @('OneNote', 'ONENOTE', 'ONENOTEM') }
+            default { Write-Log "Unknown special app: $specialApp"; continue }
+        }
+
+        foreach ($name in $processNames) {
+            Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
+
+        $uninstalled = $false
+        foreach ($basePath in $uninstallPaths) {
+            $keys = Get-ChildItem -Path $basePath -ErrorAction SilentlyContinue |
+                    Where-Object { $_.PSChildName -like "$specialApp*" }
+
+            foreach ($key in $keys) {
+                $uninstallString = (Get-ItemProperty -Path $key.PSPath -ErrorAction SilentlyContinue).UninstallString
+                if (-not $uninstallString) { continue }
+
+                Write-Log "Found uninstall string: $uninstallString"
+                $uninstalled = $true
+                $silent = if ($uninstallString -like '*OfficeClickToRun.exe*') { 'DisplayLevel=False' } else { '/silent' }
+
+                try {
+                    if ($uninstallString -match '^"([^"]+)"(.*)$') {
+                        $uninstallProcess = Start-Process -FilePath $matches[1] -ArgumentList "$($matches[2].Trim()) $silent" -NoNewWindow -Wait -PassThru -ErrorAction Stop
+                    } else {
+                        $uninstallProcess = Start-Process -FilePath $uninstallString -ArgumentList $silent -NoNewWindow -Wait -PassThru -ErrorAction Stop
+                    }
+
+                    if ($uninstallProcess.ExitCode -eq 0) {
+                        Write-Log "Completed uninstall for $specialApp"
+                    } else {
+                        Write-Log "Uninstall for $specialApp returned exit code $($uninstallProcess.ExitCode)"
+                        $script:HadErrors = $true
+                    }
+                } catch {
+                    Write-Log "Failed to uninstall ${specialApp}: $($_.Exception.Message)"
+                    $script:HadErrors = $true
+                }
+            }
+        }
+
+        if (-not $uninstalled) { Write-Log "No uninstall strings found for $specialApp" }
+    }
+}
+
+# ============================================================================
+# REGISTRY SETTINGS TO PREVENT ISSUES AND BUGS
+# ============================================================================
+
+$xboxPackages = @('Microsoft.GamingApp', 'Microsoft.XboxGamingOverlay', 'Microsoft.XboxGameOverlay')
+$hasXboxPackages = $packages | Where-Object { $xboxPackages -contains $_ }
+
+if ($hasXboxPackages) {
+    Write-Log "Applying registry settings to prevent post-removal issues..."
+
+    try {
+        $runningAsSystem = ($env:USERNAME -eq "SYSTEM" -or $env:USERPROFILE -like "*\system32\config\systemprofile")
+
+        if ($runningAsSystem) {
+            Write-Log "Running as SYSTEM - detecting logged-in user..."
+            $loggedInUser = (Get-WmiObject -Class Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+
+            if ($loggedInUser -and $loggedInUser -ne "NT AUTHORITY\SYSTEM") {
+                $username = $loggedInUser.Split('\\')[1]
+                $sid = $null
+                $profListPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+                foreach ($profKey in Get-ChildItem $profListPath -ErrorAction SilentlyContinue) {
+                    $profPath = (Get-ItemProperty $profKey.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
+                    if ($profPath -and $profPath.EndsWith("\$username")) {
+                        $sid = $profKey.PSChildName
+                        break
+                    }
+                }
+                if ($sid) {
+                    Write-Log "Applying settings for user: $username (SID: $sid)"
+                    reg add "HKU\$sid\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR" /f /t REG_DWORD /v "AppCaptureEnabled" /d 0 2>$null | Out-Null
+                    reg add "HKU\$sid\System\GameConfigStore" /f /t REG_DWORD /v "GameDVR_Enabled" /d 0 2>$null | Out-Null
+                    reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR" /f /t REG_DWORD /v "AllowGameDVR" /d 0 2>$null | Out-Null
+                    Write-Log "Xbox Game DVR registry settings applied successfully"
+                } else {
+                    Write-Log "Warning: Could not resolve SID for user: $username"
+                }
+            } else {
+                Write-Log "Warning: Could not detect logged-in user for registry settings"
+            }
+        } else {
+            Write-Log "Running as user - applying settings directly to HKCU"
+            reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR" /f /t REG_DWORD /v "AppCaptureEnabled" /d 0 2>$null | Out-Null
+            reg add "HKCU\System\GameConfigStore" /f /t REG_DWORD /v "GameDVR_Enabled" /d 0 2>$null | Out-Null
+            reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR" /f /t REG_DWORD /v "AllowGameDVR" /d 0 2>$null | Out-Null
+            Write-Log "Xbox Game DVR registry settings applied successfully"
+        }
+    } catch {
+        Write-Log "Warning: Could not apply Xbox Game DVR registry settings: $($_.Exception.Message)"
+        $script:HadErrors = $true
+    }
+}
+
+if ($script:HadErrors) {
+    Write-Log "Bloat removal process completed with one or more real operation failures"
+    exit 1
+}
+
+Write-Log "Bloat removal process completed successfully"
+exit 0
+'@
+
+    $bloatRemovalPath = Join-Path $scriptsDir "BloatRemoval.ps1"
+    try {
+        $bloatRemovalContent | Out-File -FilePath $bloatRemovalPath -Encoding UTF8 -Force
+        Write-Log "Created: BloatRemoval.ps1" "SUCCESS"
+    } catch {
+        Write-Log "Failed to create BloatRemoval.ps1: $($_.Exception.Message)" "ERROR"
+    }
+
+    # Microsoft Edge and WebView2 are intentionally kept for Windows/app compatibility.
+    # No Edge removal script is generated.
+
+    # Create OneDriveRemoval.ps1 script
+    $oneDriveRemovalContent = @'
+
+<#
+  .SYNOPSIS
+      Removes Microsoft OneDrive from Windows 10/11 systems.
+      Script Version: 1.2
+
+  .DESCRIPTION
+      This script detects and removes Microsoft OneDrive installations including:
+      - OneDrive AppxPackage (Microsoft.OneDriveSync)
+      - Registry-based uninstallation using HKLM and HKU uninstall entries
+      - OneDrive files and folders from the current users' AppData folder. (NOTE: Userdata in %USERPROFILE%\OneDrive is preserved)
+      - System-wide OneDrive installation files
+      - OneDrive scheduled tasks
+      - Start Menu shortcuts
+      - Default user profile configuration to prevent auto-installation
+
+      This script is designed to run in any context: user sessions, SYSTEM account, or scheduled tasks.
+
+  .NOTES
+      Source: https://github.com/memstechtips/Autounattend
+
+      Requirements:
+      - Windows 10/11
+      - Administrator privileges (script will auto-elevate)
+      - PowerShell 5.1 or higher
+#>
+
+# Check if script is running as Administrator
+If (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator")) {
+    Try {
+        Start-Process PowerShell.exe -ArgumentList ("-NoProfile -ExecutionPolicy Bypass -File `"{0}`"" -f $PSCommandPath) -Verb RunAs
+        Exit
+    }
+    Catch {
+        Write-Host "Failed to run as Administrator. Please rerun with elevated privileges."
+        Exit
+    }
+}
+
+# Setup logging
+$logFolder = "C:\ProgramData\Autounattend\Logs"
+$logFile = "$logFolder\OneDriveRemovalLog.txt"
+$script:HadErrors = $false
+
+# Create log directory if it doesn't exist
+if (!(Test-Path $logFolder)) {
+    New-Item -ItemType Directory -Path $logFolder -Force | Out-Null
+}
+
+# Function to write to log file
+function Write-Log {
+    param (
+        [string]$Message
+    )
+
+    # Check if log file exists and is over 500KB (512000 bytes)
+    if ((Test-Path $logFile) -and (Get-Item $logFile).Length -gt 512000) {
+        Remove-Item $logFile -Force -ErrorAction SilentlyContinue
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        "$timestamp - Log rotated - previous log exceeded 500KB" | Out-File -FilePath $logFile
+    }
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp - $Message" | Out-File -FilePath $logFile -Append
+
+    # Also output to console for real-time progress
+    Write-Host $Message
+}
+
+# Function to schedule file for deletion on reboot
+function Schedule-DeleteOnReboot {
+    param([string]$Path)
+
+    $code = '[DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, int dwFlags);'
+    if (-not ([System.Management.Automation.PSTypeName]'Win32.Kernel32').Type) {
+        Add-Type -MemberDefinition $code -Name 'Kernel32' -Namespace 'Win32' -ErrorAction SilentlyContinue
+    }
+    return [Win32.Kernel32]::MoveFileEx($Path, $null, 4)  # 4 = MOVEFILE_DELAY_UNTIL_REBOOT
+}
+
+Write-Host "Starting OneDrive removal process. See $logFile for details."
+Write-Log "Starting OneDrive removal process"
+
+# Get the interactive user when running as SYSTEM (not needed for regular user execution)
+function Get-TargetUser {
+    Write-Log "Get-TargetUser: Starting user detection"
+
+    try {
+        $user = Get-WmiObject Win32_ComputerSystem | Select-Object -ExpandProperty UserName
+        Write-Log "Get-TargetUser: Win32_ComputerSystem returned: '$user'"
+        if ($user -and $user -ne "NT AUTHORITY\SYSTEM") {
+            $username = $user.Split('\')[1]
+            Write-Log "Get-TargetUser: Extracted username: '$username'"
+            return $username
+        }
+        Write-Log "Get-TargetUser: User is null or SYSTEM, trying fallback method"
+    }
+    catch {
+        Write-Log "Get-TargetUser: Win32_ComputerSystem failed: $($_.Exception.Message)"
+    }
+
+    # Fallback: find user running explorer.exe
+    try {
+        $explorer = Get-CimInstance Win32_Process -Filter "Name = 'explorer.exe'" -ErrorAction SilentlyContinue | Select-Object -First 1
+        Write-Log "Get-TargetUser: Explorer process found: $($explorer -ne $null)"
+        if ($explorer) {
+            $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction Stop
+            Write-Log "Get-TargetUser: Explorer owner: Domain='$($owner.Domain)', User='$($owner.User)', ReturnValue='$($owner.ReturnValue)'"
+            if ($owner.ReturnValue -eq 0 -and $owner.User) {
+                return $owner.User
+            }
+        }
+        Write-Log "Get-TargetUser: No usable explorer owner found"
+    }
+    catch {
+        Write-Log "Get-TargetUser: Explorer method failed: $($_.Exception.Message)"
+    }
+
+    Write-Log "Get-TargetUser: No user found, returning null"
+    return $null
+}
+
+# Get the user's SID for registry access
+function Get-UserSID {
+    param($Username)
+    try {
+        $profListPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+        foreach ($key in Get-ChildItem $profListPath -ErrorAction SilentlyContinue) {
+            $profPath = (Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
+            if ($profPath -and $profPath.EndsWith("\$Username")) {
+                return $key.PSChildName
+            }
+        }
+        Write-Log "Get-UserSID: No profile found for user '$Username'"
+        return $null
+    }
+    catch {
+        Write-Log "Get-UserSID: Failed for user '$Username': $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# Determine user profile to check
+Write-Log "Current environment: USERNAME='$env:USERNAME', USERPROFILE='$env:USERPROFILE'"
+
+if ($env:USERNAME -eq "SYSTEM" -or $env:USERNAME -like "*$" -or $env:USERPROFILE -like "*\system32\config\systemprofile") {
+    Write-Log "Running as SYSTEM, attempting to detect target user"
+    $targetUser = Get-TargetUser
+    if ($targetUser) {
+        $userProfilePath = "C:\Users\$targetUser"
+        Write-Log "Running as SYSTEM, targeting user: '$targetUser', profile path: '$userProfilePath'"
+    } else {
+        Write-Log "Running as SYSTEM but no target user found"
+        $userProfilePath = $null
+    }
+} else {
+    $targetUser = $env:USERNAME
+    $userProfilePath = $env:USERPROFILE
+    Write-Log "Running as regular user: '$targetUser', profile path: '$userProfilePath'"
+}
+
+# Step 1: Remove OneDrive AppxPackage and check registry for OneDrive installation
+Write-Log "Removing OneDrive AppxPackage if present"
+try {
+    $oneDriveAppx = @(Get-AppxPackage -AllUsers *OneDriveSync* -ErrorAction SilentlyContinue)
+    if ($oneDriveAppx.Count -gt 0) {
+        $oneDriveAppx | Remove-AppxPackage -AllUsers -ErrorAction Stop
+        Write-Log "OneDrive AppxPackage removal completed"
+    } else {
+        Write-Log "OneDrive AppxPackage not found"
+    }
+}
+catch {
+    Write-Log "OneDrive AppxPackage removal failed: $($_.Exception.Message)"
+    $script:HadErrors = $true
+}
+
+$uninstallExecuted = $false
+
+# Check HKLM first (system-wide installation)
+$hklmUninstallKey = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe"
+Write-Log "Checking HKLM uninstall registry key: $hklmUninstallKey"
+
+try {
+    $uninstallString = reg.exe query $hklmUninstallKey /v UninstallString 2>$null
+    if ($LASTEXITCODE -eq 0 -and $uninstallString) {
+        $uninstallLine = $uninstallString | Where-Object { $_ -match "UninstallString" } | Select-Object -First 1
+        if ($uninstallLine -match "REG_SZ\s+(.+)") {
+            $uninstallCommand = $matches[1].Trim()
+            Write-Log "Found HKLM uninstall command: $uninstallCommand"
+
+            Write-Log "Stopping OneDrive processes"
+            Stop-Process -Name "*OneDrive*" -Force -ErrorAction SilentlyContinue | Out-Null
+
+            Write-Log "Executing HKLM registry-based uninstaller"
+
+            if ($uninstallCommand -match '^"([^"]+)"(.*)') {
+                $exePath = $matches[1]
+                $arguments = $matches[2].Trim()
+                Write-Log "Command: '$exePath' Arguments: '$arguments'"
+                $uninstallProcess = Start-Process -FilePath $exePath -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop
+                if ($uninstallProcess.ExitCode -ne 0) {
+                    throw "HKLM OneDrive uninstaller returned exit code $($uninstallProcess.ExitCode)."
+                }
+            } else {
+                Write-Log "Command: '$uninstallCommand'"
+                cmd.exe /c $uninstallCommand 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    throw "HKLM OneDrive uninstall command returned exit code $LASTEXITCODE."
+                }
+            }
+            Write-Log "HKLM registry-based uninstaller completed"
+            $uninstallExecuted = $true
+        } else {
+            Write-Log "Could not parse UninstallString from HKLM registry output"
+            $script:HadErrors = $true
+        }
+    } else {
+        Write-Log "OneDrive uninstall registry key not found in HKLM"
+    }
+}
+catch {
+    Write-Log "HKLM registry-based uninstall failed: $($_.Exception.Message)"
+    $script:HadErrors = $true
+}
+
+# Check HKU if HKLM didn't execute (user-specific installation)
+if (-not $uninstallExecuted -and $targetUser) {
+    $userSID = Get-UserSID -Username $targetUser
+    if ($userSID) {
+        Write-Log "User SID for '$targetUser': $userSID"
+
+        $uninstallKey = "HKU\$userSID\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe"
+        Write-Log "Checking HKU uninstall registry key: $uninstallKey"
+
+        try {
+            $uninstallString = reg.exe query $uninstallKey /v UninstallString 2>$null
+            if ($LASTEXITCODE -eq 0 -and $uninstallString) {
+                $uninstallLine = $uninstallString | Where-Object { $_ -match "UninstallString" } | Select-Object -First 1
+                if ($uninstallLine -match "REG_SZ\s+(.+)") {
+                    $uninstallCommand = $matches[1].Trim()
+                    Write-Log "Found HKU uninstall command: $uninstallCommand"
+
+                    Write-Log "Stopping OneDrive processes"
+                    Stop-Process -Name "*OneDrive*" -Force -ErrorAction SilentlyContinue | Out-Null
+
+                    Write-Log "Executing HKU registry-based uninstaller"
+
+                    if ($uninstallCommand -match '^"([^"]+)"(.*)') {
+                        $exePath = $matches[1]
+                        $arguments = $matches[2].Trim()
+                        Write-Log "Command: '$exePath' Arguments: '$arguments'"
+                        $uninstallProcess = Start-Process -FilePath $exePath -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop
+                        if ($uninstallProcess.ExitCode -ne 0) {
+                            throw "HKU OneDrive uninstaller returned exit code $($uninstallProcess.ExitCode)."
+                        }
+                    } else {
+                        Write-Log "Command: '$uninstallCommand'"
+                        cmd.exe /c $uninstallCommand 2>&1 | Out-Null
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "HKU OneDrive uninstall command returned exit code $LASTEXITCODE."
+                        }
+                    }
+                    Write-Log "HKU registry-based uninstaller completed"
+                } else {
+                    Write-Log "Could not parse UninstallString from HKU registry output"
+                    $script:HadErrors = $true
+                }
+            } else {
+                Write-Log "OneDrive uninstall registry key not found in HKU"
+            }
+        }
+        catch {
+            Write-Log "HKU registry-based uninstall failed: $($_.Exception.Message)"
+            $script:HadErrors = $true
+        }
+    } else {
+        Write-Log "Could not get user SID for '$targetUser'"
+        $script:HadErrors = $true
+    }
+}
+
+# Step 3: Always run cleanup tasks
+Write-Log "Starting cleanup tasks"
+
+# 3.1: Delete OneDrive registry keys
+$hklmUninstallKey = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe"
+Write-Log "Deleting HKLM OneDrive uninstall registry key: $hklmUninstallKey"
+reg.exe delete $hklmUninstallKey /f 2>&1 | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    Write-Log "HKLM registry key deleted successfully"
+} else {
+    Write-Log "HKLM registry key not found or already deleted"
+}
+
+if ($targetUser -and $userSID) {
+    $uninstallKey = "HKU\$userSID\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe"
+    Write-Log "Deleting HKU OneDrive uninstall registry key: $uninstallKey"
+    reg.exe delete $uninstallKey /f 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Log "HKU registry key deleted successfully"
+    } else {
+        Write-Log "HKU registry key not found or already deleted"
+    }
+}
+
+# 3.1b: Delete OneDrive main registry keys
+Write-Log "Deleting OneDrive configuration registry keys"
+
+$systemRegistryPaths = @(
+    "HKLM\SOFTWARE\Microsoft\OneDrive",
+    "HKLM\SOFTWARE\WOW6432Node\Microsoft\OneDrive"
+)
+
+foreach ($path in $systemRegistryPaths) {
+    Write-Log "Deleting registry key: $path"
+    reg.exe delete $path /f 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Log "Registry key deleted successfully: $path"
+    } else {
+        Write-Log "Registry key not found or already deleted: $path"
+    }
+}
+
+if ($targetUser) {
+    if (-not $userSID) {
+        $userSID = Get-UserSID -Username $targetUser
+    }
+
+    if ($userSID) {
+        Write-Log "Deleting user-specific OneDrive registry keys for user: $targetUser (SID: $userSID)"
+        $userRegistryPaths = @(
+            "HKU\$userSID\SOFTWARE\Microsoft\OneDrive",
+            "HKU\$userSID\SOFTWARE\WOW6432Node\Microsoft\OneDrive"
+        )
+
+        foreach ($path in $userRegistryPaths) {
+            Write-Log "Deleting registry key: $path"
+            reg.exe delete $path /f 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "Registry key deleted successfully: $path"
+            } else {
+                Write-Log "Registry key not found or already deleted: $path"
+            }
+        }
+    } else {
+        Write-Log "Could not get user SID for '$targetUser', skipping user-specific registry cleanup"
+    }
+}
+
+# 3.2: Delete OneDrive AppData folder
+if ($userProfilePath) {
+    $currentUserOneDrivePath = Join-Path $userProfilePath "AppData\Local\Microsoft\OneDrive"
+    Write-Log "Checking OneDrive AppData folder: $currentUserOneDrivePath"
+
+    if (Test-Path $currentUserOneDrivePath) {
+        Write-Log "Removing OneDrive folder for user: $targetUser"
+        try {
+            takeown /f $currentUserOneDrivePath /r /d y 2>&1 | Out-Null
+            icacls $currentUserOneDrivePath /grant "${env:USERNAME}:F" /t 2>&1 | Out-Null
+            Remove-Item $currentUserOneDrivePath -Recurse -Force -ErrorAction Stop
+            if (Test-Path $currentUserOneDrivePath) {
+                throw "OneDrive AppData folder still exists after removal."
+            }
+            Write-Log "OneDrive folder removed for user: $targetUser"
+        }
+        catch {
+            Write-Log "Failed to remove OneDrive folder for user: $targetUser - $($_.Exception.Message)"
+            $script:HadErrors = $true
+        }
+    } else {
+        Write-Log "OneDrive AppData folder not found"
+    }
+}
+
+# 3.3: Delete OneDrive Start Menu entry
+if ($userProfilePath) {
+    $startMenuPath = Join-Path $userProfilePath "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk"
+    Write-Log "Checking OneDrive Start Menu shortcut: $startMenuPath"
+
+    if (Test-Path $startMenuPath) {
+        Remove-Item $startMenuPath -Force -ErrorAction SilentlyContinue
+        Write-Log "OneDrive Start Menu shortcut removed"
+    } else {
+        Write-Log "OneDrive Start Menu shortcut not found"
+    }
+}
+
+if (Test-Path "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk") {
+    Remove-Item "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk" -Force -ErrorAction SilentlyContinue
+    Write-Log "System-wide Start Menu shortcut removed"
+}
+
+# 3.4: Remove remaining OneDrive program/data folders while preserving Windows setup binaries
+$systemPaths = @(
+    "C:\Program Files\Microsoft OneDrive",
+    "C:\ProgramData\Microsoft OneDrive"
+)
+
+foreach ($path in $systemPaths) {
+    if (Test-Path $path) {
+        Write-Log "Removing: $path"
+        if (Test-Path $path -PathType Container) {
+            takeown /f $path /r /d y 2>&1 | Out-Null
+            icacls $path /grant "${env:USERNAME}:F" /t 2>&1 | Out-Null
+        } else {
+            takeown /f $path 2>&1 | Out-Null
+            icacls $path /grant "${env:USERNAME}:F" 2>&1 | Out-Null
+        }
+        Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$remaining = $systemPaths | Where-Object { Test-Path $_ }
+if ($remaining) {
+    Write-Log "Some files locked, scheduling for deletion on reboot"
+    foreach ($path in $remaining) {
+        if (Test-Path $path -PathType Container) {
+            Get-ChildItem $path -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                Schedule-DeleteOnReboot $_.FullName | Out-Null
+            }
+        } else {
+            Schedule-DeleteOnReboot $path | Out-Null
+        }
+        Write-Log "Scheduled for reboot deletion: $path"
+    }
+}
+
+# 3.5: Delete OneDrive scheduled tasks
+# Remove OneDrive from Explorer navigation pane if the namespace entry exists
+$oneDriveClsid = "{018D5C66-4533-4307-9B53-224DE2ED1FE6}"
+foreach ($key in @(
+    "HKLM:\SOFTWARE\Classes\CLSID\$oneDriveClsid",
+    "HKLM:\SOFTWARE\Classes\WOW6432Node\CLSID\$oneDriveClsid"
+)) {
+    try {
+        if (Test-Path $key) {
+            Set-ItemProperty -Path $key -Name "System.IsPinnedToNameSpaceTree" -Value 0 -Type DWord -Force -ErrorAction Stop
+        }
+    } catch {
+        Write-Log "Failed to update OneDrive Explorer namespace entry '$key': $($_.Exception.Message)"
+        $script:HadErrors = $true
+    }
+}
+
+Write-Log "Checking for OneDrive scheduled tasks"
+try {
+    $oneDriveTasks = Get-ScheduledTask -TaskName "*OneDrive*" -ErrorAction SilentlyContinue
+    if ($oneDriveTasks) {
+        foreach ($task in $oneDriveTasks) {
+            Write-Log "Found OneDrive scheduled task: $($task.TaskName) - State: $($task.State)"
+            try {
+                Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false -ErrorAction Stop
+                Write-Log "Deleted scheduled task: $($task.TaskName)"
+            }
+            catch {
+                Write-Log "Failed to delete scheduled task: $($task.TaskName) - $($_.Exception.Message)"
+                $script:HadErrors = $true
+            }
+        }
+    } else {
+        Write-Log "No OneDrive scheduled tasks found"
+    }
+}
+catch {
+    Write-Log "Failed to check scheduled tasks: $($_.Exception.Message)"
+    $script:HadErrors = $true
+}
+
+# 3.6: Configure default user registry to prevent OneDrive auto-install
+$markerKey = "HKLM\SOFTWARE\Autounattend\OneDriveRemoval"
+$markerValue = reg.exe query $markerKey /v "DefaultUserConfigured" 2>$null
+
+if ($LASTEXITCODE -eq 0) {
+    Write-Log "Default user already configured on this machine, skipping this step."
+} else {
+    Write-Log "Configuring registry to prevent OneDrive auto-install for new users"
+    reg.exe Load HKEY_USERS\Default "C:\Users\Default\NTUSER.DAT" 2>&1 | Out-Null
+    reg.exe delete "HKU\Default\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" /v "OneDriveSetup" /f 2>&1 | Out-Null
+    reg.exe add "HKU\Default\SOFTWARE\Microsoft\OneDrive" /v "EnableTHDFFeatures" /t REG_DWORD /d "0" /f 2>&1 | Out-Null
+    # Close regedit in case it is running so we can unload the hive
+    Stop-Process -Name "regedit" -Force -ErrorAction SilentlyContinue
+    reg.exe Unload HKEY_USERS\Default 2>&1 | Out-Null
+
+    # Create marker to indicate this machine has been configured
+    reg.exe add $markerKey /v "DefaultUserConfigured" /t REG_SZ /d "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" /f 2>&1 | Out-Null
+    Write-Log "Default user configuration completed and marked"
+}
+
+if ($script:HadErrors) {
+    Write-Log "OneDrive removal completed with one or more real operation failures"
+    Write-Host "OneDrive removal completed with errors. See $logFile for details."
+    exit 1
+}
+
+Write-Log "OneDrive removal completed successfully"
+Write-Host "Done. See $logFile for details."
+exit 0
+
+'@
+
+    $oneDriveRemovalPath = Join-Path $scriptsDir "OneDriveRemoval.ps1"
+    try {
+        $oneDriveRemovalContent | Out-File -FilePath $oneDriveRemovalPath -Encoding UTF8 -Force
+        Write-Log "Created: OneDriveRemoval.ps1" "SUCCESS"
+    } catch {
+        Write-Log "Failed to create OneDriveRemoval.ps1: $($_.Exception.Message)" "ERROR"
+    }
+
+
+    # Execute removal scripts ONCE during specialize. No persistent logon/startup tasks are created.
+    $scriptsToExecute = @(
+        @{Path = "$scriptsDir\BloatRemoval.ps1"; Name = "BloatRemoval"},
+        @{Path = "$scriptsDir\OneDriveRemoval.ps1"; Name = "OneDriveRemoval"}
+    )
+
+    foreach ($script in $scriptsToExecute) {
+        if (Test-Path $script.Path) {
+            Write-Log "Executing $($script.Name) script once..." "INFO"
+            try {
+                $process = Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass -NoProfile -File `"$($script.Path)`"" -Wait -NoNewWindow -PassThru -ErrorAction Stop
+                if ($process.ExitCode -eq 0) {
+                    Write-Log "$($script.Name) execution completed with exit code 0" "SUCCESS"
+                } else {
+                    $script:CustomizationHadErrors = $true
+                    Write-Log "$($script.Name) execution failed with exit code $($process.ExitCode)" "ERROR"
+                }
+            } catch {
+                $script:CustomizationHadErrors = $true
+                Write-Log "$($script.Name) execution failed: $($_.Exception.Message)" "ERROR"
+            }
+        }
+    }
+
+    Write-Log "Windows Apps removal configuration completed" "SUCCESS"
+    # ============================================================================
+    # POWER PLAN
+    # ============================================================================
+
+    # Use the standard Windows Balanced plan. Do not force minimum CPU 100%, EPP 0,
+    # hidden processor settings, USB power overrides, or a custom Ultimate/High Performance clone.
+    Write-Log "Activating standard Windows Balanced power plan..." "INFO"
+    powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Log "Windows Balanced power plan activated" "SUCCESS"
+    } else {
+        Write-Log "Could not force Balanced plan; leaving the current Windows/OEM plan unchanged" "WARNING"
+    }
+
+    # ============================================================================
+    # POWER SETTINGS
+    # ============================================================================
+
+    Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -Name 'HibernateEnabled' -Type 'DWord' -Value 0 -Description 'Disable hibernation'
+    Set-RegistryValue -Path 'HKLM:\SYSTEM\ControlSet001\Control\Session Manager\Power' -Name 'HiberbootEnabled' -Type 'DWord' -Value 0 -Description 'Disable Fast Startup'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FlyoutMenuSettings' -Name 'ShowHibernateOption' -Type 'DWord' -Value 0 -Description 'Hide the Hibernate option from the Start Menu power menu'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FlyoutMenuSettings' -Name 'ShowLockOption' -Type 'DWord' -Value 1 -Description 'Display the Lock option in the Start Menu power button menu; Win+L and Ctrl+Alt+Del locking remain available'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FlyoutMenuSettings' -Name 'ShowSleepOption' -Type 'DWord' -Value 0 -Description 'Hide the Sleep option from the Start Menu power menu'
+
+    Write-Log "Setting hibernation to off..." "INFO"
+    powercfg /hibernate off 2>$null
+    Write-Log "Hibernation set to off" "SUCCESS"
+
+    # ============================================================================
+    # GAMING & PERFORMANCE SETTINGS
+    # ============================================================================
+
+    # Keep the Windows Print Spooler available for Microsoft Print to PDF and physical printers.
+    Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Spooler' -Name 'Start' -Type 'DWord' -Value 2 -Description 'Keep the Print Spooler service on Automatic for Microsoft Print to PDF and current/future physical printers'
+
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR' -Name 'AllowGameDVR' -Type 'DWord' -Value 0 -Description 'Record gameplay clips and take screenshots using the Xbox Game Bar overlay. Disabling reduces CPU/GPU usage and can improve frame rates'
+    Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\XblAuthManager' -Name 'Start' -Type 'DWord' -Value 3 -Description 'Provides authentication and authorization services for Xbox Live. Safe to disable if you don''t use Xbox Game Pass, Microsoft Store games, or Xbox features'
+    Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\XblGameSave' -Name 'Start' -Type 'DWord' -Value 3 -Description 'Syncs game saves to Xbox Live cloud. Only needed for Xbox Game Pass and Microsoft Store games with cloud save features'
+    Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\XboxNetApiSvc' -Name 'Start' -Type 'DWord' -Value 3 -Description 'Supports Xbox Live multiplayer networking. Required for Xbox multiplayer gaming but not needed for Steam/Epic/other gaming platforms'
+
+    $scheduledTasks = @(
+        @{ TN="\Microsoft\Windows\Customer Experience Improvement Program\Consolidator"; Action="/Disable"; Desc="Consolidates and uploads usage data as part of the Customer Experience Improvement Program. Works with the Connected User Experiences and Telemetry Service. Disable to improve privacy" },
+        @{ TN="\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip"; Action="/Disable"; Desc="Collects USB device-related telemetry for the Customer Experience Improvement Program. Disable to reduce telemetry" },
+        @{ TN="\Microsoft\Windows\Feedback\Siuf\DmClient"; Action="/Disable"; Desc="Collects feedback and diagnostic data for Microsoft. Disable to improve privacy and reduce telemetry" },
+        @{ TN="\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload"; Action="/Disable"; Desc="Downloads feedback scenarios and configuration data from Microsoft. Disable to reduce telemetry and network activity" },
+        @{ TN="\Microsoft\Windows\PI\Sqm-Tasks"; Action="/Disable"; Desc="Collects software quality metrics and reliability data for Microsoft telemetry. Disable to improve privacy" },
+        @{ TN="\Microsoft\Windows\Application Experience\MareBackup"; Action="/Disable"; Desc="Backs up Microsoft Assisted Recovery data. Disable to reduce background system activity" },
+        @{ TN="\Microsoft\Windows\Application Experience\StartupAppTask"; Action="/Disable"; Desc="Tracks and monitors startup applications for telemetry and diagnostics. Disable to reduce telemetry" },
+        @{ TN="\Microsoft\Windows\Maps\MapsUpdateTask"; Action="/Disable"; Desc="Updates offline maps data for the Windows Maps app. Disable if you don''t use the Maps app to save bandwidth and storage" },
+        # Kept enabled for disk-health/recovery reliability.
+        # @{ TN="\Microsoft\Windows\Autochk\Proxy"; Action="/Disable"; Desc="Performs disk checking operations and collects diagnostic data. Consider keeping enabled for disk health monitoring" },
+        @{ TN="\Microsoft\Windows\Shell\FamilySafetyMonitor"; Action="/Disable"; Desc="Monitors family safety settings and usage. Disable if you don''t use family safety features" },
+        @{ TN="\Microsoft\Windows\Power Efficiency Diagnostics\AnalyzeSystem"; Action="/Disable"; Desc="Analyzes system power consumption and collects energy efficiency data. Disable to reduce telemetry and background analysis" }
+    )
+
+    Write-Log "Applying scheduled task settings..." "INFO"
+    $processedCount = 0
+    foreach ($task in $scheduledTasks) {
+        try {
+            $result = & cmd.exe /c "schtasks /Change /TN `"$($task.TN)`" $($task.Action)" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "$($task.Desc)" "SUCCESS"
+                $processedCount++
+            } else {
+                Write-Log "Task command failed for: $($task.Desc)" "WARNING"
+            }
+        } catch {
+            Write-Log "Failed to process task: $($task.Desc) - $($_.Exception.Message)" "ERROR"
+        }
+    }
+    Write-Log "Processed $processedCount scheduled task settings" "SUCCESS"
+
+
+    # ============================================================================
+    # NOTIFICATIONS SETTINGS
+    # ============================================================================
+
+    Set-RegistryValue -Path 'HKLM:\Software\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name 'DisableEnhancedNotifications' -Type 'DWord' -Value 1 -Description 'Hide non-critical Windows Security notifications while keeping critical security alerts available'
+
+    # ============================================================================
+    # PRIVACY & SECURITY SETTINGS
+    # ============================================================================
+
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'ConsentPromptBehaviorAdmin' -Type 'DWord' -Value 5 -Description 'Use normal UAC consent prompts for administrators for safer, more compatible elevation behavior'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'PromptOnSecureDesktop' -Type 'DWord' -Value 1 -Description 'Show UAC prompts on the secure desktop for normal Windows security and compatibility behavior'
+    Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker' -Name 'PreventDeviceEncryption' -Type 'DWord' -Value 1 -Description 'Prevents Windows from automatically encrypting your device with BitLocker without user consent'
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowWiFiHotSpotReporting' -Name 'Value' -Type 'DWord' -Value 0 -Description 'Disable Wi-Fi hotspot reporting'
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\PolicyManager\default\WiFi\AllowAutoConnectToWiFiSenseHotspots' -Name 'Value' -Type 'DWord' -Value 0 -Description 'Disable automatic connection to suggested Wi-Fi Sense hotspots'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance' -Name 'MaintenanceDisabled' -Type 'DWord' -Value 0 -Description 'Keep Windows automatic maintenance available to avoid long-term servicing/reliability issues'
+    Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance' -Name 'fAllowToGetHelp' -Type 'DWord' -Value 0 -Description 'Choose if other people can connect to your computer remotely to provide technical support'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'DisableLockWorkstation' -Type 'DWord' -Value 0 -Description 'Keep Windows workstation locking available (Win+L, Start menu, Ctrl+Alt+Del)'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo' -Name 'DisabledByGroupPolicy' -Type 'DWord' -Value 1 -Description 'Windows generates a unique advertising ID that apps use to track your activity and deliver personalized ads based on your behavior across different apps'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\InputPersonalization' -Name 'AllowInputPersonalization' -Type 'DWord' -Value 0 -Description 'Disable online speech recognition services at device policy level'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection' -Name 'AllowTelemetry' -Type 'DWord' -Value 0 -Description 'Send diagnostic data to Microsoft to help improve Windows and keep it secure'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection' -Name 'MaxTelemetryAllowed' -Type 'DWord' -Value 0 -Description 'Send diagnostic data to Microsoft to help improve Windows and keep it secure'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'AllowTelemetry' -Type 'DWord' -Value 0 -Description 'Send diagnostic data to Microsoft to help improve Windows and keep it secure'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppCompat' -Name 'AITEnable' -Type 'DWord' -Value 0 -Description 'Send diagnostic data to Microsoft to help improve Windows and keep it secure'
+    Set-RegistryValue -Path 'HKLM:\Software\Policies\Microsoft\Windows\CloudContent' -Name 'DisableTailoredExperiencesWithDiagnosticData' -Type 'DWord' -Value 1 -Description 'Do not use diagnostic data for tailored experiences'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'DoNotShowFeedbackNotifications' -Type 'DWord' -Value 1 -Description 'Let Windows ask you to provide feedback on experiences in Windows'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'PublishUserActivities' -Type 'DWord' -Value 0 -Description 'Allows you to jump back into what you were doing with apps, docs, or other activities on startup'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'AllowCortana' -Type 'DWord' -Value 0 -Description 'Enables Microsoft''s Cortana virtual assistant for voice commands and searches'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location' -Name 'Value' -Type 'String' -Value 'Deny' -Description 'Deny Windows and apps access to device location'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors' -Name 'DisableLocation' -Type 'DWord' -Value 1 -Description 'Disable Windows location services by policy'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\userAccountInformation' -Name 'Value' -Type 'String' -Value 'Deny' -Description 'Deny apps access to account information'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\appDiagnostics' -Name 'Value' -Type 'String' -Value 'Deny' -Description 'Deny apps access to app diagnostic information'
+    # Privacy hardening: cloud/roaming/activity and app permissions
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'EnableActivityFeed' -Type 'DWord' -Value 0 -Description 'Disable Activity Feed and cloud roaming of activities'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'UploadUserActivities' -Type 'DWord' -Value 0 -Description 'Prevent uploading user activity history'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'AllowCrossDeviceClipboard' -Type 'DWord' -Value 0 -Description 'Disable clipboard synchronization across devices'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' -Name 'DisableWindowsConsumerFeatures' -Type 'DWord' -Value 1 -Description 'Disable Microsoft consumer experiences and promotional app suggestions'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Name 'DisablePrivacyExperience' -Type 'DWord' -Value 1 -Description 'Do not relaunch the privacy settings experience after first logon or upgrades'
+
+    # Force-deny nonessential Windows app access. Camera and microphone remain user-controlled for OBS/videocalls.
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -Name 'LetAppsAccessAccountInfo' -Type 'DWord' -Value 2 -Description 'Force-deny Windows apps access to account information'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -Name 'LetAppsAccessCalendar' -Type 'DWord' -Value 2 -Description 'Force-deny Windows apps access to calendar'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -Name 'LetAppsAccessCallHistory' -Type 'DWord' -Value 2 -Description 'Force-deny Windows apps access to call history'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -Name 'LetAppsAccessContacts' -Type 'DWord' -Value 2 -Description 'Force-deny Windows apps access to contacts'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -Name 'LetAppsAccessEmail' -Type 'DWord' -Value 2 -Description 'Force-deny Windows apps access to email'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -Name 'LetAppsAccessLocation' -Type 'DWord' -Value 2 -Description 'Force-deny Windows apps access to location'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -Name 'LetAppsAccessMessaging' -Type 'DWord' -Value 2 -Description 'Force-deny Windows apps access to messaging'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -Name 'LetAppsAccessNotifications' -Type 'DWord' -Value 2 -Description 'Force-deny Windows apps access to notifications'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -Name 'LetAppsAccessRadios' -Type 'DWord' -Value 2 -Description 'Force-deny Windows apps control of radios'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -Name 'LetAppsAccessTasks' -Type 'DWord' -Value 2 -Description 'Force-deny Windows apps access to tasks'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -Name 'LetAppsGetDiagnosticInfo' -Type 'DWord' -Value 2 -Description 'Force-deny Windows apps access to diagnostic information about other apps'
+
+    # Windows on-device generative AI / Recall / Copilot privacy
+    # ProcMon verified 2026-08-31: device toggle writes HKLM ConsentStore\systemAIModels Value (REG_SZ) = Deny
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\systemAIModels' -Name 'Value' -Type 'String' -Value 'Deny' -Description 'Disable device-wide access to Windows-provided on-device text and image generation models'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' -Name 'AllowRecallEnablement' -Type 'DWord' -Value 0 -Description 'Prevent Recall from being enabled and request removal of Recall bits where supported'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' -Name 'DisableAIDataAnalysis' -Type 'DWord' -Value 1 -Description 'Disable saving screen snapshots for Recall'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' -Name 'DisableClickToDo' -Type 'DWord' -Value 1 -Description 'Disable Click to Do where supported'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' -Name 'DisableSettingsAgent' -Type 'DWord' -Value 1 -Description 'Disable AI agentic search in Settings where supported'
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Paint' -Name 'DisableCocreator' -Type 'DWord' -Value 1 -Description 'Keep Paint installed but disable Cocreator'
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Paint' -Name 'DisableGenerativeFill' -Type 'DWord' -Value 1 -Description 'Keep Paint installed but disable Generative Fill'
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Paint' -Name 'DisableImageCreator' -Type 'DWord' -Value 1 -Description 'Keep Paint installed but disable Image Creator'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\WindowsNotepad' -Name 'DisableAIFeatures' -Type 'DWord' -Value 1 -Description 'Keep Notepad installed but disable its AI features'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\OneDrive' -Name 'KFMBlockOptIn' -Type 'DWord' -Value 1 -Description 'Prevents OneDrive from automatically backing up important folders (Documents, Pictures, Desktop, etc.)'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' -Name 'DisableFileSyncNGSC' -Type 'DWord' -Value 1 -Description 'Hard-disable OneDrive file sync integration on this PC'
+
+    # ============================================================================
+    # SOUND SETTINGS
+    # ============================================================================
+
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\BootAnimation' -Name 'DisableStartupSound' -Type 'DWord' -Value 0 -Description 'Play the Windows startup sound when your computer boots up'
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\EditionOverrides' -Name 'UserSetting_DisableStartupSound' -Type 'DWord' -Value 0 -Description 'Play the Windows startup sound when your computer boots up'
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\SpeechOneCore\Settings' -Name 'AgentActivationEnabled' -Type 'DWord' -Value 0 -Description 'Allow apps to listen and respond to voice commands like "Hey Cortana"'
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\SpeechOneCore\Settings' -Name 'AgentActivationLastUsed' -Type 'DWord' -Value 0 -Description 'Remember and apply the most recently used voice activation configuration'
+
+    # ============================================================================
+    # WINDOWS UPDATE SETTINGS
+    # ============================================================================
+
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization' -Name 'DODownloadMode' -Type 'DWord' -Value 0 -Description 'Use HTTP only for Delivery Optimization and disable peer-to-peer update sharing'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings' -Name 'IsContinuousInnovationOptedIn' -Type 'DWord' -Value 0 -Description 'Be among the first to get the latest non-security updates, fixes, and improvements as they roll out'
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\WindowsUpdate\UX\Settings' -Name 'AllowMUUpdateService' -Type 'DWord' -Value 0 -Description 'Get Microsoft Office and other updates together with Windows updates'
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\WindowsUpdate\UX\Settings' -Name 'IsExpedited' -Type 'DWord' -Value 0 -Description 'Restart as soon as possible (even during active hours) to finish updating'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name 'NoAutoRebootWithLoggedOnUsers' -Type 'DWord' -Value 1 -Description 'Prevents automatic restarts after installing updates when users are logged on'
+    Remove-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'SetUpdateNotificationLevel' -Description 'Show or hide notifications about available updates and update progress'
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\WindowsUpdate\UX\Settings' -Name 'RestartNotificationsAllowed2' -Type 'DWord' -Value 0 -Description 'Show notification when your device requires a restart to finish updating'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings' -Name 'AllowAutoWindowsUpdateDownloadOverMeteredNetwork' -Type 'DWord' -Value 0 -Description 'Allow Windows to download updates when using mobile hotspots or data-limited connections'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'ExcludeWUDriversInQualityUpdate' -Type 'DWord' -Value 1 -Description 'Prevent Windows from automatically downloading and installing hardware driver updates'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore' -Name 'AutoDownload' -Type 'DWord' -Value 4 -Description 'Allow automatic Microsoft Store app/component updates; Store is retained for AppX/winget/system compatibility'
+
+    # ============================================================================
+    # EXPLORER SETTINGS
+    # ============================================================================
+
+    Remove-RegistryKey -Path 'HKCR:\*\shell\TakeOwnership' -Description 'Ensure the Take Ownership context-menu entry is not present'
+    try {
+        $regContent_explorer_take_ownership = @'
+Windows Registry Editor Version 5.00
+
+[-HKEY_CLASSES_ROOT\*\shell\TakeOwnership]
+[-HKEY_CLASSES_ROOT\*\shell\runas]
+[-HKEY_CLASSES_ROOT\Directory\shell\TakeOwnership]
+[-HKEY_CLASSES_ROOT\Drive\shell\runas]
+
+'@
+        $tempRegFile = Join-Path $env:TEMP "Autounattend_explorer-take-ownership_$((Get-Date).Ticks).reg"
+        $regContent_explorer_take_ownership | Out-File -FilePath $tempRegFile -Encoding Unicode -Force
+        reg import "$tempRegFile" 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Ensures Take Ownership context-menu entries are absent" "SUCCESS"
+        } else {
+            Write-Log "Failed to import registry content for Ensures Take Ownership context-menu entries are absent" "ERROR"
+        }
+        Remove-Item $tempRegFile -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Log "Error processing registry content for Ensures Take Ownership context-menu entries are absent: $($_.Exception.Message)" "ERROR"
+    }
+
+    Remove-RegistryValue -Path 'HKCR:\AllFilesystemObjects\shell\Windows.ShowFileExtensions' -Name 'ExplorerCommandHandler' -Description 'Adds a right-click menu option to quickly toggle file extension visibility in File Explorer (only visible on the Classic Context Menu or Show More Options Menu in Windows 11)'
+    try {
+        $regContent_explorer_context_menu_toggle_extensions = @'
+Windows Registry Editor Version 5.00
+
+[-HKEY_CLASSES_ROOT\AllFilesystemObjects\shell\Windows.ShowFileExtensions]
+[-HKEY_CLASSES_ROOT\Directory\Background\shell\Windows.ShowFileExtensions]
+
+'@
+        $tempRegFile = Join-Path $env:TEMP "Autounattend_explorer-context-menu-toggle-extensions_$((Get-Date).Ticks).reg"
+        $regContent_explorer_context_menu_toggle_extensions | Out-File -FilePath $tempRegFile -Encoding Unicode -Force
+        reg import "$tempRegFile" 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Adds a right-click menu option to quickly toggle file extension visibility in File Explorer (only visible on the Classic Context Menu or Show More Options Menu in Windows 11)" "SUCCESS"
+        } else {
+            Write-Log "Failed to import registry content for Adds a right-click menu option to quickly toggle file extension visibility in File Explorer (only visible on the Classic Context Menu or Show More Options Menu in Windows 11)" "ERROR"
+        }
+        Remove-Item $tempRegFile -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Log "Error processing registry content for Adds a right-click menu option to quickly toggle file extension visibility in File Explorer (only visible on the Classic Context Menu or Show More Options Menu in Windows 11): $($_.Exception.Message)" "ERROR"
+    }
+
+    Remove-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked' -Name '{9F156763-7844-4DC4-B2B1-901F640F5155}' -Description 'Displays the Windows Terminal option when right-clicking folders and backgrounds in File Explorer'
+    Remove-RegistryKey -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\NameSpace\{0DB7E03F-FC29-4DC6-9020-FF41B59E513A}' -Description 'Display the 3D Objects folder alongside Documents, Pictures, and other default folders'
+    Remove-RegistryKey -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\NameSpace\{0DB7E03F-FC29-4DC6-9020-FF41B59E513A}' -Description 'Display the 3D Objects folder alongside Documents, Pictures, and other default folders'
+    Remove-RegistryKey -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\{e88865ea-0e1c-4e20-9aa6-edcd0212c87c}' -Description 'Display the Gallery folder in the navigation pane for quick access to all your photos and videos'
+    Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name 'LongPathsEnabled' -Type 'DWord' -Value 1 -Description 'Enables support for file paths with up to 32,767 characters instead of the traditional 260-character limit'
+
+    # ============================================================================
+    # START MENU SETTINGS
+    # ============================================================================
+
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'HideRecommendedSection' -Type 'DWord' -Value 1 -Description 'Show or hide the lower section that displays recently opened files and suggested apps. Hiding this section also removes Windows Spotlight from the lock screen and suggested content in the Settings app'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start' -Name 'HideRecommendedSection' -Type 'DWord' -Value 1 -Description 'Show or hide the lower section that displays recently opened files and suggested apps. Hiding this section also removes Windows Spotlight from the lock screen and suggested content in the Settings app'
+    Set-RegistryValue -Path 'HKLM:\Software\Policies\Microsoft\Windows\Explorer' -Name 'DisableSearchBoxSuggestions' -Type 'DWord' -Value 1 -Description 'Prevent web results from Bing from appearing when searching in the Start Menu, showing only local files and apps'
+
+    # ============================================================================
+    # TASKBAR SETTINGS
+    # ============================================================================
+
+    Set-RegistryValue -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer' -Name 'HideSCAMeetNow' -Type 'DWord' -Value 1 -Description 'Controls Meet Now button visibility in the system tray'
+    Set-RegistryValue -Path 'HKLM:\Software\Policies\Microsoft\Dsh' -Name 'AllowNewsAndInterests' -Type 'DWord' -Value 0 -Description 'Show the Widgets button that displays personalized news, weather, calendar, and other information'
+    Set-RegistryValue -Path 'HKLM:\Software\Policies\Microsoft\Windows\Windows Feeds' -Name 'EnableFeeds' -Type 'DWord' -Value 0 -Description 'Show the News and Interests widget that displays headlines, weather, stocks, and other personalized content'
+
+    # ============================================================================
+    # START MENU LAYOUT
+    # ============================================================================
+
+    Write-Log "Configuring clean Start Menu layout..." "INFO"
+
+    $buildNumber = [System.Environment]::OSVersion.Version.Build
+    Write-Log "Detected Windows build: $buildNumber" "INFO"
+
+    if ($buildNumber -ge 22000) {
+        Write-Log "Applying Windows 11 clean Start Menu layout" "INFO"
+        try {
+            Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start' -Name 'ConfigureStartPins' -Type 'String' -Value '{"applyOnce":true,"pinnedList":[]}' -Description 'Clean Start Menu once, then preserve user pin changes'
+            Write-Log "Windows 11 Start Menu layout applied successfully" "SUCCESS"
+        } catch {
+            Write-Log "Failed to apply Windows 11 Start Menu layout: $($_.Exception.Message)" "ERROR"
+        }
+    }
+    else {
+        Write-Log "Applying Windows 10 clean Start Menu layout" "INFO"
+        try {
+            # Step 1: Create directory
+            $ShellPath = "C:\Users\Default\AppData\Local\Microsoft\Windows\Shell"
+            New-Item -Path $ShellPath -ItemType Directory -Force | Out-Null
+            Write-Log "Created directory: $ShellPath" "INFO"
+
+            # Step 2: Create XML content
+            $xmlContent = @'
+<?xml version="1.0" encoding="utf-8"?>
+<LayoutModificationTemplate Version="1" xmlns="http://schemas.microsoft.com/Start/2014/LayoutModification">
+    <LayoutOptions StartTileGroupCellWidth="6" />
+    <DefaultLayoutOverride>
+        <StartLayoutCollection>
+            <StartLayout GroupCellWidth="6" xmlns="http://schemas.microsoft.com/Start/2014/FullDefaultLayout" />
+        </StartLayoutCollection>
+    </DefaultLayoutOverride>
+</LayoutModificationTemplate>
+'@
+
+            # Step 3: Save XML file
+            $XmlPath = "$ShellPath\LayoutModification.xml"
+            $xmlContent | Out-File -FilePath $XmlPath -Encoding UTF8
+            Write-Log "SUCCESS: Clean Start Menu Template created at $XmlPath" "SUCCESS"
+        } catch {
+            Write-Log "Failed to create Start Menu Template: $($_.Exception.Message)" "ERROR"
+        }
+    }
+
+
+    # ============================================================================
+    # USER CUSTOMIZATIONS ONE-SHOT SCHEDULED TASK
+    # ============================================================================
+
+    Write-Log "Registering one-shot UserCustomizations scheduled task..." "INFO"
+    try {
+        Register-AutounattendUserCustomizationsTask
+        Write-Log "Registered and verified scheduled task: AutounattendUserCustomizations" "SUCCESS"
+    } catch {
+        Write-Log "Failed to register UserCustomizations task: $($_.Exception.Message)" "ERROR"
+    }
+
+
+    # ============================================================================
+    # ADD YOUR SYSTEM WIDE POWERSHELL SCRIPT CONTENTS BELOW
+    # ============================================================================
+
+    # Start here
+
+    # End here
+
+}
+
+if ($UserCustomizations) {
+
+    $runningAsSystem = ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18')
+
+    if ($runningAsSystem) {
+        # ================================================================
+        # SYSTEM path: detect user, check marker, launch child as user
+        # ================================================================
+        Write-Log "UserCustomizations running as SYSTEM, detecting logged-in user..." "INFO"
+
+        if (-not (Test-Path "HKU:\")) {
+            New-PSDrive -PSProvider Registry -Name HKU -Root HKEY_USERS -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        $targetUser = $null
+        for ($attempt = 1; $attempt -le 12; $attempt++) {
+            $targetUser = Get-TargetUser
+            if ($targetUser) { break }
+            Write-Log "Waiting for user login (attempt $attempt/12)..." "INFO"
+            Start-Sleep -Seconds 10
+        }
+        if (-not $targetUser) {
+            Write-Log "No logged-in user detected after 2 minutes, will retry at next logon" "WARNING"
+            exit 1
+        }
+
+        $targetUserSID = Get-UserSID -Username $targetUser
+        if (-not $targetUserSID) {
+            Write-Log "Failed to get SID for user: $targetUser" "ERROR"
+            exit 1
+        }
+
+        Write-Log "Target user: $targetUser (SID: $targetUserSID)" "INFO"
+
+        # Check completion marker via HKU (no PSDrive remap needed)
+        $markerPath = "HKU:\$targetUserSID\Software\Autounattend"
+        $markerName = "UserCustomizationsApplied"
+        $alreadyApplied = $false
+
+        try {
+            if (Test-Path $markerPath) {
+                $value = Get-ItemProperty -Path $markerPath -Name $markerName -ErrorAction SilentlyContinue
+                if ($value.$markerName -eq 1) {
+                    $alreadyApplied = $true
+                }
+            }
+        } catch { }
+
+        function Register-AutounattendCleanupTask {
+            $cleanupCommand = "Unregister-ScheduledTask -TaskName 'AutounattendCleanup' -TaskPath '\Autounattend\' -Confirm:`$false -ErrorAction SilentlyContinue; Start-Sleep -Seconds 5; Remove-Item -LiteralPath 'C:\ProgramData\Autounattend' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath 'HKLM:\SOFTWARE\Autounattend' -Recurse -Force -ErrorAction SilentlyContinue"
+            $cleanupAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -Command `"$cleanupCommand`""
+            $cleanupTrigger = New-ScheduledTaskTrigger -AtStartup
+            $cleanupSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0
+            $cleanupPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+            Register-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -Action $cleanupAction -Trigger $cleanupTrigger -Settings $cleanupSettings -Principal $cleanupPrincipal -Force -ErrorAction Stop | Out-Null
+        }
+
+        if ($alreadyApplied) {
+            Write-Log "User customizations have already been applied for this user" "INFO"
+            Write-Log "To re-apply, delete: HKCU\Software\Autounattend\$markerName" "INFO"
+            Write-Log "No restart needed - customizations were already applied" "INFO"
+
+            $userTaskRemoved = $false
+            try {
+                Unregister-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -Confirm:$false -ErrorAction Stop
+                $remainingTask = Get-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -ErrorAction SilentlyContinue
+                if ($remainingTask) {
+                    throw "AutounattendUserCustomizations is still registered after the unregister attempt."
+                }
+                $userTaskRemoved = $true
+                Write-Log "Removed one-shot user customization task and verified that it no longer exists" "SUCCESS"
+            } catch {
+                $script:CustomizationHadErrors = $true
+                Write-Log "Could not safely remove the one-shot user customization task during recovery: $($_.Exception.Message)" "ERROR"
+            }
+
+            if ($userTaskRemoved) {
+                $cleanupTaskVerified = $false
+                try {
+                    Register-AutounattendCleanupTask
+                    $cleanupTask = Get-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -ErrorAction Stop
+                    if (-not $cleanupTask) {
+                        throw "AutounattendCleanup was not found after registration."
+                    }
+                    $cleanupTaskVerified = $true
+                    Write-Log "Registered and verified one-shot setup cleanup task" "SUCCESS"
+                } catch {
+                    $script:CustomizationHadErrors = $true
+                    Write-Log "Could not register or verify the cleanup task during recovery: $($_.Exception.Message)" "ERROR"
+                }
+
+                if (-not $cleanupTaskVerified) {
+                    try {
+                        Register-AutounattendUserCustomizationsTask
+                        $restoredTask = Get-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -ErrorAction Stop
+                        if (-not $restoredTask) {
+                            throw "AutounattendUserCustomizations was not found after the restore attempt."
+                        }
+                        Write-Log "Restored and verified one-shot user customization task so recovery can retry at next logon" "SUCCESS"
+                    } catch {
+                        Write-Log "Could not restore the one-shot user customization task after cleanup failure: $($_.Exception.Message)" "ERROR"
+                    }
+                }
+            }
+        } else {
+            Write-Log "Launching child process as interactive user to apply customizations..." "INFO"
+            # Grant user write access to log file so child process can log
+            icacls $LogPath /grant "${targetUser}:(M)" 2>&1 | Out-Null
+            $scriptPath = $MyInvocation.MyCommand.Path
+            $cmdLine = "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"$scriptPath`" -UserCustomizations"
+            $success = Start-ProcessAsUser -CommandLine $cmdLine
+
+            if ($success) {
+                Write-Log "Child process completed successfully" "SUCCESS"
+
+                # This task is intentionally one-shot. Remove it after successful HKCU customization.
+                try {
+                    Unregister-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -Confirm:$false -ErrorAction Stop
+                    $remainingTask = Get-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -ErrorAction SilentlyContinue
+                    if ($remainingTask) {
+                        throw "AutounattendUserCustomizations is still registered after the unregister attempt."
+                    }
+                    Write-Log "Removed one-shot user customization task and verified that it no longer exists" "SUCCESS"
+
+                    # The completion marker is no longer needed once the task has been removed.
+                    if (Test-Path "HKU:\$targetUserSID\Software\Autounattend") {
+                        Remove-Item -Path "HKU:\$targetUserSID\Software\Autounattend" -Recurse -Force -ErrorAction Stop
+                    }
+                } catch {
+                    Write-Log "Could not safely remove the one-shot user customization task/marker: $($_.Exception.Message)" "ERROR"
+                    exit 1
+                }
+
+                # Clean the temporary setup scripts/logs on next startup as SYSTEM, then delete the cleanup task itself.
+                try {
+                    Register-AutounattendCleanupTask
+                    Write-Log "Registered one-shot setup cleanup task" "SUCCESS"
+                } catch {
+                    Write-Log "Could not register cleanup task: $($_.Exception.Message)" "WARNING"
+                }
+
+                Write-Log "Rebooting system to apply user customizations..." "INFO"
+                shutdown.exe /r /t 20
+            } else {
+                Write-Log "Child process failed or timed out - will retry at next logon" "ERROR"
+                exit 1
+            }
+        }
+    } else {
+        # ================================================================
+        # User path: apply HKCU entries (natural resolution, no remap)
+        # ================================================================
+        Write-Log "UserCustomizations running as user" "INFO"
+
+        $markerPath = "HKCU:\Software\Autounattend"
+        $markerName = "UserCustomizationsApplied"
+        $alreadyApplied = $false
+
+        try {
+            if (Test-Path $markerPath) {
+                $value = Get-ItemProperty -Path $markerPath -Name $markerName -ErrorAction SilentlyContinue
+                if ($value.$markerName -eq 1) {
+                    $alreadyApplied = $true
+                }
+            }
+        } catch { }
+
+        if ($alreadyApplied) {
+            Write-Log "User customizations have already been applied for this user" "INFO"
+            Write-Log "To re-apply, delete: $markerPath\$markerName" "INFO"
+        } else {
+            Write-Log "Applying user customizations for the first time..." "INFO"
+
+
+            # ============================================================================
+            # GAMING & PERFORMANCE SETTINGS
+            # ============================================================================
+
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AutoGameModeEnabled' -Type 'DWord' -Value 1 -Description 'Optimize your PC for play by turning things off in the background'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Mouse' -Name 'MouseSpeed' -Type 'String' -Value '0' -Description 'Adjust cursor speed based on movement velocity (mouse acceleration). Most competitive gamers disable this for consistent aiming in FPS games'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Search\Preferences' -Name 'WholeFileSystem' -Type 'DWord' -Value 0 -Description 'Search your entire file system instead of only indexed locations. This provides more complete results but is significantly slower than indexed search and increases disk activity'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Desktop' -Name 'JPEGImportQuality' -Type 'DWord' -Value 100 -Description 'Allow Windows to compress wallpapers to save disk space and improve performance. Only affects images in JPEG format.'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Desktop' -Name 'MenuShowDelay' -Type 'String' -Value '0' -Description 'Add a brief delay before displaying menus (400ms - Windows default), or show them instantly (0ms) for faster navigation'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'MultiTaskingAltTabFilter' -Type 'DWord' -Value 3 -Description 'Show only traditional open windows in Alt+Tab instead of including Microsoft Edge tabs and other Windows suggestions'
+            Remove-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\DWM' -Name 'CompositionPolicy' -Description 'Enable visual effects managed by the Desktop Window Manager. Disabling may provide minor performance gains on older hardware but will break Aero effects'
+            Set-RegistryValue -Path 'HKCU:\System\GameConfigStore' -Name 'GameDVR_Enabled' -Type 'DWord' -Value 0 -Description 'Record gameplay clips and take screenshots using the Xbox Game Bar overlay. Disabling reduces CPU/GPU usage and can improve frame rates'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR' -Name 'AppCaptureEnabled' -Type 'DWord' -Value 0 -Description 'Record gameplay clips and take screenshots using the Xbox Game Bar overlay. Disabling reduces CPU/GPU usage and can improve frame rates'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'UseNexusForGameBarEnabled' -Type 'DWord' -Value 0 -Description 'Allow your Xbox/compatible controller to open Game Bar by pressing the Xbox button. Disable to prevent accidental Game Bar activation during gaming'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'ShowStartupPanel' -Type 'DWord' -Value 0 -Description 'Show tips and hints about Game Bar features when opening the overlay. Disabling reduces distractions during gameplay'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name 'VisualFXSetting' -Type 'DWord' -Value 3 -Description 'Choose how Windows displays visual effects'
+            Set-BinaryBit -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -ByteIndex 4 -BitMask 0x02 -SetBit $False -Description 'Enables animation effects for controls and UI elements'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name 'MinAnimate' -Type 'String' -Value '0' -Description 'Shows smooth animation when windows are minimized or maximized'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'TaskbarAnimations' -Type 'DWord' -Value 0 -Description 'Controls taskbar animation effects for opening, closing, and switching windows'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\DWM' -Name 'EnableAeroPeek' -Type 'DWord' -Value 1 -Description 'Allows peeking at desktop when hovering over Show Desktop button'
+            Set-BinaryBit -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -ByteIndex 0 -BitMask 0x02 -SetBit $False -Description 'Animates menus when they appear using fade or slide effects'
+            Set-BinaryBit -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -ByteIndex 1 -BitMask 0x08 -SetBit $False -Description 'Animates tooltips when they appear using fade or slide effects'
+            Set-BinaryBit -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -ByteIndex 1 -BitMask 0x04 -SetBit $False -Description 'Fades menu items after selection before closing the menu'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\DWM' -Name 'AlwaysHibernateThumbnails' -Type 'DWord' -Value 0 -Description 'Saves thumbnail previews of taskbar windows for faster display'
+            Set-BinaryBit -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -ByteIndex 1 -BitMask 0x20 -SetBit $False -Description 'Displays shadow effect underneath the mouse cursor'
+            Set-BinaryBit -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -ByteIndex 2 -BitMask 0x04 -SetBit $False -Description 'Displays shadow effects underneath windows'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'IconsOnly' -Type 'DWord' -Value 0 -Description 'Displays image and document previews instead of generic file icons'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ListviewAlphaSelect' -Type 'DWord' -Value 1 -Description 'Display a semi-transparent selection box when dragging to select multiple files or items'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Desktop' -Name 'DragFullWindows' -Type 'String' -Value '1' -Description 'Displays window contents when dragging instead of just an outline'
+            Set-BinaryBit -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -ByteIndex 0 -BitMask 0x04 -SetBit $False -Description 'Animates combo boxes when they open with a sliding effect'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Desktop' -Name 'FontSmoothing' -Type 'String' -Value '2' -Description 'Apply anti-aliasing to text for smoother, more readable fonts on screen'
+            Set-BinaryBit -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -ByteIndex 0 -BitMask 0x08 -SetBit $False -Description 'Enables smooth scrolling in list boxes instead of jumping'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ListviewShadow' -Type 'DWord' -Value 0 -Description 'Add shadow effects behind desktop icon text to improve readability against backgrounds'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Narrator\NoRoam' -Name 'WinEnterLaunchEnabled' -Type 'DWord' -Value 0 -Description 'Enable the Win+Ctrl+Enter keyboard shortcut to quickly launch Windows Narrator screen reader'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Accessibility\StickyKeys' -Name 'Flags' -Type 'String' -Value '2' -Description 'Enable the keyboard shortcut to activate StickyKeys by pressing the Shift key five times'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Accessibility\Keyboard Response' -Name 'Flags' -Type 'String' -Value '2' -Description 'Enable the keyboard shortcut to activate FilterKeys by holding the right Shift key for 8 seconds'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Accessibility\ToggleKeys' -Name 'Flags' -Type 'String' -Value '34' -Description 'Enable the keyboard shortcut to activate ToggleKeys by holding Num Lock for 5 seconds, which plays sounds when Caps/Num/Scroll Lock are pressed'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Accessibility\MouseKeys' -Name 'Flags' -Type 'String' -Value '130' -Description 'Enable the keyboard shortcut to activate MouseKeys, which allows using the numeric keypad to control the mouse pointer'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Accessibility\HighContrast' -Name 'Flags' -Type 'String' -Value '98' -Description 'Enable the keyboard shortcut to activate High Contrast mode by pressing Left Alt + Left Shift + Print Screen'
+
+            # ============================================================================
+            # NOTIFICATIONS SETTINGS
+            # ============================================================================
+
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Name 'ToastEnabled' -Type 'DWord' -Value 0 -Description 'Get notifications from apps and other senders in Windows'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings' -Name 'NOC_GLOBAL_SETTING_ALLOW_NOTIFICATION_SOUND' -Type 'DWord' -Value 0 -Description 'Play audio alerts when notifications arrive from apps and system senders'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings' -Name 'NOC_GLOBAL_SETTING_ALLOW_TOASTS_ABOVE_LOCK' -Type 'DWord' -Value 0 -Description 'Display toast notifications on the lock screen when your device is locked'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Name 'LockScreenToastEnabled' -Type 'DWord' -Value 0 -Description 'Display toast notifications on the lock screen when your device is locked'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings' -Name 'NOC_GLOBAL_SETTING_ALLOW_CRITICAL_TOASTS_ABOVE_LOCK' -Type 'DWord' -Value 0 -Description 'Display critical notifications like reminders and VoIP calls when your device is locked'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ShowNotificationIcon' -Type 'DWord' -Value 0 -Description 'Display the notification bell icon in the system tray'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContent-310093Enabled' -Type 'DWord' -Value 0 -Description 'Show what''s new and suggested after updates and when signed in'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement' -Name 'ScoobeSystemSettingEnabled' -Type 'DWord' -Value 0 -Description 'Show suggestions to help you complete device setup and optimize Windows features'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContent-338389Enabled' -Type 'DWord' -Value 0 -Description 'Show helpful tips and suggestions while using Windows'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SystemPaneSuggestionsEnabled' -Type 'DWord' -Value 0 -Description 'Display helpful suggestions in the Action Center and Notification Center'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\Windows.SystemToast.CapabilityAccess' -Name 'Enabled' -Type 'DWord' -Value 0 -Description 'Show notifications when apps request access to system capabilities and permissions'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\Windows.SystemToast.StartupApp' -Name 'Enabled' -Type 'DWord' -Value 0 -Description 'Show notifications when apps are added to your Windows startup list'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location' -Name 'ShowGlobalPrompts' -Type 'DWord' -Value 0 -Description 'Suppress location-access notifications/prompts in the notification system'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Desktop' -Name 'DstNotification' -Type 'DWord' -Value 0 -Description 'Show notifications when daylight saving time changes occur'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\Windows.SystemToast.SecurityAndMaintenance' -Name 'Enabled' -Type 'DWord' -Value 0 -Description 'Disable notifications from the Security and Maintenance Action Center'
+
+            # ProcMon + registry verified 2026-09-08 on Windows 11 25H2:
+            # PriorityOnly = Do Not Disturb ON; Unrestricted = Do Not Disturb OFF.
+            # Preserve the CloudStore blob and replace only the UTF-16LE profile string.
+            $quietHoursPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current\default$windows.data.donotdisturb.quiethourssettings\windows.data.donotdisturb.quiethourssettings'
+            try {
+                if (Test-Path $quietHoursPath) {
+                    $quietHoursData = (Get-ItemProperty -Path $quietHoursPath -Name 'Data' -ErrorAction Stop).Data
+                    if ($quietHoursData -is [byte[]]) {
+                        $priorityBytes = [System.Text.Encoding]::Unicode.GetBytes('Microsoft.QuietHoursProfile.PriorityOnly')
+                        $unrestrictedBytes = [System.Text.Encoding]::Unicode.GetBytes('Microsoft.QuietHoursProfile.Unrestricted')
+                        $matchIndex = -1
+
+                        for ($i = 0; $i -le ($quietHoursData.Length - $priorityBytes.Length); $i++) {
+                            $match = $true
+                            for ($j = 0; $j -lt $priorityBytes.Length; $j++) {
+                                if ($quietHoursData[$i + $j] -ne $priorityBytes[$j]) {
+                                    $match = $false
+                                    break
+                                }
+                            }
+
+                            if ($match) {
+                                $matchIndex = $i
+                                break
+                            }
+                        }
+
+                        if ($matchIndex -ge 0) {
+                            [Array]::Copy($unrestrictedBytes, 0, $quietHoursData, $matchIndex, $unrestrictedBytes.Length)
+                            Set-ItemProperty -Path $quietHoursPath -Name 'Data' -Value $quietHoursData -Type Binary -Force -ErrorAction Stop
+                            Write-Log "Disabled Windows Do Not Disturb by switching the Quiet Hours profile to Unrestricted" "SUCCESS"
+                        } else {
+                            $quietHoursDecoded = [System.Text.Encoding]::Unicode.GetString($quietHoursData)
+                            if ($quietHoursDecoded.Contains('Microsoft.QuietHoursProfile.Unrestricted')) {
+                                Write-Log "Windows Do Not Disturb is already disabled (Quiet Hours profile: Unrestricted)" "INFO"
+                            } else {
+                                Write-Log "Could not find a known Quiet Hours profile in CloudStore; existing data was preserved" "WARNING"
+                            }
+                        }
+                    } else {
+                        Write-Log "Quiet Hours CloudStore Data is not a REG_BINARY byte array; existing data was preserved" "WARNING"
+                    }
+                } else {
+                    Write-Log "Quiet Hours CloudStore key was not found; Do Not Disturb state was left unchanged" "WARNING"
+                }
+            } catch {
+                Write-Log "Failed to disable Windows Do Not Disturb: $($_.Exception.Message)" "WARNING"
+            }
+
+            # ============================================================================
+            # PRIVACY & SECURITY SETTINGS
+            # ============================================================================
+
+            Set-RegistryValue -Path 'HKCU:\Software\Autounattend\Settings' -Name 'AdsPromotionalContentMode' -Type 'DWord' -Value 1 -Description 'Controls all advertising, suggestions, and promotional content throughout Windows'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'ContentDeliveryAllowed' -Type 'DWord' -Value 0 -Description 'Allows Windows to deliver promotional content and automatically install suggested apps'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContentEnabled' -Type 'DWord' -Value 0 -Description 'Enables promotional content subscriptions from Microsoft and partners throughout Windows'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'FeatureManagementEnabled' -Type 'DWord' -Value 0 -Description 'Enables Windows feature management functionality for promotional features and automatic app installations'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SoftLandingEnabled' -Type 'DWord' -Value 0 -Description 'Displays tips and notifications about Windows features as you use the operating system'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'OemPreInstalledAppsEnabled' -Type 'DWord' -Value 0 -Description 'Prevents OEM manufacturers from automatically installing bloatware apps'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'PreInstalledAppsEnabled' -Type 'DWord' -Value 0 -Description 'Prevents Microsoft from automatically installing suggested apps'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'PreInstalledAppsEverEnabled' -Type 'DWord' -Value 0 -Description 'Disables tracking of whether pre-installed apps were ever enabled'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SilentInstalledAppsEnabled' -Type 'DWord' -Value 0 -Description 'Prevents apps from being silently installed in the background'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'RotatingLockScreenEnabled' -Type 'DWord' -Value 0 -Description 'Displays rotating Windows Spotlight images on your lock screen instead of a static background. Autounattend automatically sets the Start Menu Recommended Section to Show when this setting is enabled as it is required'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'RotatingLockScreenOverlayEnabled' -Type 'DWord' -Value 0 -Description 'Displays fun facts, tips, and tricks as an overlay on your lock screen'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContent-338387Enabled' -Type 'DWord' -Value 0 -Description 'Displays fun facts, tips, and tricks as an overlay on your lock screen'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo' -Name 'Enabled' -Type 'DWord' -Value 0 -Description 'Windows generates a unique advertising ID that apps use to track your activity and deliver personalized ads based on your behavior across different apps'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CPSS\Store\AdvertisingInfo' -Name 'Value' -Type 'DWord' -Value 0 -Description 'Windows generates a unique advertising ID that apps use to track your activity and deliver personalized ads based on your behavior across different apps'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo' -Name 'DisabledByGroupPolicy' -Type 'DWord' -Value 1 -Description 'Windows generates a unique advertising ID that apps use to track your activity and deliver personalized ads based on your behavior across different apps'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\International\User Profile' -Name 'HttpAcceptLanguageOptOut' -Type 'DWord' -Value 1 -Description 'Allows websites to access your language preferences so they can automatically display content in your preferred language without requiring manual configuration on each site'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContent-338393Enabled' -Type 'DWord' -Value 0 -Description 'Displays promotional content, tips, and feature suggestions within the Windows Settings app. Autounattend automatically sets the Start Menu Recommended Section to Show when this setting is enabled as it is required'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContent-353694Enabled' -Type 'DWord' -Value 0 -Description 'Displays promotional content, tips, and feature suggestions within the Windows Settings app. Autounattend automatically sets the Start Menu Recommended Section to Show when this setting is enabled as it is required'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContent-353696Enabled' -Type 'DWord' -Value 0 -Description 'Displays promotional content, tips, and feature suggestions within the Windows Settings app. Autounattend automatically sets the Start Menu Recommended Section to Show when this setting is enabled as it is required'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\SystemSettings\AccountNotifications' -Name 'EnableAccountNotifications' -Type 'DWord' -Value 0 -Description 'Shows account notifications in the Settings app, including prompts to reauthenticate, backup your device, and manage subscriptions'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy' -Name 'HasAccepted' -Type 'DWord' -Value 0 -Description 'Use your voice for apps using Microsoft''s online speech recognition technology'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\InputPersonalization' -Name 'AllowInputPersonalization' -Type 'DWord' -Value 0 -Description 'Disable online speech recognition services for the user'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Narrator\NoRoam' -Name 'OnlineServicesEnabled' -Type 'DWord' -Value 0 -Description 'Allow Narrator to use Microsoft cloud services for features like intelligent image descriptions and enhanced voice models'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Narrator\NoRoam' -Name 'ScriptingEnabled' -Type 'DWord' -Value 0 -Description 'Allow Narrator to execute scripts for automation and custom functionality'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CPSS\Store\InkingAndTypingPersonalization' -Name 'Value' -Type 'DWord' -Value 0 -Description 'Uses your typing history and handwriting patterns to create a custom dictionary (turning off will clear all words in your custom dictionary)'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Personalization\Settings' -Name 'AcceptedPrivacyPolicy' -Type 'DWord' -Value 0 -Description 'Uses your typing history and handwriting patterns to create a custom dictionary (turning off will clear all words in your custom dictionary)'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\InputPersonalization' -Name 'RestrictImplicitTextCollection' -Type 'DWord' -Value 1 -Description 'Uses your typing history and handwriting patterns to create a custom dictionary (turning off will clear all words in your custom dictionary)'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\InputPersonalization' -Name 'RestrictImplicitInkCollection' -Type 'DWord' -Value 1 -Description 'Disable implicit handwriting/inking data collection'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\InputPersonalization\TrainedDataStore' -Name 'HarvestContacts' -Type 'DWord' -Value 0 -Description 'Uses your typing history and handwriting patterns to create a custom dictionary (turning off will clear all words in your custom dictionary)'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Diagnostics\DiagTrack' -Name 'ShowedToastAtLevel' -Type 'DWord' -Value 1 -Description 'Send diagnostic data to Microsoft to help improve Windows and keep it secure'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'AllowTelemetry' -Type 'DWord' -Value 0 -Description 'Send diagnostic data to Microsoft to help improve Windows and keep it secure'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection' -Name 'AllowTelemetry' -Type 'DWord' -Value 0 -Description 'Send diagnostic data to Microsoft to help improve Windows and keep it secure'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection' -Name 'MaxTelemetryAllowed' -Type 'DWord' -Value 0 -Description 'Send diagnostic data to Microsoft to help improve Windows and keep it secure'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\AppCompat' -Name 'AITEnable' -Type 'DWord' -Value 0 -Description 'Send diagnostic data to Microsoft to help improve Windows and keep it secure'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Input\TIPC' -Name 'Enabled' -Type 'DWord' -Value 0 -Description 'Send optional inking and typing diagnostic data to Microsoft'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CPSS\Store\ImproveInkingAndTyping' -Name 'Value' -Type 'DWord' -Value 0 -Description 'Send optional inking and typing diagnostic data to Microsoft'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy' -Name 'TailoredExperiencesWithDiagnosticDataEnabled' -Type 'DWord' -Value 0 -Description 'Let Microsoft use your diagnostic data to show personalized tips, ads and recommendations'
+            Set-RegistryValue -Path 'HKCU:\Software\Policies\Microsoft\Windows\CloudContent' -Name 'DisableTailoredExperiencesWithDiagnosticData' -Type 'DWord' -Value 1 -Description 'Do not use diagnostic data for tailored experiences'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'DoNotShowFeedbackNotifications' -Type 'DWord' -Value 1 -Description 'Let Windows ask you to provide feedback on experiences in Windows'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'PublishUserActivities' -Type 'DWord' -Value 0 -Description 'Allows you to jump back into what you were doing with apps, docs, or other activities on startup'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'EnableActivityFeed' -Type 'DWord' -Value 0 -Description 'Disable Activity Feed for the user'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'UploadUserActivities' -Type 'DWord' -Value 0 -Description 'Prevent uploading user activity history'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContent-353698Enabled' -Type 'DWord' -Value 0 -Description 'Shows suggestions in the Windows 10 Timeline feature'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings' -Name 'IsDeviceSearchHistoryEnabled' -Type 'DWord' -Value 0 -Description 'Improves search results by allowing Windows Search to store your search history locally on this device (Does not clear existing history)'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings' -Name 'IsDynamicSearchBoxEnabled' -Type 'DWord' -Value 0 -Description 'See content suggestions in search'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings' -Name 'IsMSACloudSearchEnabled' -Type 'DWord' -Value 0 -Description 'Allow Windows Search to show results from apps and services that you are signed in to with your Microsoft account'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings' -Name 'IsAADCloudSearchEnabled' -Type 'DWord' -Value 0 -Description 'Allow Windows Search to show results from apps and services that you are signed in to with your work or school account'
+            # ProcMon verified 2026-09-02: Search setting writes HKCU SearchSettings\IsGlobalWebSearchProviderToggleEnabled (REG_DWORD) = 0
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings' -Name 'IsGlobalWebSearchProviderToggleEnabled' -Type 'DWord' -Value 0 -Description 'Disable search apps and web search providers from showing results in Windows Search'
+            # ProcMon verified 2026-08-31: per-user app toggle writes HKCU ConsentStore\systemAIModels Value (REG_SZ) = Deny
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\systemAIModels' -Name 'Value' -Type 'String' -Value 'Deny' -Description 'Disable this user access to Windows-provided on-device text and image generation models'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location' -Name 'Value' -Type 'String' -Value 'Deny' -Description 'Deny location access for this user'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\userAccountInformation' -Name 'Value' -Type 'String' -Value 'Deny' -Description 'Deny apps access to account information for this user'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\appDiagnostics' -Name 'Value' -Type 'String' -Value 'Deny' -Description 'Deny app diagnostic access for this user'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' -Name 'DisableAIDataAnalysis' -Type 'DWord' -Value 1 -Description 'Disable saving screen snapshots for Recall for this user'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' -Name 'DisableClickToDo' -Type 'DWord' -Value 1 -Description 'Disable Click to Do for this user where supported'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' -Name 'TurnOffWindowsCopilot' -Type 'DWord' -Value 1 -Description 'Disable legacy Windows Copilot entry points for this user'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'AllowCortana' -Type 'DWord' -Value 0 -Description 'Enables Microsoft''s Cortana virtual assistant for voice commands and searches'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors' -Name 'DisableLocation' -Type 'DWord' -Value 1 -Description 'Disable location services for the user where supported'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\OneDrive' -Name 'KFMBlockOptIn' -Type 'DWord' -Value 1 -Description 'Prevents OneDrive from automatically backing up important folders (Documents, Pictures, Desktop, etc.)'
+
+            # ============================================================================
+            # SOUND SETTINGS
+            # ============================================================================
+
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Multimedia\Audio' -Name 'UserDuckingPreference' -Type 'DWord' -Value 3 -Description 'Automatically lower volume of media and apps when Windows detects communication activity'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Narrator\NoRoam' -Name 'DuckAudio' -Type 'DWord' -Value 0 -Description 'Allow Narrator to automatically lower the volume of other applications when it speaks'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Accessibility' -Name 'Sound on Activation' -Type 'DWord' -Value 0 -Description 'Play sounds when accessibility features like StickyKeys or FilterKeys are activated'
+            Set-RegistryValue -Path 'HKCU:\Control Panel\Accessibility' -Name 'Warning Sounds' -Type 'DWord' -Value 0 -Description 'Play warning sounds when attempting to activate accessibility features or when accessibility-related events occur'
+
+            # ============================================================================
+            # WINDOWS UPDATE SETTINGS
+            # ============================================================================
+
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name 'NoAutoRebootWithLoggedOnUsers' -Type 'DWord' -Value 1 -Description 'Prevents automatic restarts after installing updates when users are logged on'
+            Remove-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'SetUpdateNotificationLevel' -Description 'Show or hide notifications about available updates and update progress'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'ExcludeWUDriversInQualityUpdate' -Type 'DWord' -Value 1 -Description 'Prevent Windows from automatically downloading and installing hardware driver updates'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\WindowsStore' -Name 'AutoDownload' -Type 'DWord' -Value 4 -Description 'Allow automatic Microsoft Store app/component updates; Store is retained for AppX/winget/system compatibility'
+
+            # ============================================================================
+            # EXPLORER SETTINGS
+            # ============================================================================
+
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' -Name 'link' -Type 'Binary' -Value @(0x15,0x00,0x00,0x00) -Description 'Prevents Windows from appending ''- Shortcut'' text to newly created shortcut file names'
+            New-RegistryKey -Path 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32' -Description 'Use the Windows 10-style right-click menu with all options visible instead of the simplified Windows 11 menu'
+            Set-RegistryValue -Path 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32' -Name '(Default)' -Type 'String' -Value '' -Description 'Use the Windows 10-style right-click menu with all options visible instead of the simplified Windows 11 menu'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Lighting' -Name 'AmbientLightingEnabled' -Type 'DWord' -Value 0 -Description 'Allow Windows Dynamic Lighting to control ambient RGB effects on compatible devices'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Lighting' -Name 'ControlledByForegroundApp' -Type 'DWord' -Value 0 -Description 'Allow compatible apps to control device lighting effects'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows' -Name 'LegacyDefaultPrinterMode' -Type 'DWord' -Value 1 -Description 'Prevents Windows from automatically changing your default printer based on location or last used printer'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'LaunchTo' -Type 'DWord' -Value 1 -Description 'Choose what happens when File Explorer is opened'
+            Set-BinaryBit -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState' -Name 'Settings' -ByteIndex 4 -BitMask 0x20 -SetBit $False -Description 'Choose whether each folder opens in the same window or in its own window'
+            Set-BinaryBit -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer' -Name 'ShellState' -ByteIndex 4 -BitMask 0x20 -SetBit $True -Description 'Choose whether to open files and folders with a single click (like web links) or double-click (traditional)'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer' -Name 'IconUnderline' -Type 'DWord' -Value 3 -Description 'Choose whether to open files and folders with a single click (like web links) or double-click (traditional)'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer' -Name 'ShowRecent' -Type 'DWord' -Value 0 -Description 'Displays recently accessed files and recommendations in Quick Access'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer' -Name 'ShowRecommendations' -Type 'DWord' -Value 0 -Description 'Displays recently accessed files and recommendations in Quick Access'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer' -Name 'ShowFrequent' -Type 'DWord' -Value 0 -Description 'Displays your most accessed folders in Quick Access section'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer' -Name 'ShowCloudFilesInQuickAccess' -Type 'DWord' -Value 0 -Description 'Displays cloud files from your Office.com account in Quick Access'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'AlwaysShowMenus' -Type 'DWord' -Value 0 -Description 'Shows the Menu bar (File, Edit etc.) on all windows that support it'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'UseCompactMode' -Type 'DWord' -Value 1 -Description 'Reduces vertical spacing between files and folders for denser view'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ShowTypeOverlay' -Type 'DWord' -Value 1 -Description 'Shows file type icon overlay on bottom-right corner of thumbnail previews'
+            Remove-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'FolderContentsInfoTip' -Description 'Shows total size and file count when hovering over folders'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState' -Name 'FullPath' -Type 'DWord' -Value 1 -Description 'Shows complete directory path in window title instead of folder name only'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'Hidden' -Type 'DWord' -Value 1 -Description 'Displays items with the hidden attribute set'
+            Remove-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'HideDrivesWithNoMedia' -Description 'Hides drives with no media inserted like empty card readers or optical drives'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'HideFileExt' -Type 'DWord' -Value 0 -Description 'Displays file type extensions (like .txt, .pdf) after file names'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'HideMergeConflicts' -Type 'DWord' -Value 0 -Description 'Automatically merges folders with same name without confirmation dialog'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ShowSuperHidden' -Type 'DWord' -Value 0 -Description 'Displays system files marked with the SuperHidden attribute'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'SeparateProcess' -Type 'DWord' -Value 0 -Description 'Runs each Explorer window in its own process to prevent crashes affecting all windows'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'PersistBrowsers' -Type 'DWord' -Value 0 -Description 'Reopens Explorer windows that were open when you last shut down or logged off'
+            Remove-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ShowDriveLettersFirst' -Description 'Displays drive letters (C:, D:) before drive names in This PC'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ShowEncryptCompressedColor' -Type 'DWord' -Value 1 -Description 'Displays encrypted files in green and compressed files in blue'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ShowInfoTip' -Type 'DWord' -Value 1 -Description 'Displays tooltip with item details when hovering over files and folders'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ShowPreviewHandlers' -Type 'DWord' -Value 0 -Description 'Enables file content preview when selecting files in Explorer'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ShowStatusBar' -Type 'DWord' -Value 1 -Description 'Displays bar at bottom showing item count and selected file sizes'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ShowSyncProviderNotifications' -Type 'DWord' -Value 0 -Description 'Displays cloud sync status notifications from OneDrive and other sync providers'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'AutoCheckSelect' -Type 'DWord' -Value 0 -Description 'Adds checkboxes next to items for easier multi-selection'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'SharingWizardOn' -Type 'DWord' -Value 0 -Description 'Shows simplified sharing dialog instead of advanced security permissions'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'TypeAhead' -Type 'DWord' -Value 0 -Description 'Chooses whether typing selects matching items or searches automatically'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'NavPaneShowAllCloudStates' -Type 'DWord' -Value 0 -Description 'Shows cloud sync status icons for OneDrive files in navigation pane'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'NavPaneExpandToCurrentFolder' -Type 'DWord' -Value 0 -Description 'Automatically expands navigation tree to highlight current folder location'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'NavPaneShowAllFolders' -Type 'DWord' -Value 0 -Description 'Shows all folders in the navigation pane'
+            Set-RegistryValue -Path 'HKCU:\Software\Classes\CLSID\{031E4825-7B94-4dc3-B131-E946B44C8DD5}' -Name 'System.IsPinnedToNameSpaceTree' -Type 'DWord' -Value 0 -Description 'Displays Libraries container grouping Documents, Music, Pictures, and Videos'
+
+            # ============================================================================
+            # START MENU SETTINGS
+            # ============================================================================
+
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'Start_Layout' -Type 'DWord' -Value 1 -Description 'Choose whether the Start Menu shows more pinned apps, more recommendations, or a balanced default layout'
+            Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'HideRecommendedSection' -Type 'DWord' -Value 1 -Description 'Show or hide the lower section that displays recently opened files and suggested apps. Hiding this section also removes Windows Spotlight from the lock screen and suggested content in the Settings app'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Start' -Name 'ShowRecentList' -Type 'DWord' -Value 0 -Description 'Display a list of recently installed applications at the top of the All Apps list'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Start' -Name 'ShowFrequentList' -Type 'DWord' -Value 0 -Description 'Display your frequently launched applications at the top of the All Apps list for quick access'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'Start_TrackProgs' -Type 'DWord' -Value 1 -Description 'Display your frequently launched applications at the top of the All Apps list for quick access'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContent-338388Enabled' -Type 'DWord' -Value 0 -Description 'Display app suggestions and promotional content from the Microsoft Store in the Start Menu'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'Start_TrackDocs' -Type 'DWord' -Value 0 -Description 'Display your recently opened documents and files in the Start Menu''s Recommended section for quick access'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'Start_IrisRecommendations' -Type 'DWord' -Value 0 -Description 'Display personalized suggestions from Windows for tips, app shortcuts, and Microsoft Store apps in the Recommended section'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'Start_AccountNotifications' -Type 'DWord' -Value 0 -Description 'Display notifications about Microsoft account sign-in, sync status, and account-related suggestions'
+            Set-RegistryValue -Path 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' -Name 'DisableSearchBoxSuggestions' -Type 'DWord' -Value 1 -Description 'Prevent web results from Bing from appearing when searching in the Start Menu, showing only local files and apps'
+
+            # ============================================================================
+            # TASKBAR SETTINGS
+            # ============================================================================
+
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' -Name 'SearchboxTaskbarMode' -Type 'DWord' -Value 0 -Description 'Choose how the Windows search appears on your taskbar: hidden, icon only, icon with label, or full search box'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'TaskbarAl' -Type 'DWord' -Value 0 -Description 'Align taskbar icons to the left (classic Windows style) or center (Windows 11 default)'
+            Set-RegistryValue -Path 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' -Name 'HideSCAMeetNow' -Type 'DWord' -Value 1 -Description 'Controls Meet Now button visibility in the system tray'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer' -Name 'HideSCAMeetNow' -Type 'DWord' -Value 1 -Description 'Controls Meet Now button visibility in the system tray'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer' -Name 'EnableAutoTray' -Type 'DWord' -Value 0 -Description 'Show all system tray icons directly on the taskbar instead of hiding them in the overflow menu (up arrow)'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ShowTaskViewButton' -Type 'DWord' -Value 0 -Description 'Show the Task View button for managing virtual desktops and viewing all open windows at once'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ShowCopilotButton' -Type 'DWord' -Value 0 -Description 'Show or hide the Copilot Preview button on the taskbar'
+            Set-RegistryValue -Path 'HKCU:\Software\Policies\Microsoft\Dsh' -Name 'AllowNewsAndInterests' -Type 'DWord' -Value 0 -Description 'Show the Widgets button that displays personalized news, weather, calendar, and other information'
+            Set-RegistryValue -Path 'HKCU:\Software\Policies\Microsoft\Windows\Windows Feeds' -Name 'EnableFeeds' -Type 'DWord' -Value 0 -Description 'Show the News and Interests widget that displays headlines, weather, stocks, and other personalized content'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'TaskbarSmallIcons' -Type 'DWord' -Value 1 -Description 'Reduce the height of the taskbar by using smaller icons, giving you more screen space'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings' -Name 'TaskbarEndTask' -Type 'DWord' -Value 1 -Description 'Adds an ''End Task'' option when right-clicking applications on the taskbar for quick termination'
+
+            # ============================================================================
+            # WINDOWS THEME SETTINGS
+            # ============================================================================
+
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name 'AppsUseLightTheme' -Type 'DWord' -Value 0 -Description 'Choose between Light and Dark mode for Windows and apps'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name 'SystemUsesLightTheme' -Type 'DWord' -Value 0 -Description 'Choose between Light and Dark mode for Windows and apps'
+            Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name 'EnableTransparency' -Type 'DWord' -Value 0 -Description 'Disable translucent effects for the Start Menu, taskbar, and other Windows interface elements'
+
+            Write-Log "Setting wallpaper based on Windows version and theme..." "INFO"
+            $buildNumber = [System.Environment]::OSVersion.Version.Build
+            $wallpaperPath = $null
+
+            if ($buildNumber -ge 22000) {
+                $themeKey = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+                $lightTheme = $false
+
+                if (Test-Path $themeKey) {
+                    $value = Get-ItemProperty -Path $themeKey -Name 'SystemUsesLightTheme' -ErrorAction SilentlyContinue
+                    if ($value.SystemUsesLightTheme -eq 1) {
+                        $lightTheme = $true
+                    }
+                }
+
+                if ($lightTheme) {
+                    $wallpaperPath = 'C:\Windows\Web\Wallpaper\Windows\img0.jpg'
+                } else {
+                    $wallpaperPath = 'C:\Windows\Web\Wallpaper\Windows\img19.jpg'
+                }
+            } else {
+                $wallpaperPath = 'C:\Windows\Web\4K\Wallpaper\Windows\img0_3840x2160.jpg'
+            }
+
+            if (-not (Test-Path $wallpaperPath)) {
+                Write-Log "Wallpaper file not found: $wallpaperPath" "WARNING"
+            } else {
+                try {
+                    $desktopKey = 'HKCU:\Control Panel\Desktop'
+                    Set-ItemProperty -Path $desktopKey -Name Wallpaper -Value $wallpaperPath -Type String -Force -ErrorAction Stop
+                    Set-ItemProperty -Path $desktopKey -Name WallpaperStyle -Value '10' -Type String -Force -ErrorAction Stop
+                    Set-ItemProperty -Path $desktopKey -Name TileWallpaper -Value '0' -Type String -Force -ErrorAction Stop
+
+                    Remove-ItemProperty -Path $desktopKey -Name 'TranscodedImageCache' -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $desktopKey -Name 'TranscodedImageCache_000' -ErrorAction SilentlyContinue
+
+                    Write-Log "Wallpaper configured: $wallpaperPath" "SUCCESS"
+                } catch {
+                    $script:CustomizationHadErrors = $true
+                    Write-Log "Failed to set wallpaper: $($_.Exception.Message)" "ERROR"
+                }
+            }
+
+
+            # ============================================================================
+            # ADD YOUR USER SPECIFIC POWERSHELL SCRIPT CONTENTS BELOW
+            # ============================================================================
+
+            # Start here
+
+            # End here
+
+
+            if ($script:CustomizationHadErrors) {
+                Write-Log "User customizations finished with one or more errors; completion marker was not created" "ERROR"
+            } else {
+                try {
+                    if (-not (Test-Path $markerPath)) {
+                        New-Item -Path $markerPath -Force -ErrorAction Stop | Out-Null
+                    }
+                    Set-ItemProperty -Path $markerPath -Name $markerName -Value 1 -Type DWord -Force -ErrorAction Stop
+                    $markerValue = Get-ItemProperty -Path $markerPath -Name $markerName -ErrorAction Stop
+                    if ($markerValue.$markerName -ne 1) {
+                        throw "Completion marker value could not be verified after creation."
+                    }
+                    Write-Log "User customizations completed and marked as applied" "SUCCESS"
+                    Write-Log "Note: User customizations will not run again unless $markerPath\$markerName is deleted" "INFO"
+                } catch {
+                    $script:CustomizationHadErrors = $true
+                    Write-Log "Failed to create completion marker: $($_.Exception.Message)" "ERROR"
+                }
+            }
+        }
+    }
+}
+
+
+Write-Log "================================================================================" "INFO"
+if ($script:CustomizationHadErrors) {
+    Write-Log "Autounattend Gaming + Programming customization completed with errors" "WARNING"
+} else {
+    Write-Log "Autounattend Gaming + Programming customization completed" "SUCCESS"
+}
+Write-Log "================================================================================" "INFO"
+
+if ($script:CustomizationHadErrors -and $UserCustomizations) {
+    exit 1
+}
+]]></File>
+  </Extensions>
+</unattend>

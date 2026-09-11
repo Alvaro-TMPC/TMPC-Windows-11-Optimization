@@ -1,0 +1,15 @@
+{
+  "control": [
+    {
+      "VTOY_SECONDARY_BOOT_MENU": "0"
+    }
+  ],
+  "auto_install": [
+    {
+      "image": "/Win11_25H2_Spanish_x64_v2.iso",
+      "template": "/ventoy/script/autounattend.xml",
+      "autosel": 1,
+      "timeout": 0
+    }
+  ]
+}
