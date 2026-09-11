@@ -50,6 +50,13 @@ baseline actual no está probado en instalación limpia.
 - `.gitattributes`: política reproducible de finales de línea.
 - `README.md`: documentación principal.
 
+## Documentación
+
+- [`docs/preparacion-previa-instalacion.md`](docs/preparacion-previa-instalacion.md):
+  comprobaciones previas al formateo, backups y preparación de drivers.
+- [`docs/configuracion-pruebas-limitaciones-fuentes.md`](docs/configuracion-pruebas-limitaciones-fuentes.md):
+  configuración aplicada, estado de validación, limitaciones y fuentes.
+
 ## Decisiones principales del perfil
 
 - Microsoft Defender conservado.
@@ -86,7 +93,9 @@ README.md
 autounattend.xml
 ventoy.json
 .gitattributes
-docs/    (futuro)
+docs/
+  preparacion-previa-instalacion.md
+  configuracion-pruebas-limitaciones-fuentes.md
 scripts/ (futuro)
 ```
 
