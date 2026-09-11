@@ -1,16 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
   <!-- FINAL profile: Gaming + Programming, aggressive app debloat, no Game Pass/Microsoft Store gaming, no OneDrive, minimal Windows notifications with critical Windows Security alerts preserved, conservative performance defaults, Windows locking and printing preserved. -->
+  <!-- File layout: windowsPE (setup-time requirement bypass) -> specialize (extract embedded scripts, disable network, enable .NET 3.5, run SYSTEM-wide customization) -> oobeSystem (re-enable network at first logon) -> Extensions (embedded PowerShell, extracted during specialize). Target reference: Windows 11 25H2. -->
+  <!-- Protected decisions (do not change without explicit approval): fictitious ProductKey, OOBE/BypassNRO, ConfigureStartPins, Windows Update profile, driver exclusion, Store/Edge/WebView2/Defender/OneDrive design, Balanced power plan, Game Mode on / Game DVR off, camera/mic user control, CloudStore/Quiet Hours behavior. -->
   <settings pass="offlineServicing"></settings>
   <settings pass="windowsPE">
     <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <UserData>
+        <!-- Protected decision: the all-zero ProductKey is fictitious; no real license key is embedded in this repository. WillShowUI=Always is part of the current baseline and must not be changed without an explicit task. -->
         <ProductKey>
           <Key>00000-00000-00000-00000-00000</Key>
           <WillShowUI>Always</WillShowUI>
         </ProductKey>
         <AcceptEula>true</AcceptEula>
       </UserData>
+      <!-- Setup-time hardware requirement bypass (TPM, Secure Boot, Storage, CPU, RAM and Disk). Applied during windowsPE for Windows Setup; separate from BypassNRO. -->
       <RunSynchronous>
         <RunSynchronousCommand wcm:action="add">
           <Order>1</Order>
@@ -43,27 +47,33 @@
   <settings pass="generalize"></settings>
   <settings pass="specialize">
     <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <!-- Ordered step chain; each step depends on the previous ones. See the individual comments below. -->
       <RunSynchronous>
+        <!-- Windows Setup copies this answer file to C:\Windows\Panther\unattend.xml; Order 1 reads that copy and runs ExtractScript, which writes the embedded scripts to disk before Order 5 executes them. -->
         <RunSynchronousCommand wcm:action="add">
           <Order>1</Order>
           <Description>Loads Scripts in this XML File</Description>
           <Path>powershell.exe -NoProfile -WindowStyle Hidden -Command "$xml = [xml]::new(); $xml.Load('C:\Windows\Panther\unattend.xml'); $sb = [scriptblock]::Create( $xml.unattend.Extensions.ExtractScript ); Invoke-Command -ScriptBlock $sb -ArgumentList $xml;"</Path>
         </RunSynchronousCommand>
+        <!-- Protected decision: BypassNRO keeps OOBE able to create a local account; it may depend on the Windows build and must be revalidated on future media. -->
         <RunSynchronousCommand wcm:action="add">
           <Order>2</Order>
           <Description>Registry Entry to Create a Local Account during OOBE</Description>
           <Path>reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE" /v BypassNRO /t REG_DWORD /d 1 /f</Path>
         </RunSynchronousCommand>
+        <!-- Network stays disabled during OOBE only. FirstLogonCommands re-enables the adapters; if that command fails, the machine stays offline until they are enabled manually. -->
         <RunSynchronousCommand wcm:action="add">
           <Order>3</Order>
           <Description>Disable All Network Adapters Temporarily so Windows Doesn't Update During OOBE and to Allow Local Account Creation</Description>
           <Path>powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "Get-NetAdapter | Disable-NetAdapter -Confirm:$false"</Path>
         </RunSynchronousCommand>
+        <!-- .NET Framework 3.5 payload comes from the installation media (drive letter varies); LimitAccess prevents falling back to Windows Update. -->
         <RunSynchronousCommand wcm:action="add">
           <Order>4</Order>
           <Description>Enables .NET Framework 3.5 from Windows Installation Media</Description>
           <Path>powershell.exe -NoProfile -WindowStyle Hidden -Command "foreach($d in 'C','D','E','F','G','H','I','J','K'){$src=Join-Path ($d+':') 'sources\sxs';if(Test-Path $src\*.cab){dism /Online /Enable-Feature /FeatureName:NetFx3 /All /LimitAccess /Source:$src;break}}"</Path>
         </RunSynchronousCommand>
+        <!-- SYSTEM-wide phase: HKLM settings plus the generated BloatRemoval/OneDriveRemoval scripts. HKCU settings run later as the user through the one-shot task registered by this script. -->
         <RunSynchronousCommand wcm:action="add">
           <Order>5</Order>
           <Description>Runs Autounattend Script System Wide Operations like App Uninstalls, HKLM Registry entries etc.</Description>
@@ -77,6 +87,7 @@
   <settings pass="oobeSystem">
     <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <OOBE>
+        <!-- Protected OOBE design: keep the current local/offline setup flow and ProtectYourPC=3 choice. Revalidate these settings when changing Windows builds. -->
         <HideEULAPage>true</HideEULAPage>
         <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
         <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
@@ -84,6 +95,7 @@
         <ProtectYourPC>3</ProtectYourPC>
       </OOBE>
       <FirstLogonCommands>
+        <!-- First logon only: re-enables the network adapters disabled during specialize. If it fails, the machine stays offline until adapters are enabled manually. -->
         <SynchronousCommand>
         <Order>1</Order>
         <Description>Enables Network Adapters After OOBE Completes</Description>
@@ -94,6 +106,9 @@
   </settings>
   <Extensions xmlns="urn:Autounattend:unattend">
     <ExtractScript>
+# Writes each embedded file below to disk during specialize. Encoding per extension:
+# UTF-8 with BOM for .ps1/.xml and UTF-16LE with BOM for .reg/.vbs/.js. Inner text is
+# trimmed, so CDATA bodies start without indentation. Content comes only from this file.
 param(
     [xml] $Document
 );
@@ -136,6 +151,8 @@ foreach( $file in $Document.unattend.Extensions.File ) {
     Runs in user mode - applies ONLY user-specific settings (HKCU)
 #>
 
+# Invoked twice: as SYSTEM without the switch (HKLM-wide work) and as the interactive
+# user with -UserCustomizations (HKCU work). The one-shot task below bridges both contexts.
 param(
     [switch]$UserCustomizations
 )
@@ -220,6 +237,8 @@ function Get-UserSID {
     }
 }
 
+# Registry helpers. Mutations use -ErrorAction Stop so real failures set
+# $script:CustomizationHadErrors (F3 hardening). Binary helpers preserve the existing blob.
 function Set-RegistryValue {
     param(
         [string]$Path,
@@ -379,6 +398,8 @@ function Set-BinaryByte {
 }
 
 
+# One-shot bridge from SYSTEM to the interactive user. Registration is verified; the task is
+# removed after success or kept so the next logon retries.
 function Register-AutounattendUserCustomizationsTask {
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File C:\ProgramData\Autounattend\Unattend\Scripts\SystemCustomizations.ps1 -UserCustomizations"
     $trigger = New-ScheduledTaskTrigger -AtLogOn
@@ -392,6 +413,9 @@ function Register-AutounattendUserCustomizationsTask {
 }
 
 
+# Runs a child process in the interactive user's session from SYSTEM: duplicates the explorer
+# token (elevated linked token under UAC) and waits up to 10 minutes; success is exit code 0.
+# Required because HKCU must be written in the user's own context.
 function Start-ProcessAsUser {
     param([string]$CommandLine)
 
@@ -487,8 +511,11 @@ function Start-ProcessAsUser {
 }
 
 
+# SYSTEM-wide phase (specialize): generates and runs the removal scripts once, applies HKLM
+# settings and registers the one-shot user task. No HKCU writes happen here.
 if (-not $UserCustomizations) {
 
+    # Generated scripts live here; the extracted ones live under ...\Unattend\Scripts.
     $scriptsDir = "C:\ProgramData\Autounattend\Scripts"
     if (!(Test-Path $scriptsDir)) {
         New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
@@ -501,7 +528,8 @@ if (-not $UserCustomizations) {
     # WINDOWS APPS REMOVAL
     # ============================================================================
 
-    # Create BloatRemoval.ps1 script
+    # Generated verbatim to ...\Scripts\BloatRemoval.ps1 and executed once below.
+    # Lists are curated: Paint, Photos and Store are kept on purpose (see commented entries).
     $bloatRemovalContent = @'
 <#
   .SYNOPSIS
@@ -558,6 +586,8 @@ function Write-Log {
     Write-Host $Message
 }
 
+# Parallel removal with sequential fallback; real failures set $script:HadErrors, which drives
+# the exit code consumed by SystemCustomizations.ps1.
 function Invoke-RunspacePool {
     param (
         [array]$Items,
@@ -614,6 +644,8 @@ function Invoke-RunspacePool {
 # DATA
 # ============================================================================
 
+# Curated removal list. Deliberately kept (see commented entries): legacy MSPaint, Paint, Photos
+# and Store. Any change here alters what the profile removes and needs explicit approval.
 $packages = @(
     'Microsoft.Microsoft3DViewer'
     'Microsoft.MixedReality.Portal'
@@ -898,6 +930,7 @@ if ($hasXboxPackages) {
     }
 }
 
+# Propagate real failures to the caller, which marks the SYSTEM phase as failed.
 if ($script:HadErrors) {
     Write-Log "Bloat removal process completed with one or more real operation failures"
     exit 1
@@ -915,10 +948,11 @@ exit 0
         Write-Log "Failed to create BloatRemoval.ps1: $($_.Exception.Message)" "ERROR"
     }
 
-    # Microsoft Edge and WebView2 are intentionally kept for Windows/app compatibility.
-    # No Edge removal script is generated.
+    # Protected decision: Microsoft Edge and WebView2 are intentionally kept for Windows/app
+    # compatibility. No Edge removal script is generated.
 
-    # Create OneDriveRemoval.ps1 script
+    # Generated verbatim to ...\Scripts\OneDriveRemoval.ps1 and executed once below.
+    # Removal/blocking is aggressive, but user content under %USERPROFILE%\OneDrive is preserved.
     $oneDriveRemovalContent = @'
 
 <#
@@ -1473,6 +1507,8 @@ exit 0
     # POWER SETTINGS
     # ============================================================================
 
+    # Protected decisions: hibernation and Fast Startup stay disabled, Windows locking stays
+    # available (ShowLockOption=1); only the Sleep/Hibernate menu entries are hidden.
     Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -Name 'HibernateEnabled' -Type 'DWord' -Value 0 -Description 'Disable hibernation'
     Set-RegistryValue -Path 'HKLM:\SYSTEM\ControlSet001\Control\Session Manager\Power' -Name 'HiberbootEnabled' -Type 'DWord' -Value 0 -Description 'Disable Fast Startup'
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FlyoutMenuSettings' -Name 'ShowHibernateOption' -Type 'DWord' -Value 0 -Description 'Hide the Hibernate option from the Start Menu power menu'
@@ -1490,6 +1526,9 @@ exit 0
     # Keep the Windows Print Spooler available for Microsoft Print to PDF and physical printers.
     Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Spooler' -Name 'Start' -Type 'DWord' -Value 2 -Description 'Keep the Print Spooler service on Automatic for Microsoft Print to PDF and current/future physical printers'
 
+    # Game DVR and Xbox services are adjusted per this profile because Game Pass/Xbox are not
+    # used; Game Mode stays enabled via HKCU below. Steam and Epic clients are not directly
+    # targeted by these settings.
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR' -Name 'AllowGameDVR' -Type 'DWord' -Value 0 -Description 'Record gameplay clips and take screenshots using the Xbox Game Bar overlay. Disabling reduces CPU/GPU usage and can improve frame rates'
     Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\XblAuthManager' -Name 'Start' -Type 'DWord' -Value 3 -Description 'Provides authentication and authorization services for Xbox Live. Safe to disable if you don''t use Xbox Game Pass, Microsoft Store games, or Xbox features'
     Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\XblGameSave' -Name 'Start' -Type 'DWord' -Value 3 -Description 'Syncs game saves to Xbox Live cloud. Only needed for Xbox Game Pass and Microsoft Store games with cloud save features'
@@ -1532,12 +1571,17 @@ exit 0
     # NOTIFICATIONS SETTINGS
     # ============================================================================
 
+    # Protected decision: Microsoft Defender stays enabled; only non-critical security-center
+    # notifications are reduced.
     Set-RegistryValue -Path 'HKLM:\Software\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name 'DisableEnhancedNotifications' -Type 'DWord' -Value 1 -Description 'Hide non-critical Windows Security notifications while keeping critical security alerts available'
 
     # ============================================================================
     # PRIVACY & SECURITY SETTINGS
     # ============================================================================
 
+    # Protected decisions: normal UAC with Secure Desktop. PreventDeviceEncryption is intended
+    # to prevent automatic device encryption; this block does not configure manual BitLocker
+    # workflows.
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'ConsentPromptBehaviorAdmin' -Type 'DWord' -Value 5 -Description 'Use normal UAC consent prompts for administrators for safer, more compatible elevation behavior'
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'PromptOnSecureDesktop' -Type 'DWord' -Value 1 -Description 'Show UAC prompts on the secure desktop for normal Windows security and compatibility behavior'
     Set-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker' -Name 'PreventDeviceEncryption' -Type 'DWord' -Value 1 -Description 'Prevents Windows from automatically encrypting your device with BitLocker without user consent'
@@ -1560,6 +1604,7 @@ exit 0
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors' -Name 'DisableLocation' -Type 'DWord' -Value 1 -Description 'Disable Windows location services by policy'
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\userAccountInformation' -Name 'Value' -Type 'String' -Value 'Deny' -Description 'Deny apps access to account information'
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\appDiagnostics' -Name 'Value' -Type 'String' -Value 'Deny' -Description 'Deny apps access to app diagnostic information'
+    # Project decision: keep this privacy profile unless an approved task changes it.
     # Privacy hardening: cloud/roaming/activity and app permissions
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'EnableActivityFeed' -Type 'DWord' -Value 0 -Description 'Disable Activity Feed and cloud roaming of activities'
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'UploadUserActivities' -Type 'DWord' -Value 0 -Description 'Prevent uploading user activity history'
@@ -1607,6 +1652,8 @@ exit 0
     # WINDOWS UPDATE SETTINGS
     # ============================================================================
 
+    # Protected decision: Windows Update stays active. Only conservative choices: no forced
+    # restart with users logged on, driver updates excluded, metered networks respected, Store kept.
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization' -Name 'DODownloadMode' -Type 'DWord' -Value 0 -Description 'Use HTTP only for Delivery Optimization and disable peer-to-peer update sharing'
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings' -Name 'IsContinuousInnovationOptedIn' -Type 'DWord' -Value 0 -Description 'Be among the first to get the latest non-security updates, fixes, and improvements as they roll out'
     Set-RegistryValue -Path 'HKLM:\Software\Microsoft\WindowsUpdate\UX\Settings' -Name 'AllowMUUpdateService' -Type 'DWord' -Value 0 -Description 'Get Microsoft Office and other updates together with Windows updates'
@@ -1696,6 +1743,8 @@ Windows Registry Editor Version 5.00
 
     Write-Log "Configuring clean Start Menu layout..." "INFO"
 
+    # Protected implementation: empty pinned list with applyOnce, then user pin changes are kept.
+    # Windows 11 only (build >= 22000); the Windows 10 branch below is legacy. Revalidate on new builds.
     $buildNumber = [System.Environment]::OSVersion.Version.Build
     Write-Log "Detected Windows build: $buildNumber" "INFO"
 
@@ -1743,6 +1792,7 @@ Windows Registry Editor Version 5.00
     # USER CUSTOMIZATIONS ONE-SHOT SCHEDULED TASK
     # ============================================================================
 
+    # End of the SYSTEM-wide phase: all HKLM work is done before the user task is registered.
     Write-Log "Registering one-shot UserCustomizations scheduled task..." "INFO"
     try {
         Register-AutounattendUserCustomizationsTask
@@ -1770,12 +1820,15 @@ if ($UserCustomizations) {
         # ================================================================
         # SYSTEM path: detect user, check marker, launch child as user
         # ================================================================
+        # Recovery design: per-user marker plus one-shot task; on failure the task is left
+        # registered so the next logon retries. Cleanup runs only after success.
         Write-Log "UserCustomizations running as SYSTEM, detecting logged-in user..." "INFO"
 
         if (-not (Test-Path "HKU:\")) {
             New-PSDrive -PSProvider Registry -Name HKU -Root HKEY_USERS -ErrorAction SilentlyContinue | Out-Null
         }
 
+        # Waits up to 2 minutes for an interactive session; failure exits without marking.
         $targetUser = $null
         for ($attempt = 1; $attempt -le 12; $attempt++) {
             $targetUser = Get-TargetUser
@@ -1810,6 +1863,8 @@ if ($UserCustomizations) {
             }
         } catch { }
 
+        # Startup cleanup (SYSTEM): unregisters itself, deletes C:\ProgramData\Autounattend and
+        # HKLM\SOFTWARE\Autounattend. Registered and verified only after a successful pass.
         function Register-AutounattendCleanupTask {
             $cleanupCommand = "Unregister-ScheduledTask -TaskName 'AutounattendCleanup' -TaskPath '\Autounattend\' -Confirm:`$false -ErrorAction SilentlyContinue; Start-Sleep -Seconds 5; Remove-Item -LiteralPath 'C:\ProgramData\Autounattend' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath 'HKLM:\SOFTWARE\Autounattend' -Recurse -Force -ErrorAction SilentlyContinue"
             $cleanupAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -Command `"$cleanupCommand`""
@@ -1819,6 +1874,8 @@ if ($UserCustomizations) {
             Register-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -Action $cleanupAction -Trigger $cleanupTrigger -Settings $cleanupSettings -Principal $cleanupPrincipal -Force -ErrorAction Stop | Out-Null
         }
 
+        # F2 recovery: if the one-shot task cannot be removed, keep the marker; if the cleanup
+        # task cannot be verified, restore the one-shot task. No reboot in this branch.
         if ($alreadyApplied) {
             Write-Log "User customizations have already been applied for this user" "INFO"
             Write-Log "To re-apply, delete: HKCU\Software\Autounattend\$markerName" "INFO"
@@ -1867,6 +1924,9 @@ if ($UserCustomizations) {
                 }
             }
         } else {
+            # Success path: the child applies HKCU; afterwards the one-shot task and marker are
+            # removed (verified), cleanup is registered and the machine reboots. If removal fails,
+            # exit 1 without rebooting so the next logon retries.
             Write-Log "Launching child process as interactive user to apply customizations..." "INFO"
             # Grant user write access to log file so child process can log
             icacls $LogPath /grant "${targetUser}:(M)" 2>&1 | Out-Null
@@ -2264,6 +2324,7 @@ if ($UserCustomizations) {
             # End here
 
 
+            # Marker is written only when no errors occurred, preserving recovery semantics.
             if ($script:CustomizationHadErrors) {
                 Write-Log "User customizations finished with one or more errors; completion marker was not created" "ERROR"
             } else {
