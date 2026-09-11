@@ -14,9 +14,22 @@ Plataforma objetivo actual: Windows 11 25H2, x64 / amd64.
 
 ## Estado actual
 
-La configuración sigue en desarrollo. El `autounattend.xml` exacto que está
-versionado todavía no ha sido validado mediante una instalación limpia
-completa.
+La configuración sigue en desarrollo y no es una versión release final.
+
+El `autounattend.xml` actual, con la corrección de "No molestar", ha completado
+una instalación limpia real en Windows 11 Pro 25H2 sobre un equipo de prueba
+desechable:
+
+- instalación, OOBE y llegada al escritorio sin errores bloqueantes;
+- sin prompt obligatorio de red ni de cuenta Microsoft;
+- particionado GPT/EFI creado automáticamente por Setup;
+- "No molestar" desactivado tras la instalación, con el interruptor modificable
+  y reactivable manualmente;
+- cleanup final del perfil completado.
+
+Esa instalación confirma la corrección de "No molestar" basada en la interfaz
+COM interna `IQuietHoursSettings`, con la escritura directa del blob de
+CloudStore únicamente como fallback.
 
 Comprobado estáticamente:
 
@@ -32,14 +45,18 @@ Comprobado estáticamente:
 
 Pendiente:
 
-- instalación limpia del `autounattend.xml` exacto actualmente versionado;
-- validación funcional completa posterior a esa instalación;
+- recorrido de recuperación de F2 en runtime (solo se observó la ruta normal);
 - revisión de los hallazgos F4 y posteriores de la auditoría;
+- efectividad completa de las funciones de IA de Paint (Notepad quedó sin
+  funciones de IA visibles en la prueba real);
 - auditoría de fuentes, licencias y atribuciones antes de la publicación
-  pública.
+  pública;
+- versionado o tag del baseline probado.
 
-Una validación estática no equivale a una instalación real validada. El
-baseline actual no está probado en instalación limpia.
+Una validación estática no equivale a una instalación real, y una instalación
+limpia correcta en un equipo de prueba no convierte este baseline en una
+versión release ni garantiza compatibilidad con otras versiones, ediciones o
+builds de Windows 11.
 
 ## Archivos principales
 
@@ -77,13 +94,16 @@ instalación limpia real.
 - Microsoft Store conservada.
 - Edge y WebView2 conservados por compatibilidad.
 - Microsoft Photos conservada.
-- Paint y Notepad conservados; existen políticas configuradas para desactivar
-  sus funciones de IA, cuya efectividad real sigue pendiente de validación.
+- Paint y Notepad conservados. Notepad quedó sin funciones de IA visibles en la
+  prueba real; en Paint las políticas de IA se aplican, pero la interfaz
+  todavía muestra opciones o avisos relacionados con IA, por lo que su limpieza
+  completa sigue pendiente.
 - OneDrive eliminado y bloqueado, conservando los datos del usuario.
 - Game Mode activado.
 - Game DVR desactivado.
 - Plan de energía Balanced.
 - Hibernación y Fast Startup desactivados.
+- Efectos de transparencia desactivados.
 - UAC con comportamiento normal y Secure Desktop.
 - Print Spooler conservado.
 - Bloqueo de Windows conservado.

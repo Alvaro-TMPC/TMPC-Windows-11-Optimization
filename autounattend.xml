@@ -2056,53 +2056,263 @@ if ($UserCustomizations) {
             Set-RegistryValue -Path 'HKCU:\Control Panel\Desktop' -Name 'DstNotification' -Type 'DWord' -Value 0 -Description 'Show notifications when daylight saving time changes occur'
             Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\Windows.SystemToast.SecurityAndMaintenance' -Name 'Enabled' -Type 'DWord' -Value 0 -Description 'Disable notifications from the Security and Maintenance Action Center'
 
-            # ProcMon + registry verified 2026-09-08 on Windows 11 25H2:
-            # PriorityOnly = Do Not Disturb ON; Unrestricted = Do Not Disturb OFF.
-            # Preserve the CloudStore blob and replace only the UTF-16LE profile string.
+            # ============================================================================
+            # DO NOT DISTURB / QUIET HOURS
+            # ============================================================================
+            # COMPROBADO EXPERIMENTALMENTE EN WINDOWS 11 PRO 25H2 (prueba aislada):
+            # - CLSID {F53321FA-34F8-4B7F-B9A3-361877CB94CF} e IID
+            #   {6BFF4732-81EC-4FFB-AE67-B6C1BC29631F} activados con
+            #   CoCreateInstance(CLSCTX_LOCAL_SERVER).
+            # - Slots de vtable 3 (get_UserSelectedProfile), 4 (put_UserSelectedProfile)
+            #   y 9 (get_OffProfileId) validados experimentalmente.
+            # - En un usuario nuevo, el setter con get_OffProfileId() materializa el estado
+            #   compacto y deja "No molestar" desactivado con el interruptor editable.
+            # DEPENDENCIA / RIESGO: IQuietHoursSettings es una interfaz interna no
+            # documentada; no es una API publica con soporte contractual de Microsoft y
+            # puede cambiar en futuras builds, por lo que debe revalidarse.
+            # El script usa la interfaz COM de Windows como via principal; Windows /
+            # WpnUserService materializa el estado persistente. La escritura directa del
+            # blob CloudStore se conserva unicamente como fallback para formatos
+            # materializados reconocibles.
+            function Disable-QuietHoursNative {
+                try {
+                    if (-not ([System.Management.Automation.PSTypeName]'Autounattend.QuietHoursNative').Type) {
+                        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace Autounattend
+{
+    public sealed class QuietHoursComResult
+    {
+        public bool Success;
+        public bool SetterInvoked;
+        public string ProfileBefore;
+        public string OffProfileId;
+        public int SetterHResult;
+        public string ProfileAfter;
+        public string Detail;
+    }
+
+    public delegate int GetStringDelegate(IntPtr self, out IntPtr value);
+    public delegate int PutStringDelegate(IntPtr self, [MarshalAs(UnmanagedType.LPWStr)] string value);
+
+    public static class QuietHoursNative
+    {
+        [DllImport("ole32.dll", PreserveSig = true)]
+        private static extern int CoCreateInstance(ref Guid rclsid, IntPtr pUnkOuter, uint dwClsContext, ref Guid riid, out IntPtr ppv);
+
+        public static QuietHoursComResult DisableOff(Guid clsid, Guid iid)
+        {
+            QuietHoursComResult result = new QuietHoursComResult();
+            IntPtr iface = IntPtr.Zero;
+            IntPtr beforePtr = IntPtr.Zero;
+            IntPtr offPtr = IntPtr.Zero;
+            IntPtr afterPtr = IntPtr.Zero;
+            try
+            {
+                Guid clsidLocal = clsid;
+                Guid iidLocal = iid;
+                int hrCreate = CoCreateInstance(ref clsidLocal, IntPtr.Zero, 0x4, ref iidLocal, out iface);
+                if (hrCreate != 0 || iface == IntPtr.Zero)
+                {
+                    result.Detail = "CoCreateInstance HRESULT=0x" + hrCreate.ToString("X8");
+                    return result;
+                }
+
+                IntPtr vtbl = Marshal.ReadIntPtr(iface);
+                IntPtr getSlot = Marshal.ReadIntPtr(vtbl, 3 * IntPtr.Size);
+                IntPtr putSlot = Marshal.ReadIntPtr(vtbl, 4 * IntPtr.Size);
+                IntPtr offSlot = Marshal.ReadIntPtr(vtbl, 9 * IntPtr.Size);
+                GetStringDelegate getProfile = (GetStringDelegate)Marshal.GetDelegateForFunctionPointer(getSlot, typeof(GetStringDelegate));
+                PutStringDelegate putProfile = (PutStringDelegate)Marshal.GetDelegateForFunctionPointer(putSlot, typeof(PutStringDelegate));
+                GetStringDelegate getOffProfile = (GetStringDelegate)Marshal.GetDelegateForFunctionPointer(offSlot, typeof(GetStringDelegate));
+
+                // Reading the current profile is diagnostic only; per the validated flow
+                // the setter must run whenever activation and get_OffProfileId succeed.
+                int hrBefore = getProfile(iface, out beforePtr);
+                if (hrBefore == 0 && beforePtr != IntPtr.Zero)
+                {
+                    result.ProfileBefore = Marshal.PtrToStringUni(beforePtr);
+                }
+                else
+                {
+                    result.ProfileBefore = "unavailable (get_UserSelectedProfile HRESULT=0x" + hrBefore.ToString("X8") + ")";
+                }
+
+                int hrOff = getOffProfile(iface, out offPtr);
+                if (hrOff != 0 || offPtr == IntPtr.Zero)
+                {
+                    result.Detail = "get_OffProfileId HRESULT=0x" + hrOff.ToString("X8");
+                    return result;
+                }
+                result.OffProfileId = Marshal.PtrToStringUni(offPtr);
+                if (result.OffProfileId == null || result.OffProfileId.Trim().Length == 0)
+                {
+                    result.Detail = "get_OffProfileId returned an empty profile identifier";
+                    return result;
+                }
+
+                result.SetterInvoked = true;
+                result.SetterHResult = putProfile(iface, result.OffProfileId);
+                if (result.SetterHResult != 0)
+                {
+                    result.Detail = "put_UserSelectedProfile HRESULT=0x" + result.SetterHResult.ToString("X8");
+                    return result;
+                }
+
+                int hrAfter = getProfile(iface, out afterPtr);
+                if (hrAfter != 0 || afterPtr == IntPtr.Zero)
+                {
+                    result.Detail = "post-set get_UserSelectedProfile HRESULT=0x" + hrAfter.ToString("X8");
+                    return result;
+                }
+                result.ProfileAfter = Marshal.PtrToStringUni(afterPtr);
+                if (!string.Equals(result.ProfileAfter, result.OffProfileId, StringComparison.OrdinalIgnoreCase))
+                {
+                    result.Detail = "post-set verification mismatch";
+                    return result;
+                }
+
+                result.Success = true;
+                result.Detail = "verified";
+                return result;
+            }
+            catch (Exception ex)
+            {
+                result.Detail = "native interop exception: " + ex.Message;
+                return result;
+            }
+            finally
+            {
+                FreeCoTaskString(beforePtr);
+                FreeCoTaskString(offPtr);
+                FreeCoTaskString(afterPtr);
+                if (iface != IntPtr.Zero)
+                {
+                    Marshal.Release(iface);
+                }
+            }
+        }
+
+        private static void FreeCoTaskString(IntPtr value)
+        {
+            if (value != IntPtr.Zero)
+            {
+                Marshal.FreeCoTaskMem(value);
+            }
+        }
+    }
+}
+'@ -ErrorAction Stop
+                    }
+
+                    $clsid = [Guid]'F53321FA-34F8-4B7F-B9A3-361877CB94CF'
+                    $iid = [Guid]'6BFF4732-81EC-4FFB-AE67-B6C1BC29631F'
+                    $native = [Autounattend.QuietHoursNative]::DisableOff($clsid, $iid)
+                    return [pscustomobject]@{
+                        Success       = [bool]$native.Success
+                        SetterInvoked = [bool]$native.SetterInvoked
+                        ProfileBefore = [string]$native.ProfileBefore
+                        OffProfileId  = [string]$native.OffProfileId
+                        SetterHResult = [int]$native.SetterHResult
+                        ProfileAfter  = [string]$native.ProfileAfter
+                        Detail        = [string]$native.Detail
+                    }
+                } catch {
+                    return [pscustomobject]@{
+                        Success       = $false
+                        SetterInvoked = $false
+                        ProfileBefore = ''
+                        OffProfileId  = ''
+                        SetterHResult = 0
+                        ProfileAfter  = ''
+                        Detail        = "native Quiet Hours helper failed: $($_.Exception.Message)"
+                    }
+                }
+            }
+
+            # Pure byte-array transform; it never touches the registry and never creates,
+            # pads or truncates blobs. PriorityOnly -> Unrestricted keeps the length and
+            # the rest of the bytes because both identifiers are 40 UTF-16LE characters.
+            function Set-QuietHoursProfileInBlob {
+                param([byte[]]$Data)
+
+                $priorityBytes = [System.Text.Encoding]::Unicode.GetBytes('Microsoft.QuietHoursProfile.PriorityOnly')
+                $unrestrictedBytes = [System.Text.Encoding]::Unicode.GetBytes('Microsoft.QuietHoursProfile.Unrestricted')
+                $matchIndex = -1
+
+                for ($i = 0; $i -le ($Data.Length - $priorityBytes.Length); $i++) {
+                    $match = $true
+                    for ($j = 0; $j -lt $priorityBytes.Length; $j++) {
+                        if ($Data[$i + $j] -ne $priorityBytes[$j]) {
+                            $match = $false
+                            break
+                        }
+                    }
+
+                    if ($match) {
+                        $matchIndex = $i
+                        break
+                    }
+                }
+
+                if ($matchIndex -ge 0) {
+                    [Array]::Copy($unrestrictedBytes, 0, $Data, $matchIndex, $unrestrictedBytes.Length)
+                    return [pscustomobject]@{ State = 'Replaced'; Data = $Data }
+                }
+
+                $quietHoursDecoded = [System.Text.Encoding]::Unicode.GetString($Data)
+                if ($quietHoursDecoded.Contains('Microsoft.QuietHoursProfile.Unrestricted')) {
+                    return [pscustomobject]@{ State = 'AlreadyOff'; Data = $Data }
+                }
+
+                return [pscustomobject]@{ State = 'Unknown'; Data = $Data }
+            }
+
             $quietHoursPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current\default$windows.data.donotdisturb.quiethourssettings\windows.data.donotdisturb.quiethourssettings'
             try {
-                if (Test-Path $quietHoursPath) {
-                    $quietHoursData = (Get-ItemProperty -Path $quietHoursPath -Name 'Data' -ErrorAction Stop).Data
-                    if ($quietHoursData -is [byte[]]) {
-                        $priorityBytes = [System.Text.Encoding]::Unicode.GetBytes('Microsoft.QuietHoursProfile.PriorityOnly')
-                        $unrestrictedBytes = [System.Text.Encoding]::Unicode.GetBytes('Microsoft.QuietHoursProfile.Unrestricted')
-                        $matchIndex = -1
+                $quietHoursProvenOff = $false
+                $nativeResult = Disable-QuietHoursNative
 
-                        for ($i = 0; $i -le ($quietHoursData.Length - $priorityBytes.Length); $i++) {
-                            $match = $true
-                            for ($j = 0; $j -lt $priorityBytes.Length; $j++) {
-                                if ($quietHoursData[$i + $j] -ne $priorityBytes[$j]) {
-                                    $match = $false
-                                    break
-                                }
-                            }
+                if ($nativeResult.Success) {
+                    $quietHoursProvenOff = $true
+                    $setterHex = '{0:X8}' -f $nativeResult.SetterHResult
+                    Write-Log "Native Quiet Hours COM path: before=$($nativeResult.ProfileBefore); offProfile=$($nativeResult.OffProfileId); setter HRESULT=0x$setterHex; after=$($nativeResult.ProfileAfter)" "INFO"
+                    Write-Log "Disabled Windows Do Not Disturb through the native Quiet Hours COM interface (Unrestricted verified)" "SUCCESS"
+                } else {
+                    Write-Log "Native Quiet Hours COM path did not verify the OFF state: $($nativeResult.Detail); trying the CloudStore fallback" "WARNING"
+                }
 
-                            if ($match) {
-                                $matchIndex = $i
-                                break
-                            }
-                        }
-
-                        if ($matchIndex -ge 0) {
-                            [Array]::Copy($unrestrictedBytes, 0, $quietHoursData, $matchIndex, $unrestrictedBytes.Length)
-                            Set-ItemProperty -Path $quietHoursPath -Name 'Data' -Value $quietHoursData -Type Binary -Force -ErrorAction Stop
-                            Write-Log "Disabled Windows Do Not Disturb by switching the Quiet Hours profile to Unrestricted" "SUCCESS"
-                        } else {
-                            $quietHoursDecoded = [System.Text.Encoding]::Unicode.GetString($quietHoursData)
-                            if ($quietHoursDecoded.Contains('Microsoft.QuietHoursProfile.Unrestricted')) {
-                                Write-Log "Windows Do Not Disturb is already disabled (Quiet Hours profile: Unrestricted)" "INFO"
+                if (-not $quietHoursProvenOff) {
+                    if (Test-Path $quietHoursPath) {
+                        $quietHoursData = (Get-ItemProperty -Path $quietHoursPath -Name 'Data' -ErrorAction Stop).Data
+                        if ($quietHoursData -is [byte[]]) {
+                            $quietHoursBlob = Set-QuietHoursProfileInBlob -Data $quietHoursData
+                            if ($quietHoursBlob.State -eq 'Replaced') {
+                                Set-ItemProperty -Path $quietHoursPath -Name 'Data' -Value $quietHoursBlob.Data -Type Binary -Force -ErrorAction Stop
+                                $quietHoursProvenOff = $true
+                                Write-Log "Disabled Windows Do Not Disturb by switching the Quiet Hours profile to Unrestricted (CloudStore fallback)" "SUCCESS"
+                            } elseif ($quietHoursBlob.State -eq 'AlreadyOff') {
+                                $quietHoursProvenOff = $true
+                                Write-Log "Windows Do Not Disturb is already disabled (Quiet Hours profile: Unrestricted, CloudStore fallback verification)" "INFO"
                             } else {
-                                Write-Log "Could not find a known Quiet Hours profile in CloudStore; existing data was preserved" "WARNING"
+                                Write-Log "Could not prove Quiet Hours is OFF: the native COM path failed and the CloudStore blob is not a recognized materialized profile; existing data was preserved" "ERROR"
                             }
+                        } else {
+                            Write-Log "Could not prove Quiet Hours is OFF: CloudStore Data is not a REG_BINARY byte array; existing data was preserved" "ERROR"
                         }
                     } else {
-                        Write-Log "Quiet Hours CloudStore Data is not a REG_BINARY byte array; existing data was preserved" "WARNING"
+                        Write-Log "Could not prove Quiet Hours is OFF: the Quiet Hours CloudStore key was not found" "ERROR"
                     }
-                } else {
-                    Write-Log "Quiet Hours CloudStore key was not found; Do Not Disturb state was left unchanged" "WARNING"
+                }
+
+                if (-not $quietHoursProvenOff) {
+                    $script:CustomizationHadErrors = $true
                 }
             } catch {
-                Write-Log "Failed to disable Windows Do Not Disturb: $($_.Exception.Message)" "WARNING"
+                $script:CustomizationHadErrors = $true
+                Write-Log "Failed to disable Windows Do Not Disturb: $($_.Exception.Message)" "ERROR"
             }
 
             # ============================================================================

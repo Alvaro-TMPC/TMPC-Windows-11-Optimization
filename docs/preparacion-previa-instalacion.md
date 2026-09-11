@@ -16,10 +16,10 @@ por separado.
 ## Convenciones
 
 - **Obligatorio**: no debe omitirse antes de formatear.
-- **Recomendable**: reduce riesgo o trabajo posterior; puede omitirse con una
-  justificación consciente.
-- **Solo si aplica**: depende de que el equipo o el usuario utilice esa función
-  o almacene ese tipo de datos.
+- **Recomendado** (o **recomendable**): reduce riesgo o trabajo posterior;
+  puede omitirse con una justificación consciente.
+- **Solo si es necesario** (o **solo si aplica**): depende de que el equipo o
+  el usuario utilice esa función o almacene ese tipo de datos.
 
 Las casillas se marcan cuando el punto se ha revisado y, cuando corresponda,
 verificado. Una tarea de verificación no se considera completa solo por haber
@@ -164,40 +164,58 @@ aquí. El perfil del repositorio aplica una política orientada a impedir el
 cifrado automático de dispositivo en la instalación nueva, pero eso no sustituye
 la comprobación ni la gestión del cifrado existente.
 
-## 7. Drivers
+## 7. Drivers y software a preparar
 
 El perfil de este proyecto excluye los drivers distribuidos mediante Windows
-Update, por lo que esta sección es importante. Preparar previamente, cuando
-correspondan al equipo:
+Update, por lo que esta sección es importante. Preparar previamente, según el
+hardware real del equipo:
 
-- [ ] Chipset.
-- [ ] Red Ethernet.
-- [ ] Wi-Fi.
-- [ ] Bluetooth.
-- [ ] GPU.
-- [ ] Almacenamiento y controladoras, si fueran necesarios para la instalación
-      o el arranque.
-- [ ] Audio.
-- [ ] Dispositivos específicos del fabricante.
+Drivers:
 
-Prioridad práctica:
-
-1. Drivers que permitan recuperar conectividad (red).
-2. Chipset y plataforma.
-3. GPU.
-4. Resto de dispositivos.
+- [ ] **Obligatorio**: Ethernet.
+- [ ] **Obligatorio si el equipo depende del Wi-Fi**: Wi-Fi.
+- [ ] **Recomendado**: chipset.
+- [ ] **Recomendado**: audio.
+- [ ] **Recomendado**: GPU (Intel, AMD o NVIDIA, según corresponda al equipo).
+- [ ] **Solo si es necesario**: almacenamiento y controladoras, cuando el
+      instalador o el arranque no reconozcan el hardware o su modo.
+- [ ] **Solo si es necesario**: Bluetooth y otros dispositivos específicos del
+      fabricante, si se utilizan.
 
 Recomendaciones:
 
 - Obtener los drivers preferentemente de fuentes oficiales del fabricante del
   hardware o del equipo.
+- No se recomiendan modelos, versiones ni enlaces concretos de drivers: la
+  selección depende del hardware exacto y debe verificarse antes de la
+  instalación. Si el hardware no está confirmado, tratar sus drivers como no
+  aplicables todavía.
 - No asumir que todos los dispositivos necesitan instalación manual de drivers:
   algunos pueden funcionar o completarse de otra forma después de la
   instalación. Preparar al menos los críticos.
 - Disponer de los drivers en un medio accesible durante la instalación, no solo
   en el equipo que se va a formatear.
-- No utilizar enlaces ni versiones de ejemplo: verificar los paquetes para el
-  equipo concreto antes de la instalación.
+
+Software:
+
+- [ ] **Recomendado**: tener localizados los instaladores del software que se
+      vaya a usar de inmediato después de instalar (navegador, herramientas de
+      desarrollo, launchers de juegos, utilidades habituales). Este repositorio
+      no instala software de terceros de forma automática.
+
+### Recomendación opcional de terceros: Visual C++ Redistributable
+
+Como conveniencia opcional, se puede preparar el paquete "Visual C++
+Redistributable Runtime Package All-in-One" publicado por TechPowerUp:
+
+- Fuente: <https://www.techpowerup.com/download/visual-c-redistributable-runtime-package-all-in-one/>
+- No es un paquete oficial de Microsoft: es un recopilatorio de terceros.
+- Es una recomendación opcional; su uso no es requisito del `autounattend.xml`
+  ni de este proyecto.
+- Antes de descargarlo o usarlo, debe verificarse la página de origen vigente y
+  sus condiciones de uso, distribución y licencia.
+- Este repositorio no afirma ninguna licencia concreta de ese paquete porque no
+  la ha comprobado.
 
 ## 8. Inventario previo
 
