@@ -274,7 +274,6 @@ documentada; sus valores de Registro sí se comprobaron.
   función sigue sin confirmarse.
 - Compatibilidad con versiones, ediciones o builds distintos de Windows 11
   25H2.
-- Auditoría de fuentes, licencias y atribuciones.
 - Cualquier otro elemento marcado como pendiente en la documentación del
   repositorio.
 - La detección de postura del Lenovo de pruebas está permanentemente en modo
@@ -315,12 +314,45 @@ Referencias de origen presentes en los archivos versionados:
 - `autounattend.xml` incluye la referencia
   `Source: https://github.com/memstechtips/Autounattend` en las notas de dos
   scripts generados: `BloatRemoval.ps1` (versión 2.3) y `OneDriveRemoval.ps1`
-  (versión 1.2). Ambas referencias ya forman parte del archivo público.
+  (versión 1.2). Esa URL histórica se conserva deliberadamente dentro del XML
+  para no alterar el baseline validado.
+
+Licencia del proyecto:
+
+- TMPC Windows 11 Optimization se distribuye bajo la licencia MIT.
+- Copyright (c) 2026 Alvaro-TMPC.
+- El texto completo está en `LICENSE`.
+
+Componentes de terceros:
+
+- Parte de `autounattend.xml` deriva de, o se basa en, código distribuido en
+  `memstechtips/UnattendedWinstall`.
+- Revisión de referencia (snapshot):
+  `cca752363772a845eb0fed9d3a5b89b5d0a10d20`.
+- Licencia del snapshot: MIT License.
+- Copyright: Copyright (c) 2025 Marco du Plessis (memstechtips).
+- Componentes identificados: `BloatRemoval.ps1` (versión 2.3),
+  `OneDriveRemoval.ps1` (versión 1.2) y lógica auxiliar/automatización
+  relacionada.
+- Referencia canónica para licencias y trazabilidad:
+  `https://github.com/memstechtips/UnattendedWinstall`. La URL histórica
+  `https://github.com/memstechtips/Autounattend` permanece dentro del XML y se
+  documenta por separado.
+- Los avisos completos de terceros, incluido el texto MIT con su copyright,
+  están en `THIRD_PARTY_NOTICES.md`.
+
+Otros componentes evaluados:
+
+- Ventoy: el repositorio solo incluye configuración propia (`ventoy.json`); el
+  usuario descarga Ventoy externamente y no se redistribuyen binarios de
+  Ventoy.
+- Microsoft: no se redistribuye Windows, ISO ni binarios de Microsoft; la
+  `ProductKey` de ceros es ficticia.
+- TechPowerUp: aparece únicamente como recomendación/enlace en
+  `docs/preparacion-previa-instalacion.md`; no se incorpora contenido de
+  terceros y no se presenta como componente redistribuido.
 
 Estado:
 
-- La revisión completa de fuentes, licencias y atribuciones sigue pendiente.
-- No se ha comprobado la licencia de los componentes referenciados; no debe
-  afirmarse ninguna licencia concreta sin verificarla.
-- La licencia definitiva del repositorio todavía no está establecida.
-- Las atribuciones existentes no deben eliminarse ni modificarse.
+- Auditoría de procedencia, licencias y atribuciones: CERRADA.
+- El historial Git no requiere reescritura por motivos de licensing.

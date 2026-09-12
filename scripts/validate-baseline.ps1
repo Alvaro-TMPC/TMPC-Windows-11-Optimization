@@ -305,6 +305,9 @@ function Test-GitAttributesCrossCheck {
         'autounattend.xml',
         'ventoy.json',
         'README.md',
+        'README.es.md',
+        'LICENSE',
+        'THIRD_PARTY_NOTICES.md',
         'docs/preparacion-previa-instalacion.md',
         'docs/configuracion-pruebas-limitaciones-fuentes.md',
         'scripts/validate-baseline.ps1'
@@ -323,6 +326,9 @@ function Test-GitAttributesCrossCheck {
         'autounattend.xml'                                   = 'lf'
         'ventoy.json'                                        = 'crlf'
         'README.md'                                          = 'lf'
+        'README.es.md'                                       = 'lf'
+        'LICENSE'                                            = 'lf'
+        'THIRD_PARTY_NOTICES.md'                             = 'lf'
         'docs/preparacion-previa-instalacion.md'             = 'lf'
         'docs/configuracion-pruebas-limitaciones-fuentes.md' = 'lf'
         'scripts/validate-baseline.ps1'                      = 'lf'
@@ -366,6 +372,77 @@ function Test-DocumentLinks {
         }
     }
     Add-Ok ("{0}: {1} enlace(s) relativo(s) comprobado(s)" -f $RelativePath, $checked)
+}
+
+function Test-LicensingFiles {
+    $licenseRecord = Get-FileRecord -RelativePath 'LICENSE'
+    if ($licenseRecord.Exists -and $licenseRecord.DecodeOk) {
+        if ($licenseRecord.Text.Contains('MIT License')) {
+            Add-Ok 'LICENSE: titulo MIT License presente'
+        } else {
+            Add-Fail 'LICENSE: falta el titulo "MIT License"'
+        }
+        if ($licenseRecord.Text.Contains('Copyright (c) 2026 Alvaro-TMPC')) {
+            Add-Ok 'LICENSE: copyright TMPC 2026 presente'
+        } else {
+            Add-Fail 'LICENSE: falta "Copyright (c) 2026 Alvaro-TMPC"'
+        }
+        if ($licenseRecord.Text.Contains('Permission is hereby granted, free of charge')) {
+            Add-Ok 'LICENSE: texto de permiso MIT presente'
+        } else {
+            Add-Fail 'LICENSE: falta el texto de permiso MIT'
+        }
+    }
+
+    $thirdRecord = Get-FileRecord -RelativePath 'THIRD_PARTY_NOTICES.md'
+    if ($thirdRecord.Exists -and $thirdRecord.DecodeOk) {
+        $thirdChecks = @(
+            @{ Snippet = 'memstechtips/UnattendedWinstall'; Description = 'THIRD_PARTY_NOTICES: upstream UnattendedWinstall' },
+            @{ Snippet = 'cca752363772a845eb0fed9d3a5b89b5d0a10d20'; Description = 'THIRD_PARTY_NOTICES: snapshot de referencia' },
+            @{ Snippet = 'Copyright (c) 2025 Marco du Plessis (memstechtips)'; Description = 'THIRD_PARTY_NOTICES: copyright de terceros' }
+        )
+        foreach ($check in $thirdChecks) {
+            if ($thirdRecord.Text.Contains($check.Snippet)) {
+                Add-Ok $check.Description
+            } else {
+                Add-Fail ("{0}: fragmento no encontrado" -f $check.Description)
+            }
+        }
+    }
+
+    foreach ($relativePath in @('README.md', 'README.es.md')) {
+        $record = Get-FileRecord -RelativePath $relativePath
+        if (-not $record.Exists -or -not $record.DecodeOk) { continue }
+        if ($record.Text.Contains('](LICENSE)')) {
+            Add-Ok ("{0}: referencia relativa a LICENSE presente" -f $relativePath)
+        } else {
+            Add-Fail ("{0}: sin referencia relativa a LICENSE" -f $relativePath)
+        }
+        if ($record.Text.Contains('](THIRD_PARTY_NOTICES.md)')) {
+            Add-Ok ("{0}: referencia relativa a THIRD_PARTY_NOTICES.md presente" -f $relativePath)
+        } else {
+            Add-Fail ("{0}: sin referencia relativa a THIRD_PARTY_NOTICES.md" -f $relativePath)
+        }
+        if ($record.Text.Contains('Copyright (c) 2026 Alvaro-TMPC')) {
+            Add-Ok ("{0}: copyright TMPC 2026 presente" -f $relativePath)
+        } else {
+            Add-Fail ("{0}: falta el copyright TMPC 2026" -f $relativePath)
+        }
+    }
+
+    $docsRecord = Get-FileRecord -RelativePath 'docs/configuracion-pruebas-limitaciones-fuentes.md'
+    if ($docsRecord.Exists -and $docsRecord.DecodeOk) {
+        if ($docsRecord.Text.Contains('Copyright (c) 2026 Alvaro-TMPC')) {
+            Add-Ok 'docs/configuracion-pruebas-limitaciones-fuentes.md: copyright TMPC 2026 presente'
+        } else {
+            Add-Fail 'docs/configuracion-pruebas-limitaciones-fuentes.md: falta el copyright TMPC 2026'
+        }
+        if ($docsRecord.Text.Contains('cca752363772a845eb0fed9d3a5b89b5d0a10d20')) {
+            Add-Ok 'docs/configuracion-pruebas-limitaciones-fuentes.md: snapshot de referencia presente'
+        } else {
+            Add-Fail 'docs/configuracion-pruebas-limitaciones-fuentes.md: falta el snapshot de referencia'
+        }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -415,6 +492,9 @@ $mandatoryFiles = @(
     'ventoy.json',
     '.gitattributes',
     'README.md',
+    'README.es.md',
+    'LICENSE',
+    'THIRD_PARTY_NOTICES.md',
     'docs/preparacion-previa-instalacion.md',
     'docs/configuracion-pruebas-limitaciones-fuentes.md'
 )
@@ -705,6 +785,9 @@ Write-Section 'EOL / ENCODING'
 
 Test-FilePolicy -RelativePath 'autounattend.xml' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'README.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
+Test-FilePolicy -RelativePath 'README.es.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
+Test-FilePolicy -RelativePath 'LICENSE' -ExpectedEol 'LF' -ExpectedBom 'NONE'
+Test-FilePolicy -RelativePath 'THIRD_PARTY_NOTICES.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'docs/preparacion-previa-instalacion.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'docs/configuracion-pruebas-limitaciones-fuentes.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'ventoy.json' -ExpectedEol 'CRLF' -ExpectedBom 'NONE' -BomMismatchSeverity 'WARN'
@@ -737,6 +820,9 @@ if (-not $gitattributesRecord.Exists) {
         'autounattend.xml text eol=lf',
         'ventoy.json text eol=crlf',
         'README.md text eol=lf',
+        'README.es.md text eol=lf',
+        'LICENSE text eol=lf',
+        'THIRD_PARTY_NOTICES.md text eol=lf',
         'docs/*.md text eol=lf',
         'scripts/*.ps1 text eol=lf'
     )
@@ -751,6 +837,8 @@ if (-not $gitattributesRecord.Exists) {
 }
 
 Test-DocumentLinks -RelativePath 'README.md'
+Test-DocumentLinks -RelativePath 'README.es.md'
+Test-DocumentLinks -RelativePath 'THIRD_PARTY_NOTICES.md'
 $docsDir = Join-Path $script:Root 'docs'
 if (Test-Path -LiteralPath $docsDir) {
     $docFiles = @(Get-ChildItem -LiteralPath $docsDir -Filter '*.md' -File)
@@ -758,6 +846,9 @@ if (Test-Path -LiteralPath $docsDir) {
         Test-DocumentLinks -RelativePath ('docs/' + $docFile.Name)
     }
 }
+
+Write-Section 'LICENCIAS'
+Test-LicensingFiles
 
 # ---------------------------------------------------------------------------
 # Resultado
