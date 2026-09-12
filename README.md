@@ -31,6 +31,26 @@ Esa instalación confirma la corrección de "No molestar" basada en la interfaz
 COM interna `IQuietHoursSettings`, con la escritura directa del blob de
 CloudStore únicamente como fallback.
 
+El candidato actual, que añade la corrección del registro del cleanup (Branch A)
+y las preferencias de File Explorer con el override de Downloads, también ha
+completado una instalación limpia real en el mismo equipo de prueba, sin
+instrumentación de prueba en el medio:
+
+- ruta normal de F2 completa: one-shot retirada y verificada, cleanup registrado
+  y verificado, marcador eliminado, reinicio automático y cleanup final sin
+  residuos de Autounattend;
+- preferencias de Explorer aplicadas en Registro y agrupación validada
+  visualmente: las carpetas normales conservan "Agrupar por = Ninguno" de forma
+  nativa y Downloads no agrupa mediante el override, manteniendo el estado tras
+  cerrar y reabrir el Explorador.
+
+El recorrido de recuperación de F2 quedó observado previamente en runtime
+mediante una prueba controlada con inyección de fallo.
+
+La anomalía histórica de primer logon (barra y fondo visualmente claros hasta un
+logoff/logon) no se reprodujo en la instalación del candidato actual; su causa
+sigue sin comprobarse y no se declara resuelta.
+
 Comprobado estáticamente:
 
 - `autounattend.xml` bien formado.
@@ -45,7 +65,6 @@ Comprobado estáticamente:
 
 Pendiente:
 
-- recorrido de recuperación de F2 en runtime (solo se observó la ruta normal);
 - revisión de los hallazgos F4 y posteriores de la auditoría;
 - efectividad completa de las funciones de IA de Paint (Notepad quedó sin
   funciones de IA visibles en la prueba real);

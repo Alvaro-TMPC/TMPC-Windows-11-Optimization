@@ -52,6 +52,23 @@ de claves del archivo de respuestas.
   el estado persistente. La escritura directa del blob de CloudStore de Quiet
   Hours se conserva únicamente como fallback para formatos materializados
   reconocibles. Dependiente de Windows 11 25H2.
+- File Explorer define para el usuario creado durante la instalación: vista
+  compacta activada, casillas de elemento desactivadas, extensiones de nombre de
+  archivo visibles y elementos ocultos visibles. Todas se aplican en HKCU.
+  `ShowSuperHidden` permanece en 0: los archivos protegidos del sistema siguen
+  ocultos.
+- Windows 11 25H2 abre por defecto con "Agrupar por = Ninguno" las vistas de
+  las carpetas normales: elementos generales (Generic), Documents, Pictures,
+  Music y Videos. El perfil no aplica ninguna personalización de agrupación
+  sobre ellas: usa el comportamiento nativo de Windows.
+- Downloads es la única excepción comprobada: su FolderType de Windows agrupa
+  los elementos por fecha de modificación. El perfil crea un override por
+  usuario del FolderType de shell: copia el FolderType de Downloads instalado
+  por Windows en HKCU y deja `GroupBy` como cadena vacía. No se borran `Bags`
+  ni `BagMRU` y no se modifica el FolderType de HKLM.
+- Home, Gallery, SearchResults, Libraries, StartMenu y otras vistas especiales
+  quedan fuera del alcance. Sus agrupaciones pueden ser estructurales y no se
+  modifican automáticamente.
 
 La segunda instalación limpia confirmó el comportamiento de "No molestar" y
 los efectos de transparencia. Las políticas de IA de Notepad quedaron limpias
@@ -83,7 +100,7 @@ Sobre los archivos reales del repositorio:
 Hashes SHA-256 del baseline actual:
 
 - `autounattend.xml`:
-  `C0EA1741BB09EA88F83F2D4C841081C9441AEE9F81DC4D2681ED6C9C9A5F03D1`.
+  `12FF7B782E4E22DAFAACC9D881CEE30CFB2E4E1CB35B3C8DD5A82FCDC7F16A6E`.
 - `ventoy.json`:
   `2231E01E9B0BA0622888D97EFEDA0F476DBD73A9CB90B11B48656E1F889F2796`.
 
@@ -128,6 +145,50 @@ perfil COM es `Microsoft.QuietHoursProfile.Unrestricted`.
 pública con soporte contractual de Microsoft y puede cambiar en futuras
 builds.
 
+### Comprobado experimentalmente (usuario local limpio, Windows 11 25H2)
+
+En un usuario local desechable (`TMPC-Explorer-Test`) sobre Windows 11 25H2 se
+validó el mecanismo del override de Downloads:
+
+- Perfil limpio antes del experimento: `UseCompactMode` ausente,
+  `AutoCheckSelect = 1`, `HideFileExt = 1`, `Hidden = 2`,
+  `ShowSuperHidden = 0`, `UseAutoGrouping` ausente; el override de Downloads en
+  HKCU no existía y `Bags` no existía.
+- Antes de aplicar cualquier personalización, las carpetas normales abiertas
+  por primera vez en el usuario limpio ya mostraban "Agrupar por = Ninguno":
+  Generic, Documents, Pictures, Music y Videos (PASS). La única vista que
+  agrupaba era Downloads, por fecha de modificación.
+- Método: copiar recursivamente el FolderType de Downloads de HKLM a HKCU con
+  `reg.exe copy /s /f` y cambiar únicamente
+  `TopViews\{00000000-0000-0000-0000-000000000000}\GroupBy` a cadena vacía
+  (`REG_SZ`). El resto de valores (`ColumnList`, `GroupAscending`,
+  `LogicalViewMode`, `Name`, `Order`, `PrimaryProperty`, `SortByList`) quedaron
+  idénticos a HKLM.
+- Resultados runtime del override de Downloads: primera apertura con
+  "Agrupar por = Ninguno" (PASS), persistencia tras cerrar y reabrir (PASS),
+  sin regresión observable en `Bags` ni en carpetas genéricas; `Bags` apareció
+  tras la primera apertura con 0 valores de agrupación; `BAGS_RESET_REQUIRED =
+  NO`; `USEAUTOGROUPING_REQUIRED = NO`.
+- La agrupación por defecto de las carpetas normales es la nativa de Windows 11
+  25H2 (`GLOBAL_NORMAL_FOLDER_GROUPING = PASS experimental`); la única
+  personalización de agrupación del perfil es el override de Downloads
+  (`NATIVE_NONE_DEFAULT + DOWNLOADS_SPECIFIC_OVERRIDE`).
+- `UseAutoGrouping = 0` se probó antes y se RECHAZÓ: Downloads siguió agrupando
+  por fecha de modificación. No forma parte del baseline.
+- No fue necesario borrar `Bags` ni `BagMRU`; en una instalación limpia las
+  vistas guardadas no existen antes de que se aplique el override.
+- El override de FolderTypes en HKCU no es una API pública estable de Microsoft
+  y está validado específicamente en Windows 11 25H2; una actualización mayor
+  puede eliminar la clave HKCU y revertir el comportamiento.
+
+El Lenovo de pruebas está permanentemente detectado como slate
+(`ConvertibleSlateMode = 0`, `SM_CONVERTIBLESLATEMODE = 0`) aunque se instaló el
+driver Lenovo ACPI oficial (`LENOVO_VPC2004_DRIVER = PASS`,
+`LENOVO_POSTURE_DETECTION = FAIL`). Por ello, la apariencia visual de vista
+compacta y casillas en ese equipo no se usa como criterio bloqueante; la
+agrupación de Downloads sí se valida funcionalmente porque no depende del
+espaciado táctil. No se introducen hacks de convertibilidad en el baseline.
+
 ### Comprobado en instalación limpia real (Windows 11 Pro 25H2)
 
 El `autounattend.xml` corregido se grabó en el medio con el SHA-256 de origen
@@ -157,12 +218,55 @@ modificable y reactivación manual correcta. El cleanup final se completó: sin
 del perfil. La ausencia del marcador final es coherente con el cleanup completo
 y no debe interpretarse como un fallo.
 
+El recorrido de recuperación de F2 se observó además en runtime el 2026-09-12
+con una prueba controlada de inyección de fallo sobre el baseline publicado
+`C0EA1741BB09EA88F83F2D4C841081C9441AEE9F81DC4D2681ED6C9C9A5F03D1`: la
+one-shot se eliminó y verificó antes del fallo, el fallo no se reportó como
+éxito, la recuperación restauró y verificó la one-shot, el reintento del
+siguiente logon completó el cleanup y el reinicio final arrancó con el sistema
+limpio. Estado: `F2_RUNTIME = PASS` y `F2_RECOVERY_PATH = PASS`.
+
+### Candidato actual: instalación limpia real y Explorer integrado (2026-09-12)
+
+El candidato actual (corrección del registro del cleanup Branch A, preferencias
+de Explorer y override de Downloads) completó una instalación limpia
+destructiva real en el Lenovo de pruebas, con el medio verificado por SHA-256 y
+sin instrumentación de prueba. Resultado:
+
+- llegada al escritorio final correcta, con modo oscuro y fondo por defecto
+  (`AppsUseLightTheme = 0`, `SystemUsesLightTheme = 0`,
+  `WallPaper = C:\Windows\Web\Wallpaper\Windows\img19.jpg`);
+- un reinicio automático observado durante el flujo;
+- ruta normal de F2 completa: one-shot retirada y verificada, cleanup
+  registrado y verificado, marcador de usuario eliminado, reinicio automático
+  ejecutado, cleanup final completado y arranque posterior sin residuos
+  (`AUTOUNATTEND_TASK_COUNT = 0`, `C:\ProgramData\Autounattend` ausente,
+  `HKLM\SOFTWARE\Autounattend` ausente, marcador de usuario ausente);
+- Registro de Explorer: `UseCompactMode = 1`, `AutoCheckSelect = 0`,
+  `HideFileExt = 0`, `Hidden = 1`, `ShowSuperHidden = 0`; override HKCU de
+  Downloads presente con `GroupBy` vacío (`REG_SZ`) y HKLM conservando
+  `System.DateModified`; `UseAutoGrouping` ausente;
+- validación visual/funcional: Generic, Documents, Pictures, Music y Videos
+  abren con "Agrupar por = Ninguno" de forma nativa y Downloads abre con
+  "Agrupar por = Ninguno" mediante el override y conserva el estado tras cerrar
+  y reabrir el Explorador.
+
+Estados: `F2_NORMAL_FIX_RUNTIME_REVALIDATION = PASS`,
+`F2_CANDIDATE_REVALIDATION = PASS`, `EXPLORER_REGISTRY_VALIDATION = PASS`,
+`EXPLORER_INTEGRATED_CLEAN_INSTALL = PASS`,
+`DOWNLOADS_REOPEN_PERSISTENCE = PASS`, `CANDIDATE_RUNTIME_VALIDATION = PASS`.
+
+La anomalía histórica de primer logon (barra y fondo visualmente claros hasta un
+logoff/logon) no se reprodujo en esta instalación; su causa sigue sin
+comprobarse y no se declara resuelta. La vista compacta y las casillas no se
+usan como criterio visual en el Lenovo de pruebas por su anomalía slate ya
+documentada; sus valores de Registro sí se comprobaron.
+
 ### Pendiente / no comprobado
 
 - Causa exacta del "No molestar" activado en la primera instalación limpia:
   PENDIENTE / NO COMPROBADA; el blob compacto de 13 bytes no equivale a
   `PriorityOnly` y no debe documentarse como DND activado.
-- Recorrido de recuperación de F2 en runtime: solo se observó la ruta normal.
 - F1 en runtime (no observado) y F3 en runtime (parcial).
 - Corrección y comprobación de los hallazgos F4 y posteriores de la auditoría.
 - Efectividad completa de las funciones de IA de Paint: las políticas se
@@ -173,6 +277,11 @@ y no debe interpretarse como un fallo.
 - Auditoría de fuentes, licencias y atribuciones.
 - Cualquier otro elemento marcado como pendiente en la documentación del
   repositorio.
+- La detección de postura del Lenovo de pruebas está permanentemente en modo
+  slate (`ConvertibleSlateMode = 0`, `SM_CONVERTIBLESLATEMODE = 0`); la
+  apariencia visual de vista compacta y casillas en ese equipo no es evidencia
+  fiable y no se usa como criterio bloqueante. La agrupación de Downloads sí se
+  valida funcionalmente en ese equipo.
 
 **Una validación estática no sustituye una instalación limpia real.** El XML
 actual ha completado una instalación limpia en Windows 11 Pro 25H2; eso no lo
@@ -189,11 +298,14 @@ convierte en una versión release ni garantiza compatibilidad con otras builds.
   implementación de Windows 11 25H2. La vía principal usa la interfaz interna
   no documentada `IQuietHoursSettings`, que puede cambiar en futuras builds y
   debe revalidarse.
+- El override por usuario del FolderType de Downloads no es una API pública de
+  Microsoft; una actualización mayor puede eliminar `HKCU\...\FolderTypes` y
+  revertir el default de agrupación. El resto de carpetas normales usa el
+  default nativo de Windows 11 25H2 y no tiene override.
 - Las funciones de IA de Notepad quedaron sin presencia visible en la prueba
   real; las funciones de IA de Paint siguen sin confirmarse y su limpieza
   visual no se logró.
 - F4 y posteriores siguen pendientes.
-- El recorrido de recuperación de F2 no se observó en runtime.
 - Todavía no existe un baseline etiquetado como versión release probada.
 
 ## 4. Fuentes, licencias y atribuciones

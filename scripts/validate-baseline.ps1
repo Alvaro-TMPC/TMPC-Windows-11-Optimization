@@ -208,6 +208,71 @@ function Test-PowerShellBlock {
     }
 }
 
+function Test-ExplorerDefaults {
+    param([string]$Text)
+
+    $presenceChecks = @(
+        @{ Snippet = "-Name 'UseCompactMode' -Type 'DWord' -Value 1"; Description = 'Explorer HKCU: UseCompactMode = 1' },
+        @{ Snippet = "-Name 'AutoCheckSelect' -Type 'DWord' -Value 0"; Description = 'Explorer HKCU: AutoCheckSelect = 0' },
+        @{ Snippet = "-Name 'HideFileExt' -Type 'DWord' -Value 0"; Description = 'Explorer HKCU: HideFileExt = 0' },
+        @{ Snippet = "-Name 'Hidden' -Type 'DWord' -Value 1"; Description = 'Explorer HKCU: Hidden = 1' },
+        @{ Snippet = "-Name 'ShowSuperHidden' -Type 'DWord' -Value 0"; Description = 'Explorer HKCU: ShowSuperHidden = 0' },
+        @{ Snippet = '{885a186e-a440-4ada-812b-db871b942259}'; Description = 'Downloads FolderType GUID presente' },
+        @{ Snippet = '{00000000-0000-0000-0000-000000000000}'; Description = 'FolderTypes TopView por defecto presente' },
+        @{ Snippet = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes'; Description = 'Origen HKLM FolderTypes presente' },
+        @{ Snippet = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes'; Description = 'Destino HKCU FolderTypes presente' },
+        @{ Snippet = "-Name 'GroupBy' -Value '' -Type String"; Description = 'GroupBy se establece como String vacio' },
+        @{ Snippet = 'System.DateModified'; Description = 'Gate GroupBy = System.DateModified presente' }
+    )
+    foreach ($check in $presenceChecks) {
+        if ($Text.Contains($check.Snippet)) {
+            Add-Ok $check.Description
+        } else {
+            Add-Fail ("{0}: fragmento no encontrado" -f $check.Description)
+        }
+    }
+
+    $recursiveCopy = $false
+    foreach ($match in [regex]::Matches($Text, 'reg\.exe\s+copy\b[^\r\n]*')) {
+        if ($match.Value -match '/s' -and $match.Value -match '/f') {
+            $recursiveCopy = $true
+        }
+    }
+    if ($recursiveCopy) {
+        Add-Ok 'reg.exe copy recursivo (/s /f) presente'
+    } else {
+        Add-Fail 'reg.exe copy recursivo (/s /f) no encontrado'
+    }
+
+    $forbidden = @('UseAutoGrouping', 'ConvertibleSlateMode', 'ConvertibilityEnabled')
+    foreach ($name in $forbidden) {
+        if ($Text.Contains($name)) {
+            Add-Fail ("{0}: presente y no permitido" -f $name)
+        } else {
+            Add-Ok ("{0}: ausente" -f $name)
+        }
+    }
+
+    $bagMutationPattern = '(?im)^\s*.*(?:Remove-Item|Remove-ItemProperty|New-Item|Set-ItemProperty|Set-RegistryValue|Remove-RegistryKey|Remove-RegistryValue|New-RegistryKey|reg\.exe\s+(?:add|delete)).*(?:BagMRU|\\Bags\b).*$'
+    if ([regex]::IsMatch($Text, $bagMutationPattern)) {
+        Add-Fail 'Bags/BagMRU: mutacion detectada'
+    } else {
+        Add-Ok 'Bags/BagMRU: sin mutaciones'
+    }
+
+    if ($Text.Contains('Shell\Bags') -or $Text.Contains('Shell\BagMRU')) {
+        Add-Fail 'Bags/BagMRU: ruta de registro presente y no permitida'
+    } else {
+        Add-Ok 'Bags/BagMRU: sin rutas de registro'
+    }
+
+    if ([regex]::IsMatch($Text, '(?im)^\s*.*(?:Set-ItemProperty|New-Item|New-ItemProperty|Remove-Item|Remove-ItemProperty|Set-RegistryValue|Remove-RegistryKey|New-RegistryKey|Remove-RegistryValue|reg\.exe\s+(?:add|delete)).*HKLM.*FolderTypes.*$')) {
+        Add-Fail 'HKLM FolderTypes: mutacion detectada'
+    } else {
+        Add-Ok 'HKLM FolderTypes: solo lectura'
+    }
+}
+
 function Get-HereStringMatches {
     param(
         [string]$Text,
@@ -529,6 +594,11 @@ if ($null -eq $doc) {
     }
     if ($null -ne $oneDriveText) {
         Test-PowerShellBlock -Name 'OneDriveRemoval.ps1' -Text $oneDriveText
+    }
+
+    if ($null -ne $sysText) {
+        Write-Section 'EXPLORER DEFAULTS'
+        Test-ExplorerDefaults -Text $sysText
     }
 }
 

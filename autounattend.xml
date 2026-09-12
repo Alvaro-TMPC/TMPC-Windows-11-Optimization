@@ -1924,9 +1924,10 @@ if ($UserCustomizations) {
                 }
             }
         } else {
-            # Success path: the child applies HKCU; afterwards the one-shot task and marker are
-            # removed (verified), cleanup is registered and the machine reboots. If removal fails,
-            # exit 1 without rebooting so the next logon retries.
+            # Success path: the child applies HKCU. The one-shot task is removed and verified
+            # while the marker is kept; cleanup is registered and verified before the marker is
+            # removed. Any failure keeps or restores a coherent retry state and exits without
+            # rebooting.
             Write-Log "Launching child process as interactive user to apply customizations..." "INFO"
             # Grant user write access to log file so child process can log
             icacls $LogPath /grant "${targetUser}:(M)" 2>&1 | Out-Null
@@ -1937,30 +1938,127 @@ if ($UserCustomizations) {
             if ($success) {
                 Write-Log "Child process completed successfully" "SUCCESS"
 
-                # This task is intentionally one-shot. Remove it after successful HKCU customization.
+                # This task is intentionally one-shot. Remove and verify it first; the marker is
+                # kept until the cleanup task is registered and verified.
+                $userTaskRemoved = $false
                 try {
                     Unregister-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -Confirm:$false -ErrorAction Stop
                     $remainingTask = Get-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -ErrorAction SilentlyContinue
                     if ($remainingTask) {
                         throw "AutounattendUserCustomizations is still registered after the unregister attempt."
                     }
+                    $userTaskRemoved = $true
                     Write-Log "Removed one-shot user customization task and verified that it no longer exists" "SUCCESS"
-
-                    # The completion marker is no longer needed once the task has been removed.
-                    if (Test-Path "HKU:\$targetUserSID\Software\Autounattend") {
-                        Remove-Item -Path "HKU:\$targetUserSID\Software\Autounattend" -Recurse -Force -ErrorAction Stop
-                    }
                 } catch {
-                    Write-Log "Could not safely remove the one-shot user customization task/marker: $($_.Exception.Message)" "ERROR"
+                    Write-Log "Could not safely remove the one-shot user customization task: $($_.Exception.Message)" "ERROR"
+                }
+
+                if (-not $userTaskRemoved) {
+                    # The marker stays at 1 and the still-registered one-shot retries at next logon.
+                    $script:CustomizationHadErrors = $true
+                    Write-Log "One-shot user customization task was not safely removed; no cleanup was registered and no reboot will happen" "ERROR"
                     exit 1
                 }
 
-                # Clean the temporary setup scripts/logs on next startup as SYSTEM, then delete the cleanup task itself.
+                # Clean the temporary setup scripts/logs on next startup as SYSTEM, then delete the
+                # cleanup task itself. The marker is still present, so cleanup must be registered
+                # and verified before the marker is removed; on failure the one-shot task is
+                # restored so the next logon retries.
+                $cleanupTaskVerified = $false
                 try {
                     Register-AutounattendCleanupTask
-                    Write-Log "Registered one-shot setup cleanup task" "SUCCESS"
+                    $cleanupTask = Get-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -ErrorAction Stop
+                    if (-not $cleanupTask) {
+                        throw "AutounattendCleanup was not found after registration."
+                    }
+                    $cleanupTaskVerified = $true
+                    Write-Log "Registered and verified one-shot setup cleanup task" "SUCCESS"
                 } catch {
-                    Write-Log "Could not register cleanup task: $($_.Exception.Message)" "WARNING"
+                    Write-Log "Could not register or verify the cleanup task: $($_.Exception.Message)" "ERROR"
+                }
+
+                if (-not $cleanupTaskVerified) {
+                    # Restore a coherent retry state: remove any unverified cleanup task, keep the
+                    # marker at 1 and register the one-shot task again. No reboot.
+                    $script:CustomizationHadErrors = $true
+                    $retryRestored = $false
+                    try {
+                        $dubiousCleanup = Get-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -ErrorAction SilentlyContinue
+                        if ($dubiousCleanup) {
+                            Unregister-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -Confirm:$false -ErrorAction Stop
+                            $dubiousCleanup = Get-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -ErrorAction SilentlyContinue
+                            if ($dubiousCleanup) {
+                                throw "AutounattendCleanup is still registered after the unregister attempt."
+                            }
+                            Write-Log "Removed unverified cleanup task before restoring the one-shot task" "WARNING"
+                        }
+                        Register-AutounattendUserCustomizationsTask
+                        $restoredTask = Get-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -ErrorAction Stop
+                        if (-not $restoredTask) {
+                            throw "AutounattendUserCustomizations was not found after the restore attempt."
+                        }
+                        $retryRestored = $true
+                        Write-Log "Restored and verified one-shot user customization task so retry can happen at next logon" "SUCCESS"
+                    } catch {
+                        Write-Log "Could not restore a coherent retry state after the cleanup failure: $($_.Exception.Message)" "ERROR"
+                    }
+                    if (-not $retryRestored) {
+                        Write-Log "Cleanup failure recovery could not be verified; no automatic recovery can be claimed" "ERROR"
+                    }
+                    Write-Log "Cleanup task was not registered and verified; no reboot will happen" "ERROR"
+                    exit 1
+                }
+
+                # The marker is removed last, once cleanup is registered and verified. Removal and
+                # absence are verified; on failure the registered cleanup is removed and the
+                # one-shot task is restored so the next logon retries.
+                $markerRemoved = $false
+                try {
+                    if (Test-Path $markerPath) {
+                        Remove-Item -Path $markerPath -Recurse -Force -ErrorAction Stop
+                    }
+                    if (Test-Path $markerPath) {
+                        throw "The completion marker key still exists after removal."
+                    }
+                    $markerRemoved = $true
+                    Write-Log "Removed completion marker and verified that it no longer exists" "SUCCESS"
+                } catch {
+                    Write-Log "Could not safely remove the completion marker: $($_.Exception.Message)" "ERROR"
+                }
+
+                if (-not $markerRemoved) {
+                    # Roll back to a coherent retry state: cleanup removed and verified, marker
+                    # forced to 1 and verified, one-shot task restored and verified. No reboot.
+                    $script:CustomizationHadErrors = $true
+                    try {
+                        $cleanupTask = Get-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -ErrorAction SilentlyContinue
+                        if ($cleanupTask) {
+                            Unregister-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -Confirm:$false -ErrorAction Stop
+                            $cleanupTask = Get-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -ErrorAction SilentlyContinue
+                            if ($cleanupTask) {
+                                throw "AutounattendCleanup is still registered after the unregister attempt."
+                            }
+                            Write-Log "Removed registered cleanup task after the marker removal failure" "WARNING"
+                        }
+                        if (-not (Test-Path $markerPath)) {
+                            New-Item -Path $markerPath -Force -ErrorAction Stop | Out-Null
+                        }
+                        Set-ItemProperty -Path $markerPath -Name $markerName -Value 1 -Type DWord -Force -ErrorAction Stop
+                        $markerValue = Get-ItemProperty -Path $markerPath -Name $markerName -ErrorAction Stop
+                        if ($markerValue.$markerName -ne 1) {
+                            throw "The completion marker could not be verified with value 1."
+                        }
+                        Register-AutounattendUserCustomizationsTask
+                        $restoredTask = Get-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -ErrorAction Stop
+                        if (-not $restoredTask) {
+                            throw "AutounattendUserCustomizations was not found after the restore attempt."
+                        }
+                        Write-Log "Restored retry state after the marker removal failure: cleanup absent, marker 1 and one-shot task verified" "SUCCESS"
+                    } catch {
+                        Write-Log "Could not restore a coherent retry state after the marker removal failure: $($_.Exception.Message)" "ERROR"
+                    }
+                    Write-Log "Completion marker was not safely removed; no reboot will happen" "ERROR"
+                    exit 1
                 }
 
                 Write-Log "Rebooting system to apply user customizations..." "INFO"
@@ -2441,6 +2539,74 @@ namespace Autounattend
             Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'NavPaneExpandToCurrentFolder' -Type 'DWord' -Value 0 -Description 'Automatically expands navigation tree to highlight current folder location'
             Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'NavPaneShowAllFolders' -Type 'DWord' -Value 0 -Description 'Shows all folders in the navigation pane'
             Set-RegistryValue -Path 'HKCU:\Software\Classes\CLSID\{031E4825-7B94-4dc3-B131-E946B44C8DD5}' -Name 'System.IsPinnedToNameSpaceTree' -Type 'DWord' -Value 0 -Description 'Displays Libraries container grouping Documents, Music, Pictures, and Videos'
+
+            # ============================================================================
+            # EXPLORER FOLDER VIEW DEFAULTS
+            # ============================================================================
+            # Windows 11 opens the Downloads folder type grouped by Date modified. Override
+            # the per-user default by replicating the installed FolderType in HKCU and
+            # clearing GroupBy. HKLM is read only; Bags and BagMRU are left untouched.
+            $downloadsFolderTypeId = '{885a186e-a440-4ada-812b-db871b942259}'
+            $downloadsTopViewId = '{00000000-0000-0000-0000-000000000000}'
+            $folderTypesHkcuRoot = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes'
+            $downloadsHklm = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes\$downloadsFolderTypeId"
+            $downloadsHkcu = "$folderTypesHkcuRoot\$downloadsFolderTypeId"
+            $downloadsTopViewHklm = "$downloadsHklm\TopViews\$downloadsTopViewId"
+            $downloadsTopViewHkcu = "$downloadsHkcu\TopViews\$downloadsTopViewId"
+            $downloadsHklmRegPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes\$downloadsFolderTypeId"
+            $downloadsHkcuRegPath = "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes\$downloadsFolderTypeId"
+
+            try {
+                if (-not (Test-Path -Path $downloadsHklm)) {
+                    throw "Windows Downloads FolderType was not found: $downloadsHklm"
+                }
+                if (-not (Test-Path -Path $downloadsTopViewHklm)) {
+                    throw "Windows Downloads TopView was not found: $downloadsTopViewHklm"
+                }
+
+                $sourceTopViewKey = Get-Item -Path $downloadsTopViewHklm -ErrorAction Stop
+                if (@($sourceTopViewKey.GetValueNames()) -notcontains 'GroupBy') {
+                    throw "GroupBy was not found under $downloadsTopViewHklm"
+                }
+                if ($sourceTopViewKey.GetValueKind('GroupBy') -ne [Microsoft.Win32.RegistryValueKind]::String) {
+                    throw "GroupBy under $downloadsTopViewHklm is not a String value"
+                }
+                if ([string]$sourceTopViewKey.GetValue('GroupBy') -ne 'System.DateModified') {
+                    throw "GroupBy under $downloadsTopViewHklm does not match the Windows 11 25H2 Downloads default"
+                }
+
+                if (-not (Test-Path -Path $folderTypesHkcuRoot)) {
+                    New-Item -Path $folderTypesHkcuRoot -Force -ErrorAction Stop | Out-Null
+                }
+                if (Test-Path -Path $downloadsHkcu) {
+                    Remove-Item -Path $downloadsHkcu -Recurse -Force -ErrorAction Stop
+                }
+
+                $regCopyOutput = reg.exe copy $downloadsHklmRegPath $downloadsHkcuRegPath /s /f 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    throw "reg.exe copy exited with code $LASTEXITCODE ($($regCopyOutput -join ' '))"
+                }
+                if (-not (Test-Path -Path $downloadsHkcu)) {
+                    throw "The per-user Downloads FolderType was not created: $downloadsHkcu"
+                }
+                if (-not (Test-Path -Path $downloadsTopViewHkcu)) {
+                    throw "The per-user Downloads TopView was not created: $downloadsTopViewHkcu"
+                }
+
+                Set-ItemProperty -Path $downloadsTopViewHkcu -Name 'GroupBy' -Value '' -Type String -Force -ErrorAction Stop
+                $targetTopViewKey = Get-Item -Path $downloadsTopViewHkcu -ErrorAction Stop
+                if ([string]$targetTopViewKey.GetValue('GroupBy') -ne '') {
+                    throw "GroupBy was not cleared under $downloadsTopViewHkcu"
+                }
+                if ($targetTopViewKey.GetValueKind('GroupBy') -ne [Microsoft.Win32.RegistryValueKind]::String) {
+                    throw "GroupBy under $downloadsTopViewHkcu is not a String value after the update"
+                }
+
+                Write-Log "Configured the per-user Downloads folder view default without grouping (FolderType override, GroupBy empty)" "SUCCESS"
+            } catch {
+                $script:CustomizationHadErrors = $true
+                Write-Log "Failed to configure the per-user Downloads folder view default: $($_.Exception.Message)" "ERROR"
+            }
 
             # ============================================================================
             # START MENU SETTINGS
