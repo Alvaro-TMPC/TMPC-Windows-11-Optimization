@@ -295,6 +295,10 @@ After the final desktop:
 This repository does not install third-party software, browsers or utilities;
 that remains a user decision.
 
+For a more complete hardware and post-installation validation checklist,
+including PCIe/GPU-Z, display, RAM, storage and peripherals, see
+[Post-installation checks](docs/post-installation-checks.md).
+
 ## Quick verification
 
 A quick, user-level checklist for a successful installation:
@@ -316,6 +320,9 @@ A quick, user-level checklist for a successful installation:
 
 This checklist reflects tested behavior; it does not replace the static
 validation described below.
+
+For detailed hardware checks (PCIe link with GPU-Z, display, RAM, storage and
+peripherals), see [Post-installation checks](docs/post-installation-checks.md).
 
 ## File integrity (SHA-256)
 
@@ -371,6 +378,8 @@ ventoy.json
 docs/
   preparacion-previa-instalacion.md
   configuracion-pruebas-limitaciones-fuentes.md
+  post-installation-checks.md
+  comprobaciones-posteriores-instalacion.md
 scripts/
   validate-baseline.ps1
 ```

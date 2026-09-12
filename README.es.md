@@ -324,6 +324,11 @@ Después del escritorio final:
 Este repositorio no instala software, navegadores ni utilidades de terceros:
 eso sigue siendo una decisión del usuario.
 
+Para una comprobación más completa del hardware y del sistema después de
+instalar, incluyendo PCIe/GPU-Z, monitor, RAM, almacenamiento y periféricos,
+consulta [Comprobaciones posteriores a la
+instalación](docs/comprobaciones-posteriores-instalacion.md).
+
 ## Verificación rápida
 
 Lista de comprobación rápida, a nivel de usuario, para una instalación
@@ -348,6 +353,10 @@ correcta:
 
 Esta lista refleja el comportamiento probado; no sustituye la validación
 estática descrita más abajo.
+
+La verificación detallada de hardware (PCIe con GPU-Z, monitor, RAM,
+almacenamiento y periféricos) está en [Comprobaciones posteriores a la
+instalación](docs/comprobaciones-posteriores-instalacion.md).
 
 ## Integridad de archivos (SHA-256)
 
@@ -405,6 +414,8 @@ ventoy.json
 docs/
   preparacion-previa-instalacion.md
   configuracion-pruebas-limitaciones-fuentes.md
+  post-installation-checks.md
+  comprobaciones-posteriores-instalacion.md
 scripts/
   validate-baseline.ps1
 ```
