@@ -283,8 +283,10 @@ documentada; sus valores de Registro sí se comprobaron.
   valida funcionalmente en ese equipo.
 
 **Una validación estática no sustituye una instalación limpia real.** El XML
-actual ha completado una instalación limpia en Windows 11 Pro 25H2; eso no lo
-convierte en una versión release ni garantiza compatibilidad con otras builds.
+actual ha completado instalaciones limpias reales en Windows 11 Pro 25H2. El
+versionado o etiquetado de una release documenta ese baseline validado, pero
+no amplía ni garantiza la compatibilidad con otras versiones, ediciones o
+builds de Windows.
 
 ## 3. Limitaciones y dependencias
 
@@ -305,7 +307,9 @@ convierte en una versión release ni garantiza compatibilidad con otras builds.
   real; las funciones de IA de Paint siguen sin confirmarse y su limpieza
   visual no se logró.
 - F4 y posteriores siguen pendientes.
-- Todavía no existe un baseline etiquetado como versión release probada.
+- El versionado o etiquetado de releases no amplía el alcance de
+  compatibilidad: Windows 11 25H2 sigue siendo la única referencia validada
+  actualmente.
 
 ## 4. Fuentes, licencias y atribuciones
 
