@@ -180,8 +180,17 @@ open-source tool that boots ISO files directly from a USB drive.
 
 5. Eject the USB drive safely before removing it.
 
-When the ISO is booted, Ventoy automatically applies `autounattend.xml` as the
-answer file for that image.
+When you boot the ISO, Ventoy shows a boot menu for that image with two
+options:
+
+- `Boot without auto installation template`: boots the plain Windows ISO with
+  no answer file.
+- `Boot with /ventoy/script/autounattend.xml`: boots the ISO applying the
+  `autounattend.xml` declared as `template` in `ventoy.json` as the answer file
+  for that image.
+
+To install TMPC Windows 11 Optimization, choose
+`Boot with /ventoy/script/autounattend.xml`.
 
 ## Boot from the USB
 
@@ -192,8 +201,10 @@ answer file for that image.
 3. Select the USB drive entry. Prefer the UEFI entry; this profile targets the
    amd64/UEFI path.
 4. Ventoy starts and lists the ISO files found on the drive. Select
-   `Win11_25H2_Spanish_x64_v2.iso`. With the included `ventoy.json`, Ventoy
-   matches the ISO and applies the answer file automatically.
+   `Win11_25H2_Spanish_x64_v2.iso`. Ventoy then shows the boot menu for that
+   image: choose `Boot with /ventoy/script/autounattend.xml` to install with
+   the profile, or `Boot without auto installation template` to boot the plain
+   ISO without applying `autounattend.xml`.
 5. Windows Setup starts.
 
 ## Windows Setup
@@ -201,8 +212,8 @@ answer file for that image.
 - The profile does not automate disk selection or disk erasure. Select the
   target disk and partitions yourself and verify very carefully which disk you
   are about to modify. If the disk already contains an old installation you
-  want to remove, delete its partitions or clean the disk with the tools
-  offered by Setup; make sure you are working on the right drive.
+  want to remove, delete its partitions in Setup or use the manual DiskPart
+  procedure described below; make sure you are working on the right drive.
 - The answer file bypasses the Windows 11 hardware requirement checks (TPM,
   Secure Boot, CPU, RAM, storage and disk) during Setup. Installing on
   unsupported hardware is still your responsibility.
@@ -213,6 +224,42 @@ answer file for that image.
   adapters may appear disabled; this is intentional and is not an error: the
   adapters are re-enabled automatically at first logon.
 - Complete OOBE by creating your local user account and reaching the desktop.
+
+### Preparing the disk manually with DiskPart
+
+The answer file does not select or erase any disk; you are responsible for
+choosing the correct target disk. This procedure is destructive and is the
+documented manual procedure for a clean installation in which you prepare the
+disk explicitly; it is not mandatory for every scenario. If you can,
+disconnect any other disk that does not take part in the installation.
+
+1. In Windows Setup, press `Shift + F10` to open a command console.
+2. Run DiskPart and identify the target disk.
+
+   > **Warning:** `clean` irreversibly removes the partition structure of the
+   > selected disk. Confirm the disk number with `list disk` and `detail disk`
+   > before running it.
+
+   ```text
+   diskpart
+   list disk
+   select disk X
+   detail disk
+   clean
+   convert gpt
+   exit
+   ```
+
+   - Replace `X` with the number of the correct target disk.
+   - `list disk` shows the available disks.
+   - `detail disk` is the final check before erasing: confirm that the selected
+     disk is the correct one.
+   - `clean` removes the partition structure of the selected disk and must be
+     treated as a destructive operation.
+   - `convert gpt` explicitly prepares the disk as GPT for the UEFI flow.
+   - Do not use `clean all`: it is not required for this procedure.
+3. Close the console, return to Windows Setup, select Refresh and choose the
+   unallocated space so that Windows creates the required partitions.
 
 ## First logon and automatic restart
 

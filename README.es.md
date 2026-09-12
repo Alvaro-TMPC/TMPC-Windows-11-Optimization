@@ -197,8 +197,17 @@ USB.
 
 5. Expulsa el USB de forma segura antes de retirarlo.
 
-Cuando se arranca la ISO, Ventoy aplica `autounattend.xml` automáticamente como
-archivo de respuestas para esa imagen.
+Cuando arrancas la ISO, Ventoy muestra un menú de arranque para esa imagen con
+dos opciones:
+
+- `Boot without auto installation template`: arranca la ISO de Windows sin
+  aplicar ningún archivo de respuestas.
+- `Boot with /ventoy/script/autounattend.xml`: arranca la ISO aplicando como
+  archivo de respuestas el `autounattend.xml` declarado como `template` en
+  `ventoy.json`.
+
+Para instalar TMPC Windows 11 Optimization, elige
+`Boot with /ventoy/script/autounattend.xml`.
 
 ## Arrancar desde el USB
 
@@ -210,8 +219,11 @@ archivo de respuestas para esa imagen.
 3. Selecciona la entrada del USB. Prefiere la entrada UEFI; este perfil está
    orientado a la ruta amd64/UEFI.
 4. Ventoy arranca y muestra los archivos ISO encontrados en la unidad.
-   Selecciona `Win11_25H2_Spanish_x64_v2.iso`. Con el `ventoy.json` incluido,
-   Ventoy reconoce la ISO y aplica el archivo de respuestas automáticamente.
+   Selecciona `Win11_25H2_Spanish_x64_v2.iso`. Ventoy muestra entonces el menú
+   de arranque de esa imagen: elige
+   `Boot with /ventoy/script/autounattend.xml` para instalar con el perfil, o
+   `Boot without auto installation template` para arrancar la ISO sin aplicar
+   `autounattend.xml`.
 5. Comienza la instalación de Windows.
 
 ## Windows Setup
@@ -219,8 +231,9 @@ archivo de respuestas para esa imagen.
 - El perfil no automatiza la selección ni el borrado de discos. Selecciona tú
   el disco y las particiones de destino y verifica con mucho cuidado qué disco
   vas a modificar. Si el disco ya contiene una instalación antigua que quieres
-  eliminar, borra sus particiones o limpia el disco con las herramientas que
-  ofrece la instalación; asegúrate de trabajar en la unidad correcta.
+  eliminar, borra sus particiones en la instalación o usa el procedimiento
+  manual con DiskPart descrito más abajo; asegúrate de trabajar en la unidad
+  correcta.
 - El archivo de respuestas omite las comprobaciones de requisitos de hardware
   de Windows 11 (TPM, Secure Boot, CPU, RAM, almacenamiento y disco) durante la
   instalación. Instalar en hardware no compatible sigue siendo tu
@@ -234,6 +247,44 @@ archivo de respuestas para esa imagen.
   los adaptadores de red pueden aparecer desactivados; es intencionado y no es
   un error: se vuelven a activar automáticamente en el primer inicio de sesión.
 - Completa el OOBE creando tu cuenta de usuario local y llegando al escritorio.
+
+### Preparación manual del disco con DiskPart
+
+El archivo de respuestas no selecciona ni borra ningún disco; tú eres
+responsable de elegir el disco de destino correcto. Este procedimiento es
+destructivo y es el procedimiento manual documentado para una instalación
+limpia en la que preparas el disco explícitamente; no es obligatorio para
+todos los escenarios. Si puedes, desconecta cualquier otro disco que no
+participe en la instalación.
+
+1. En Windows Setup, pulsa `Shift + F10` para abrir una consola de comandos.
+2. Ejecuta DiskPart e identifica el disco de destino.
+
+   > **Advertencia:** `clean` elimina de forma irreversible la estructura de
+   > particiones del disco seleccionado. Confirma el número de disco con
+   > `list disk` y `detail disk` antes de ejecutarlo.
+
+   ```text
+   diskpart
+   list disk
+   select disk X
+   detail disk
+   clean
+   convert gpt
+   exit
+   ```
+
+   - Sustituye `X` por el número del disco de destino correcto.
+   - `list disk` muestra los discos disponibles.
+   - `detail disk` es la comprobación final antes del borrado: confirma que el
+     disco seleccionado es el correcto.
+   - `clean` elimina la estructura de particiones del disco seleccionado y debe
+     tratarse como una operación destructiva.
+   - `convert gpt` prepara explícitamente el disco como GPT para el flujo UEFI.
+   - No uses `clean all`: no es necesario para este procedimiento.
+3. Cierra la consola, vuelve a Windows Setup, pulsa Actualizar (Refresh) y
+   selecciona el espacio sin asignar para que Windows cree las particiones
+   necesarias.
 
 ## Primer inicio de sesión y reinicio automático
 
