@@ -367,8 +367,8 @@ not part of the normal post-installation checklist.
 
 - [README](../README.md): project overview, installation and baseline
   summary.
-- [Pre-install preparation](preparacion-previa-instalacion.md) (in Spanish):
+- [Pre-installation preparation](pre-installation-preparation.md):
   backups, drivers and installation media before formatting.
 - [Applied configuration, tests and
-  limitations](configuracion-pruebas-limitaciones-fuentes.md) (in Spanish):
+  limitations](configuration-testing-limitations-sources.md):
   technical state of the baseline.
