@@ -352,9 +352,12 @@ Otros componentes evaluados:
   Ventoy.
 - Microsoft: no se redistribuye Windows, ISO ni binarios de Microsoft; la
   `ProductKey` de ceros es ficticia.
-- TechPowerUp: aparece únicamente como recomendación/enlace en
-  `docs/preparacion-previa-instalacion.md`; no se incorpora contenido de
-  terceros y no se presenta como componente redistribuido.
+- TechPowerUp: aparece únicamente como proveedor de herramientas externas
+  opcionales enlazadas desde la documentación del proyecto (por ejemplo, la
+  recomendación opcional del paquete Visual C++ Redistributable en
+  `docs/preparacion-previa-instalacion.md` y GPU-Z en las guías posteriores a
+  la instalación); no se incorporan ni redistribuyen binarios ni contenido
+  suyo como parte del proyecto.
 
 Estado:
 

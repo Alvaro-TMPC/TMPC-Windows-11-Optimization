@@ -377,9 +377,11 @@ ventoy.json
 .gitattributes
 docs/
   preparacion-previa-instalacion.md
+  pre-installation-preparation.md
   configuracion-pruebas-limitaciones-fuentes.md
-  post-installation-checks.md
+  configuration-testing-limitations-sources.md
   comprobaciones-posteriores-instalacion.md
+  post-installation-checks.md
 scripts/
   validate-baseline.ps1
 ```
@@ -409,12 +411,14 @@ does not replace a real clean installation.
 
 ## Technical documentation
 
-Advanced reference documents (currently written in Spanish):
+Advanced reference documents (in English):
 
-- [`docs/preparacion-previa-instalacion.md`](docs/preparacion-previa-instalacion.md):
-  pre-install preparation, backups and driver checklist.
-- [`docs/configuracion-pruebas-limitaciones-fuentes.md`](docs/configuracion-pruebas-limitaciones-fuentes.md):
+- [`docs/pre-installation-preparation.md`](docs/pre-installation-preparation.md):
+  pre-installation preparation, backups and driver checklist.
+- [`docs/configuration-testing-limitations-sources.md`](docs/configuration-testing-limitations-sources.md):
   applied configuration, validation status, limitations and sources.
+- [`docs/post-installation-checks.md`](docs/post-installation-checks.md):
+  detailed post-installation hardware and system validation.
 
 No step required to install the profile exists only in those documents; this
 README is self-sufficient.

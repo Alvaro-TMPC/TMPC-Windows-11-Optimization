@@ -413,9 +413,11 @@ ventoy.json
 .gitattributes
 docs/
   preparacion-previa-instalacion.md
+  pre-installation-preparation.md
   configuracion-pruebas-limitaciones-fuentes.md
-  post-installation-checks.md
+  configuration-testing-limitations-sources.md
   comprobaciones-posteriores-instalacion.md
+  post-installation-checks.md
 scripts/
   validate-baseline.ps1
 ```
@@ -453,6 +455,8 @@ Documentos de referencia avanzada:
   preparación previa a la instalación, backups y lista de drivers.
 - [`docs/configuracion-pruebas-limitaciones-fuentes.md`](docs/configuracion-pruebas-limitaciones-fuentes.md):
   configuración aplicada, estado de validación, limitaciones y fuentes.
+- [`docs/comprobaciones-posteriores-instalacion.md`](docs/comprobaciones-posteriores-instalacion.md):
+  comprobación detallada de hardware y del sistema después de instalar.
 
 Ningún paso imprescindible para instalar el perfil existe únicamente en esos
 documentos; este README es autosuficiente.

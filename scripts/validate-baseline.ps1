@@ -282,15 +282,35 @@ function Get-HereStringMatches {
     return [regex]::Matches($Text, $pattern, [System.Text.RegularExpressions.RegexOptions]::Multiline)
 }
 
-function Get-DocumentedHashes {
+function Get-MarkdownSection {
     param(
         [string]$Text,
+        [string]$StartPattern,
+        [string]$EndPattern
+    )
+    $startMatch = [regex]::Match($Text, $StartPattern)
+    if (-not $startMatch.Success) { return $null }
+    $rest = $Text.Substring($startMatch.Index + $startMatch.Length)
+    $endMatch = [regex]::Match($rest, $EndPattern)
+    if ($endMatch.Success) { return $rest.Substring(0, $endMatch.Index) }
+    return $rest
+}
+
+function Get-BaselineHashCandidates {
+    param(
+        [string]$Block,
         [string]$FileName
     )
-    $pattern = [regex]::Escape($FileName) + '[\s\S]{0,120}?([0-9A-Fa-f]{64})'
     $found = @()
-    foreach ($m in [regex]::Matches($Text, $pattern)) {
-        $found += $m.Groups[1].Value.ToUpperInvariant()
+    foreach ($m in [regex]::Matches($Block, [regex]::Escape($FileName))) {
+        $windowStart = $m.Index + $m.Length
+        $windowLength = [Math]::Min(200, $Block.Length - $windowStart)
+        if ($windowLength -le 0) { continue }
+        $window = $Block.Substring($windowStart, $windowLength)
+        $hashMatch = [regex]::Match($window, '([0-9A-Fa-f]{64})')
+        if ($hashMatch.Success) {
+            $found += $hashMatch.Groups[1].Value.ToUpperInvariant()
+        }
     }
     return $found
 }
@@ -309,7 +329,11 @@ function Test-GitAttributesCrossCheck {
         'LICENSE',
         'THIRD_PARTY_NOTICES.md',
         'docs/preparacion-previa-instalacion.md',
+        'docs/pre-installation-preparation.md',
         'docs/configuracion-pruebas-limitaciones-fuentes.md',
+        'docs/configuration-testing-limitations-sources.md',
+        'docs/comprobaciones-posteriores-instalacion.md',
+        'docs/post-installation-checks.md',
         'scripts/validate-baseline.ps1'
     )
     try {
@@ -330,7 +354,11 @@ function Test-GitAttributesCrossCheck {
         'LICENSE'                                            = 'lf'
         'THIRD_PARTY_NOTICES.md'                             = 'lf'
         'docs/preparacion-previa-instalacion.md'             = 'lf'
+        'docs/pre-installation-preparation.md'               = 'lf'
         'docs/configuracion-pruebas-limitaciones-fuentes.md' = 'lf'
+        'docs/configuration-testing-limitations-sources.md'  = 'lf'
+        'docs/comprobaciones-posteriores-instalacion.md'     = 'lf'
+        'docs/post-installation-checks.md'                   = 'lf'
         'scripts/validate-baseline.ps1'                      = 'lf'
     }
     $mismatches = 0
@@ -357,6 +385,7 @@ function Test-DocumentLinks {
     if (-not $record.DecodeOk) { return }
     $baseDir = Split-Path -Parent $record.Abs
     $checked = 0
+    $broken = 0
     foreach ($m in [regex]::Matches($record.Text, '\]\(([^)]+)\)')) {
         $target = $m.Groups[1].Value.Trim()
         if ([string]::IsNullOrWhiteSpace($target)) { continue }
@@ -368,10 +397,13 @@ function Test-DocumentLinks {
         $checked++
         $candidate = Join-Path $baseDir $target
         if (-not (Test-Path -LiteralPath $candidate)) {
-            Add-Warn ("{0}: enlace relativo no encontrado: {1}" -f $RelativePath, $target)
+            $broken++
+            Add-Fail ("{0}: enlace relativo no encontrado: {1}" -f $RelativePath, $target)
         }
     }
-    Add-Ok ("{0}: {1} enlace(s) relativo(s) comprobado(s)" -f $RelativePath, $checked)
+    if ($broken -eq 0) {
+        Add-Ok ("{0}: {1} enlace(s) relativo(s) comprobado(s)" -f $RelativePath, $checked)
+    }
 }
 
 function Test-LicensingFiles {
@@ -496,7 +528,11 @@ $mandatoryFiles = @(
     'LICENSE',
     'THIRD_PARTY_NOTICES.md',
     'docs/preparacion-previa-instalacion.md',
-    'docs/configuracion-pruebas-limitaciones-fuentes.md'
+    'docs/pre-installation-preparation.md',
+    'docs/configuracion-pruebas-limitaciones-fuentes.md',
+    'docs/configuration-testing-limitations-sources.md',
+    'docs/comprobaciones-posteriores-instalacion.md',
+    'docs/post-installation-checks.md'
 )
 foreach ($relativePath in $mandatoryFiles) {
     $record = Get-FileRecord -RelativePath $relativePath
@@ -758,21 +794,59 @@ foreach ($relativePath in @('autounattend.xml', 'ventoy.json')) {
     Add-Ok ("{0}: SHA-256 calculado" -f $relativePath)
 }
 
-$docsRecord = Get-FileRecord -RelativePath 'docs/configuracion-pruebas-limitaciones-fuentes.md'
-if (-not $docsRecord.Exists) {
-    Add-Fail 'No se puede comprobar la coherencia documental: falta el documento de configuracion'
-} elseif (-not $docsRecord.DecodeOk) {
-    Add-Fail 'No se puede comprobar la coherencia documental: el documento no es UTF-8 valido'
-} else {
+$baselineHashSources = @(
+    @{
+        Path   = 'README.md'
+        Start  = '(?m)^## File integrity \(SHA-256\)[ \t]*\r?\n'
+        End    = '(?m)^##[ \t]'
+        Marker = '## File integrity (SHA-256)'
+    },
+    @{
+        Path   = 'README.es.md'
+        Start  = '(?m)^## Integridad de archivos \(SHA-256\)[ \t]*\r?\n'
+        End    = '(?m)^##[ \t]'
+        Marker = '## Integridad de archivos (SHA-256)'
+    },
+    @{
+        Path   = 'docs/configuracion-pruebas-limitaciones-fuentes.md'
+        Start  = 'Hashes SHA-256 del baseline actual:'
+        End    = '(?m)^###[ \t]'
+        Marker = 'Hashes SHA-256 del baseline actual:'
+    },
+    @{
+        Path   = 'docs/configuration-testing-limitations-sources.md'
+        Start  = 'SHA-256 hashes of the current baseline:'
+        End    = '(?m)^###[ \t]'
+        Marker = 'SHA-256 hashes of the current baseline:'
+    }
+)
+foreach ($source in $baselineHashSources) {
+    $sourceRecord = Get-FileRecord -RelativePath $source.Path
+    if (-not $sourceRecord.Exists) {
+        Add-Fail ("{0}: no existe; no se pueden comprobar los hashes del baseline actual" -f $source.Path)
+        continue
+    }
+    if (-not $sourceRecord.DecodeOk) {
+        Add-Fail ("{0}: no es UTF-8 valido; no se pueden comprobar los hashes del baseline actual" -f $source.Path)
+        continue
+    }
+    $block = Get-MarkdownSection -Text $sourceRecord.Text -StartPattern $source.Start -EndPattern $source.End
+    if ($null -eq $block) {
+        Add-Fail ("{0}: bloque de hashes del baseline actual no encontrado ({1})" -f $source.Path, $source.Marker)
+        continue
+    }
     foreach ($relativePath in @('autounattend.xml', 'ventoy.json')) {
         if (-not $realHashes.ContainsKey($relativePath)) { continue }
-        $documented = @(Get-DocumentedHashes -Text $docsRecord.Text -FileName $relativePath)
-        if ($documented.Count -ne 1) {
-            Add-Fail ("{0}: hash documentado no inequivoco ({1} coincidencia(s))" -f $relativePath, $documented.Count)
+        $documented = @(Get-BaselineHashCandidates -Block $block -FileName $relativePath)
+        $label = "{0} [{1}] {2}" -f $source.Path, $source.Marker, $relativePath
+        if ($documented.Count -eq 0) {
+            Add-Fail ("{0}: sin hash documentado en el bloque del baseline actual" -f $label)
+        } elseif ($documented.Count -gt 1) {
+            Add-Fail ("{0}: hash no inequivoco en el bloque del baseline actual ({1} coincidencia(s))" -f $label, $documented.Count)
         } elseif ($documented[0] -eq $realHashes[$relativePath]) {
-            Add-Ok ("{0}: hash documentado coincide" -f $relativePath)
+            Add-Ok ("{0}: hash del baseline actual coincide" -f $label)
         } else {
-            Add-Fail ("{0}: hash documentado {1} != real {2}" -f $relativePath, $documented[0], $realHashes[$relativePath])
+            Add-Fail ("{0}: hash {1} != real {2}" -f $label, $documented[0], $realHashes[$relativePath])
         }
     }
 }
@@ -789,7 +863,11 @@ Test-FilePolicy -RelativePath 'README.es.md' -ExpectedEol 'LF' -ExpectedBom 'NON
 Test-FilePolicy -RelativePath 'LICENSE' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'THIRD_PARTY_NOTICES.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'docs/preparacion-previa-instalacion.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
+Test-FilePolicy -RelativePath 'docs/pre-installation-preparation.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'docs/configuracion-pruebas-limitaciones-fuentes.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
+Test-FilePolicy -RelativePath 'docs/configuration-testing-limitations-sources.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
+Test-FilePolicy -RelativePath 'docs/comprobaciones-posteriores-instalacion.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
+Test-FilePolicy -RelativePath 'docs/post-installation-checks.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'ventoy.json' -ExpectedEol 'CRLF' -ExpectedBom 'NONE' -BomMismatchSeverity 'WARN'
 
 $scriptsDir = Join-Path $script:Root 'scripts'
