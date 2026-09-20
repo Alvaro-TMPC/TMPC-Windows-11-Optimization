@@ -90,8 +90,8 @@ Sobre los archivos reales del repositorio:
   PowerShell 5.1: `SystemCustomizations.ps1`, `BloatRemoval.ps1` y
   `OneDriveRemoval.ps1`, con 0 errores.
 - `ventoy.json` es JSON válido.
-- Los hallazgos F1, F2 y F3 de la auditoría interna están corregidos y
-  comprobados estáticamente.
+- Los hallazgos de la revisión técnica del flujo de personalización están
+  corregidos y comprobados estáticamente.
 - Los scripts embebidos analizados no se han ejecutado sobre ningún sistema.
 - El validador estático local `scripts/validate-baseline.ps1` reproduce estas
   comprobaciones en modo de solo lectura y sin ejecutar los scripts embebidos;
@@ -100,9 +100,26 @@ Sobre los archivos reales del repositorio:
 Hashes SHA-256 del baseline actual:
 
 - `autounattend.xml`:
-  `12FF7B782E4E22DAFAACC9D881CEE30CFB2E4E1CB35B3C8DD5A82FCDC7F16A6E`.
+  `70D5DA63FEA8078FDA45F8F20FCA82E4A476060DDB5304EDEB3DA8A21CC95FF6`.
 - `ventoy.json`:
   `2231E01E9B0BA0622888D97EFEDA0F476DBD73A9CB90B11B48656E1F889F2796`.
+
+### Gestión de errores de la fase SYSTEM (specialize)
+
+La fase SYSTEM de specialize registra en el log cada fallo de operación. Esos
+fallos no fuerzan una salida global distinta de cero en esa fase: así se evita
+convertir fallos parciales de personalización no críticos en un bloqueo de
+Windows Setup, y la fase conserva su diseño fail-open.
+
+La fase de personalización de usuario (`-UserCustomizations`) sí sale con un
+código distinto de cero cuando termina con errores. Ese código forma parte de
+la semántica de reintento/recuperación de la one-shot: la tarea programada se
+conserva o se restaura para que el siguiente logon pueda reintentar.
+
+El registro inicial de la one-shot usa un reintento acotado de hasta 3
+intentos, con una espera corta únicamente entre intentos fallidos. Un fallo
+definitivo tras el tercer intento sigue quedando registrado como error; no crea
+un bucle y no bloquea Windows Setup.
 
 ### Comprobado con evidencia previa
 
@@ -147,7 +164,7 @@ builds.
 
 ### Comprobado experimentalmente (usuario local limpio, Windows 11 25H2)
 
-En un usuario local desechable (`TMPC-Explorer-Test`) sobre Windows 11 25H2 se
+En un usuario local desechable sobre Windows 11 25H2 se
 validó el mecanismo del override de Downloads:
 
 - Perfil limpio antes del experimento: `UseCompactMode` ausente,
@@ -181,7 +198,7 @@ validó el mecanismo del override de Downloads:
   y está validado específicamente en Windows 11 25H2; una actualización mayor
   puede eliminar la clave HKCU y revertir el comportamiento.
 
-El Lenovo de pruebas está permanentemente detectado como slate
+El equipo de prueba está permanentemente detectado como slate
 (`ConvertibleSlateMode = 0`, `SM_CONVERTIBLESLATEMODE = 0`) aunque se instaló el
 driver Lenovo ACPI oficial (`LENOVO_VPC2004_DRIVER = PASS`,
 `LENOVO_POSTURE_DETECTION = FAIL`). Por ello, la apariencia visual de vista
@@ -218,26 +235,26 @@ modificable y reactivación manual correcta. El cleanup final se completó: sin
 del perfil. La ausencia del marcador final es coherente con el cleanup completo
 y no debe interpretarse como un fallo.
 
-El recorrido de recuperación de F2 se observó además en runtime el 2026-09-12
-con una prueba controlada de inyección de fallo sobre el baseline publicado
-`C0EA1741BB09EA88F83F2D4C841081C9441AEE9F81DC4D2681ED6C9C9A5F03D1`: la
-one-shot se eliminó y verificó antes del fallo, el fallo no se reportó como
+El recorrido de reintento/recuperación de la one-shot se observó además en
+runtime el 2026-09-12 con una prueba controlada de fallo sobre el baseline
+publicado `C0EA1741BB09EA88F83F2D4C841081C9441AEE9F81DC4D2681ED6C9C9A5F03D1`:
+la one-shot se eliminó y verificó antes del fallo, el fallo no se reportó como
 éxito, la recuperación restauró y verificó la one-shot, el reintento del
 siguiente logon completó el cleanup y el reinicio final arrancó con el sistema
-limpio. Estado: `F2_RUNTIME = PASS` y `F2_RECOVERY_PATH = PASS`.
+limpio. Estado: ruta normal de la one-shot = PASS; recuperación = PASS.
 
-### Candidato actual: instalación limpia real y Explorer integrado (2026-09-12)
+### Implementación evaluada: instalación limpia real y Explorer integrado (2026-09-12)
 
-El candidato actual (corrección del registro del cleanup Branch A, preferencias
-de Explorer y override de Downloads) completó una instalación limpia
-destructiva real en el Lenovo de pruebas, con el medio verificado por SHA-256 y
-sin instrumentación de prueba. Resultado:
+La implementación evaluada (corrección del registro del cleanup de la one-shot,
+preferencias de Explorer y override de Downloads) completó una instalación
+limpia destructiva real en el equipo de prueba, con el medio verificado por
+SHA-256 y sin instrumentación de prueba. Resultado:
 
 - llegada al escritorio final correcta, con modo oscuro y fondo por defecto
   (`AppsUseLightTheme = 0`, `SystemUsesLightTheme = 0`,
   `WallPaper = C:\Windows\Web\Wallpaper\Windows\img19.jpg`);
 - un reinicio automático observado durante el flujo;
-- ruta normal de F2 completa: one-shot retirada y verificada, cleanup
+- ruta normal de la one-shot completa: tarea retirada y verificada, cleanup
   registrado y verificado, marcador de usuario eliminado, reinicio automático
   ejecutado, cleanup final completado y arranque posterior sin residuos
   (`AUTOUNATTEND_TASK_COUNT = 0`, `C:\ProgramData\Autounattend` ausente,
@@ -251,15 +268,15 @@ sin instrumentación de prueba. Resultado:
   "Agrupar por = Ninguno" mediante el override y conserva el estado tras cerrar
   y reabrir el Explorador.
 
-Estados: `F2_NORMAL_FIX_RUNTIME_REVALIDATION = PASS`,
-`F2_CANDIDATE_REVALIDATION = PASS`, `EXPLORER_REGISTRY_VALIDATION = PASS`,
-`EXPLORER_INTEGRATED_CLEAN_INSTALL = PASS`,
-`DOWNLOADS_REOPEN_PERSISTENCE = PASS`, `CANDIDATE_RUNTIME_VALIDATION = PASS`.
+Estados: ruta normal de la one-shot revalidada = PASS, validación runtime de la
+implementación evaluada = PASS, validación del Registro de Explorer = PASS,
+instalación limpia con Explorer integrado = PASS, persistencia al reabrir
+Downloads = PASS, validación runtime = PASS.
 
 La anomalía histórica de primer logon (barra y fondo visualmente claros hasta un
 logoff/logon) no se reprodujo en esta instalación; su causa sigue sin
 comprobarse y no se declara resuelta. La vista compacta y las casillas no se
-usan como criterio visual en el Lenovo de pruebas por su anomalía slate ya
+usan como criterio visual en el equipo de prueba por su anomalía slate ya
 documentada; sus valores de Registro sí se comprobaron.
 
 ### Pendiente / no comprobado
@@ -267,8 +284,9 @@ documentada; sus valores de Registro sí se comprobaron.
 - Causa exacta del "No molestar" activado en la primera instalación limpia:
   PENDIENTE / NO COMPROBADA; el blob compacto de 13 bytes no equivale a
   `PriorityOnly` y no debe documentarse como DND activado.
-- F1 en runtime (no observado) y F3 en runtime (parcial).
-- Corrección y comprobación de los hallazgos F4 y posteriores de la auditoría.
+- La cobertura runtime de los hallazgos revisados restantes es parcial: algunos
+  no se observaron en runtime y otros están verificados solo parcialmente.
+- Corrección y comprobación de los hallazgos restantes de la revisión técnica.
 - Efectividad completa de las funciones de IA de Paint: las políticas se
   aplican, pero la limpieza visual no se logró y el efecto concreto de cada
   función sigue sin confirmarse.
@@ -276,7 +294,7 @@ documentada; sus valores de Registro sí se comprobaron.
   25H2.
 - Cualquier otro elemento marcado como pendiente en la documentación del
   repositorio.
-- La detección de postura del Lenovo de pruebas está permanentemente en modo
+- La detección de postura del equipo de prueba está permanentemente en modo
   slate (`ConvertibleSlateMode = 0`, `SM_CONVERTIBLESLATEMODE = 0`); la
   apariencia visual de vista compacta y casillas en ese equipo no es evidencia
   fiable y no se usa como criterio bloqueante. La agrupación de Downloads sí se
@@ -306,7 +324,7 @@ builds de Windows.
 - Las funciones de IA de Notepad quedaron sin presencia visible en la prueba
   real; las funciones de IA de Paint siguen sin confirmarse y su limpieza
   visual no se logró.
-- F4 y posteriores siguen pendientes.
+- Los hallazgos restantes de la revisión técnica siguen pendientes.
 - El versionado o etiquetado de releases no amplía el alcance de
   compatibilidad: Windows 11 25H2 sigue siendo la única referencia validada
   actualmente.

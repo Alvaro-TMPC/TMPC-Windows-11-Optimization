@@ -87,8 +87,8 @@ On the real repository files:
   PowerShell 5.1 parser: `SystemCustomizations.ps1`, `BloatRemoval.ps1` and
   `OneDriveRemoval.ps1`, with 0 errors.
 - `ventoy.json` is valid JSON.
-- Findings F1, F2 and F3 of the internal audit are fixed and statically
-  verified.
+- The findings of the technical review of the customization flow are fixed
+  and statically verified.
 - The analyzed embedded scripts have not been executed on any system.
 - The local static validator `scripts/validate-baseline.ps1` reproduces these
   checks in read-only mode and without executing the embedded scripts; it
@@ -97,9 +97,26 @@ On the real repository files:
 SHA-256 hashes of the current baseline:
 
 - `autounattend.xml`:
-  `12FF7B782E4E22DAFAACC9D881CEE30CFB2E4E1CB35B3C8DD5A82FCDC7F16A6E`.
+  `70D5DA63FEA8078FDA45F8F20FCA82E4A476060DDB5304EDEB3DA8A21CC95FF6`.
 - `ventoy.json`:
   `2231E01E9B0BA0622888D97EFEDA0F476DBD73A9CB90B11B48656E1F889F2796`.
+
+### Error handling in the SYSTEM phase (specialize)
+
+The SYSTEM-wide phase of specialize records every operation failure in its log.
+Those failures do not force a global non-zero exit for that phase: this avoids
+turning partial, non-critical customization failures into a Windows Setup
+block, so the phase keeps its fail-open design.
+
+The user-customization phase (`-UserCustomizations`) does exit with a non-zero
+code when it finishes with errors. That exit code is part of the one-shot
+retry/recovery semantics: the scheduled task is kept or restored so the next
+logon can retry.
+
+The initial registration of the one-shot task uses a bounded retry of up to
+3 attempts, with a short wait only between failed attempts. A definitive
+failure after the third attempt is still recorded as an error; it does not
+create a loop and does not block Windows Setup.
 
 ### Verified with prior evidence
 
@@ -144,7 +161,7 @@ builds.
 
 ### Experimentally verified (clean local user, Windows 11 25H2)
 
-On a disposable local user (`TMPC-Explorer-Test`) on Windows 11 25H2 the
+On a disposable local user on Windows 11 25H2 the
 Downloads override mechanism was validated:
 
 - Clean profile before the experiment: `UseCompactMode` absent,
@@ -178,7 +195,7 @@ Downloads override mechanism was validated:
   validated specifically on Windows 11 25H2; a major update may remove the
   HKCU key and revert the behavior.
 
-The test Lenovo is permanently detected as slate (`ConvertibleSlateMode = 0`,
+The test computer is permanently detected as slate (`ConvertibleSlateMode = 0`,
 `SM_CONVERTIBLESLATEMODE = 0`) even though the official Lenovo ACPI driver was
 installed (`LENOVO_VPC2004_DRIVER = PASS`,
 `LENOVO_POSTURE_DETECTION = FAIL`). Therefore, the visual appearance of
@@ -216,30 +233,30 @@ scheduled task, no marker and no profile logs. The absence of the final marker
 is consistent with a complete cleanup and must not be interpreted as a
 failure.
 
-The F2 recovery path was also observed at runtime on 2026-09-12 with a
-controlled fault-injection test on the published baseline
+The one-shot retry/recovery path was also observed at runtime on 2026-09-12
+with a controlled failure test on the published baseline
 `C0EA1741BB09EA88F83F2D4C841081C9441AEE9F81DC4D2681ED6C9C9A5F03D1`: the
 one-shot was removed and verified before the fault, the fault was not reported
 as success, the recovery restored and verified the one-shot, the retry on the
 next logon completed the cleanup and the final restart booted with a clean
-system. Status: `F2_RUNTIME = PASS` and `F2_RECOVERY_PATH = PASS`.
+system. Status: normal one-shot path = PASS and recovery path = PASS.
 
-### Current candidate: real clean installation and integrated Explorer (2026-09-12)
+### Evaluated implementation: real clean installation and integrated Explorer (2026-09-12)
 
-The current candidate (Branch A cleanup registration fix, Explorer preferences
-and Downloads override) completed a real destructive clean installation on the
-test Lenovo, with the media verified by SHA-256 and without test
-instrumentation. Result:
+The evaluated implementation (the one-shot cleanup registration fix, Explorer
+preferences and the Downloads override) completed a real destructive clean
+installation on the test computer, with the media verified by SHA-256 and
+without test instrumentation. Result:
 
 - final desktop reached correctly, with dark mode and default wallpaper
   (`AppsUseLightTheme = 0`, `SystemUsesLightTheme = 0`,
   `WallPaper = C:\Windows\Web\Wallpaper\Windows\img19.jpg`);
 - one automatic restart observed during the flow;
-- complete normal F2 path: one-shot removed and verified, cleanup registered
-  and verified, user marker removed, automatic restart executed, final cleanup
-  completed and later boot without leftovers (`AUTOUNATTEND_TASK_COUNT = 0`,
-  `C:\ProgramData\Autounattend` absent, `HKLM\SOFTWARE\Autounattend` absent,
-  user marker absent);
+- complete normal path of the one-shot flow: task removed and verified, cleanup
+  registered and verified, user marker removed, automatic restart executed,
+  final cleanup completed and later boot without leftovers
+  (`AUTOUNATTEND_TASK_COUNT = 0`, `C:\ProgramData\Autounattend` absent,
+  `HKLM\SOFTWARE\Autounattend` absent, user marker absent);
 - Explorer registry: `UseCompactMode = 1`, `AutoCheckSelect = 0`,
   `HideFileExt = 0`, `Hidden = 1`, `ShowSuperHidden = 0`; Downloads HKCU
   override present with empty `GroupBy` (`REG_SZ`) and HKLM keeping
@@ -249,15 +266,15 @@ instrumentation. Result:
   "Group by = None" through the override and keeps the state after closing and
   reopening File Explorer.
 
-Statuses: `F2_NORMAL_FIX_RUNTIME_REVALIDATION = PASS`,
-`F2_CANDIDATE_REVALIDATION = PASS`, `EXPLORER_REGISTRY_VALIDATION = PASS`,
-`EXPLORER_INTEGRATED_CLEAN_INSTALL = PASS`,
-`DOWNLOADS_REOPEN_PERSISTENCE = PASS`, `CANDIDATE_RUNTIME_VALIDATION = PASS`.
+Statuses: normal one-shot path revalidated = PASS, evaluated implementation
+runtime validation = PASS, Explorer registry validation = PASS, integrated
+Explorer clean installation = PASS, Downloads reopen persistence = PASS,
+runtime validation = PASS.
 
 The historical first-logon anomaly (taskbar and wallpaper visually light until
 a logoff/logon) did not reproduce in this installation; its cause remains
 unverified and it is not declared resolved. Compact view and check boxes are
-not used as a visual criterion on the test Lenovo due to its already
+not used as a visual criterion on the test computer due to its already
 documented slate anomaly; their registry values were verified.
 
 ### Pending / not verified
@@ -265,14 +282,15 @@ documented slate anomaly; their registry values were verified.
 - Exact cause of Do Not Disturb being enabled in the first clean installation:
   PENDING / NOT VERIFIED; the 13-byte compact blob does not equal
   `PriorityOnly` and must not be documented as DND on.
-- F1 at runtime (not observed) and F3 at runtime (partial).
-- Fixing and verifying findings F4 and later from the audit.
+- Runtime coverage of the remaining reviewed findings is partial: some were
+  not observed at runtime and others are only partially verified.
+- Fixing and verifying the remaining findings of the technical review.
 - Complete effectiveness of Paint AI features: the policies are applied, but
   the visual cleanup was not achieved and the specific effect of each feature
   remains unconfirmed.
 - Compatibility with versions, editions or builds other than Windows 11 25H2.
 - Any other item marked as pending in the repository documentation.
-- The posture detection of the test Lenovo is permanently in slate mode
+- The posture detection of the test computer is permanently in slate mode
   (`ConvertibleSlateMode = 0`, `SM_CONVERTIBLESLATEMODE = 0`); the visual
   appearance of compact view and check boxes on that machine is not reliable
   evidence and is not used as a blocking criterion. The Downloads grouping is
@@ -301,7 +319,7 @@ builds.
   default and have no override.
 - Notepad AI features had no visible presence in the real test; Paint AI
   features remain unconfirmed and their visual cleanup was not achieved.
-- F4 and later remain pending.
+- The remaining findings of the technical review remain pending.
 - Release versioning or tagging does not extend the compatibility scope:
   Windows 11 25H2 remains the only currently validated reference.
 
