@@ -14,6 +14,10 @@ during Windows Setup, plus a small Ventoy configuration (`ventoy.json`) used to
 associate the expected Windows ISO with that answer file on the installation
 USB.
 
+For an existing installation, the additional self-contained
+[`Apply-TMPCOptimizations.ps1`](Apply-TMPCOptimizations.ps1) applies the relevant
+post-install portion of the same profile; see the section below.
+
 Target platform: Windows 11 25H2, x64 / amd64.
 
 ## What it does
@@ -102,6 +106,110 @@ A clean installation can destroy data irreversibly. Before you start:
   about to modify;
 - if you can, test the whole procedure on a disposable machine or virtual
   machine first.
+
+## Apply the optimizations to an existing Windows installation
+
+`autounattend.xml` remains the clean-install method. The self-contained
+[`Apply-TMPCOptimizations.ps1`](Apply-TMPCOptimizations.ps1), standalone version
+0.1.0, provides a post-install method **without formatting**, derived directly
+from the v0.1.5 answer file. It needs no other repository files, external
+dependencies or downloads.
+
+**Reference: Windows 11 Pro 25H2 x64 / amd64.** The script accepts only Windows
+11 25H2 (build 26200) in native x64 Windows PowerShell 5.1. The clean-install
+baseline has runtime evidence on that reference; this new standalone has only
+static validation and has **not** yet been tested on hardware or in a VM.
+Other versions/builds are untested and are rejected. This is not a claim of
+identical end state on an already customized PC.
+
+Before running it, make and verify a backup, **review the script**, save your
+work and close the applications affected by debloat. Quit OneDrive after
+checking your local/cloud files. Full mode modifies system settings and removes
+the profile's curated built-in apps for all users, including provisioned copies
+for future users. App removal can remove the apps' settings/state. Defender,
+Store, Edge/WebView2, Photos, Paint and Notepad retain the baseline decisions.
+No disks, partitions, accounts or Windows license are changed.
+
+Full mode removes and blocks OneDrive, but **preserves all existing content in
+`%USERPROFILE%\OneDrive`**. Online-only placeholders are not backed-up local
+copies. Software-remnant deletion is allowlisted and refuses linked/junction
+paths. Running OneDrive, an unrecognized uninstall command or unsafe remnants
+are reported and deferred; verify warnings/errors before considering removal done.
+Windows' own OneDrive setup binaries are preserved.
+
+Download/save `Apply-TMPCOptimizations.ps1` from this repository using the file's
+**Raw / Download raw file** action. Open **Windows PowerShell as administrator**
+for Full mode, navigate to the folder where you saved the file, then run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Apply-TMPCOptimizations.ps1
+```
+
+Full mode does not auto-elevate: elevation is required only for its system phase.
+HKCU preferences are applied afterwards only if the executing SID matches the
+Explorer desktop in the same session. If alternate administrator credentials
+were used or the desktop cannot be verified, HKCU is skipped with exit code 3:
+run `-UserOnly` from the intended account. User-context OneDrive cleanup is also
+deferred in that situation; `-UserOnly` does not perform that uninstall.
+
+For **a new account created later**, another local user, or to reapply personal
+preferences, sign in to that account and open **ordinary, non-elevated Windows
+PowerShell**:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Apply-TMPCOptimizations.ps1 -UserOnly
+```
+
+`-UserOnly` is the recommended method for later accounts. It applies the entire
+HKCU preference inventory of the answer file's user phase: gaming/Game DVR,
+visual effects and shortcuts, notifications/Do Not Disturb, privacy/AI, sound,
+Update/Store user preferences, Explorer/Downloads, Start/Taskbar and dark theme
+with the baseline wallpaper. It changes only the executing account, reads HKLM
+only for checks/Downloads source, performs no global debloat/OneDrive cleanup
+and does not require elevation. It can be rerun without deleting any marker.
+
+There is **no automatic restart by default**. Some changes require signing out
+and back in or restarting. For a conscious restart request in Full mode, save
+all work first, then use:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Apply-TMPCOptimizations.ps1 -Restart
+```
+
+Restart is requested only on exit code 0, with 60 seconds notice (Windows may
+close applications at the deadline); cancel with `shutdown.exe /a` if needed.
+`-UserOnly` does not accept `-Restart`; restart manually from Windows instead.
+
+### Coverage and post-install differences
+
+| Baseline block | Post-install behavior |
+| --- | --- |
+| System registry/policies | Same HKLM names, types and values: privacy, Update/driver exclusion, Defender notifications, gaming, power, AI, Explorer, Start/Taskbar and sound. HKCR deletions resolve to machine Classes, matching the original SYSTEM phase. |
+| User registry/personalization | Same complete HKCU inventory and binary masks; Quiet Hours uses the source's native COM ABI and recognized CloudStore fallback. Downloads copies HKLM to HKCU without resetting saved views. |
+| Debloat | Same 40 AppX targets, 4 capability targets and Recall; sequential checked removal. The source's OneNote **desktop** special uninstaller is deferred because arbitrary uninstall strings may affect an existing Office suite; its AppX package remains targeted. |
+| OneDrive | Same removal/blocking intent and default-profile auto-install prevention, adapted to verified identity and guarded software paths. No forced process termination, recursive ACL takeover or deferred file deletions. |
+| .NET Framework 3.5 | If not enabled, requires matching local media; no Windows Update fallback. Supply `-NetFx3Source "D:\sources\sxs"` in Full mode (replace `D:` with your mounted media drive). Without a source it is left unchanged and reported. |
+| Start pins / encryption | Exact `ConfigureStartPins` JSON with `applyOnce`; previously initialized pins may remain. `PreventDeviceEncryption` does not decrypt existing BitLocker encryption. |
+| Setup/OOBE | Not reproduced: hardware bypasses, ProductKey/EULA, BypassNRO/OOBE screens, network disabling/re-enabling, installation and account creation. |
+| One-shot / cleanup | No Setup tasks, tokens, completion markers or Setup-folder cleanup are created. Logs are retained; restart is optional. |
+
+Previously saved Downloads grouping can remain because `Bags`/`BagMRU` are
+preserved. Existing HKCU context-menu entries can also override the machine
+Classes view. Policy effectiveness can depend on Windows edition or management
+policy; the internal Quiet Hours interface and Paint AI UI limitations still
+apply. Review the complete source-line coverage matrix in the script header.
+Setup originally runs the system phase as SYSTEM; this standalone uses an
+administrator. Protected existing registry keys or in-use AppX packages can
+fail and produce exit code 1; no ACL takeover is added to force those changes.
+
+Full logs: `%ProgramData%\TMPC-Windows-11-Optimization\Logs\`.
+UserOnly logs: `%LOCALAPPDATA%\TMPC-Windows-11-Optimization\Logs\` (no elevated
+write needed). The final summary shows mode, completed operations, warnings,
+errors, restart advice, log path and exit code: 0 = completed (review warnings
+for limitations), 1 = operation/log failure, 2 = preflight rejection, 3 = system
+phase finished but target-user preferences deferred. There is no automatic
+rollback. The validator checks the source XML SHA-256 binding and exact
+registry/removal inventories, so future baseline changes require explicit review.
 
 ## Before you start
 
@@ -373,6 +481,7 @@ README.es.md
 LICENSE
 THIRD_PARTY_NOTICES.md
 autounattend.xml
+Apply-TMPCOptimizations.ps1
 ventoy.json
 .gitattributes
 docs/
@@ -389,6 +498,7 @@ scripts/
 Main files:
 
 - `autounattend.xml`: installation automation and customization profile.
+- `Apply-TMPCOptimizations.ps1`: independent Full / UserOnly post-install method.
 - `ventoy.json`: Ventoy configuration that binds the ISO to the answer file.
 - `.gitattributes`: repository line-ending policy.
 - `LICENSE`: project license (MIT).
@@ -406,8 +516,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\validate-basel
 
 It checks the repository structure, the XML well-formedness and architecture,
 the syntax of the embedded PowerShell, `ventoy.json`, documented hashes, line
-endings and documentation links. It never executes the embedded scripts and it
-does not replace a real clean installation.
+endings and documentation links. It also parses the standalone and checks its
+source binding, profile inventories and critical static guards. It never
+executes either optimizer and does not replace a controlled runtime test.
 
 ## Technical documentation
 

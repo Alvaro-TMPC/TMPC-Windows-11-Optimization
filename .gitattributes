@@ -6,3 +6,4 @@ LICENSE text eol=lf
 THIRD_PARTY_NOTICES.md text eol=lf
 docs/*.md text eol=lf
 scripts/*.ps1 text eol=lf
+Apply-TMPCOptimizations.ps1 text eol=lf

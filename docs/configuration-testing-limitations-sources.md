@@ -10,6 +10,17 @@ Target platform: Windows 11 25H2, x64 / amd64.
 It is not an installation guide. Preparation before formatting is documented
 in `docs/pre-installation-preparation.md`.
 
+Scope of the runtime evidence below: **clean installation with autounattend.xml**.
+The additional [`Apply-TMPCOptimizations.ps1`](../Apply-TMPCOptimizations.ps1)
+derives the relevant post-install profile from that XML, with Full and UserOnly
+modes. It has static validation only, not a runtime/hardware result. Its error
+exit codes, persistent logs, identity checks, optional restart and limitations
+(local source for NetFx3, existing Start/Downloads state and deferred OneNote
+desktop/unsafe OneDrive cleanup) are described in [README](../README.md).
+Setup/OOBE bypasses, network toggling and one-shot cleanup are not reproduced.
+The source hash and exact registry/removal inventories are checked by the static
+validator; the clean-install evidence is not standalone equivalence evidence.
+
 ## 1. Main configuration
 
 The reference files are `autounattend.xml` and `ventoy.json`. This summary

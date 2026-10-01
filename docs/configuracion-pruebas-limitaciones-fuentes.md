@@ -10,6 +10,18 @@ Plataforma objetivo: Windows 11 25H2, x64 / amd64.
 No es una guía de instalación. La preparación previa al formateo se documenta
 en `docs/preparacion-previa-instalacion.md`.
 
+Alcance de la evidencia runtime siguiente: **instalación limpia con autounattend.xml**.
+El archivo adicional [`Apply-TMPCOptimizations.ps1`](../Apply-TMPCOptimizations.ps1)
+deriva de ese XML el perfil post-install relevante, con modos completo y UserOnly.
+Solo tiene validación estática, sin resultado runtime/hardware. Sus códigos de
+error, logs persistentes, comprobación de identidad, reinicio opcional y
+limitaciones (origen local para NetFx3, estado existente de Start/Downloads y
+OneNote de escritorio/limpieza insegura de OneDrive diferidos) se describen en
+[README](../README.es.md). No reproduce los bypass de Setup/OOBE, los cambios
+temporales de red ni el cleanup one-shot. El validador estático comprueba el hash
+fuente y los inventarios exactos de Registro/eliminación; la evidencia de
+instalación limpia no demuestra equivalencia del standalone.
+
 ## 1. Configuración principal
 
 Los archivos de referencia son `autounattend.xml` y `ventoy.json`. Este resumen

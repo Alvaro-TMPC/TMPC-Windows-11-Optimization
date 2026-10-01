@@ -21,6 +21,12 @@ in that upstream repository, including at least:
 - `OneDriveRemoval.ps1` version 1.2;
 - related helper and automation logic where applicable.
 
+`Apply-TMPCOptimizations.ps1` derives its post-install registry profile,
+removal inventories and applicable helper logic from that local answer file.
+The same upstream attribution and MIT notice cover the reused portions in the
+standalone. Its header includes the copyright and full MIT permission/warranty
+notice so that the file can also be redistributed independently.
+
 This does not mean that the whole `autounattend.xml` comes from that upstream
 repository. The local profile has been modified and extended for this project,
 which keeps its own copyright for its original contributions.

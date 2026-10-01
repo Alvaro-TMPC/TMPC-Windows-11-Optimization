@@ -190,6 +190,7 @@ function Test-PowerShellBlock {
         [string]$Name,
         [string]$Text
     )
+    $Text = $Text.TrimStart([char]0xFEFF)
     $tokens = $null
     $errors = $null
     [void][System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
@@ -273,6 +274,196 @@ function Test-ExplorerDefaults {
     }
 }
 
+function Get-StaticFunction {
+    param($Ast, [string]$Name)
+    $nodes = @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $Name }, $true))
+    if ($nodes.Count -ne 1) { throw "Funcion no inequivoca: $Name" }
+    return $nodes[0]
+}
+
+function Get-StaticInventory {
+    param($Ast, [string]$FunctionName)
+    $function = Get-StaticFunction $Ast $FunctionName
+    $strings = @($function.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq 'SingleQuotedHereString' }, $true))
+    if ($strings.Count -ne 1) { throw "Inventario no inequivoco: $FunctionName" }
+    return $strings[0].Value
+}
+
+function Get-InventoryTuples {
+    param([string]$Text)
+    $path = $null
+    foreach ($line in ($Text -split '\r?\n')) {
+        if (-not $line) { continue }
+        if ($line -match '^\[(.+)\]$') { $path=$matches[1]; continue }
+        if ($line -eq '!KEY') { "$path|REMOVEKEY" }
+        elseif ($line.StartsWith('!')) { "$path|REMOVEVALUE|$($line.Substring(1))" }
+        else { "$path|SET|$line" }
+    }
+}
+
+function Get-SourceRegistryTuples {
+    param([string]$Text, [string]$Hive)
+    $tokens=$null; $errors=$null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text,[ref]$tokens,[ref]$errors)
+    $commands = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and
+        $n.GetCommandName() -in @('Set-RegistryValue','Remove-RegistryValue','Remove-RegistryKey') },$true))
+    foreach ($command in $commands) {
+        $args=@{}
+        for ($i=1; $i -lt $command.CommandElements.Count-1; $i++) {
+            $element=$command.CommandElements[$i]
+            if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
+                $args[$element.ParameterName]=$command.CommandElements[$i+1]
+            }
+        }
+        if (-not $args.ContainsKey('Path')) { continue }
+        $path=$args['Path'].SafeGetValue()
+        if (-not $path.StartsWith($Hive,[StringComparison]::OrdinalIgnoreCase)) { continue }
+        switch ($command.GetCommandName()) {
+            'Remove-RegistryKey' { "$path|REMOVEKEY" }
+            'Remove-RegistryValue' { "$path|REMOVEVALUE|$($args['Name'].SafeGetValue())" }
+            'Set-RegistryValue' {
+                $name=$args['Name'].SafeGetValue()
+                $type=$args['Type'].SafeGetValue()
+                $value=$args['Value'].SafeGetValue()
+                if ($type -eq 'Binary') { $value=(@($value | ForEach-Object { '{0:X2}' -f [byte]$_ }) -join ',') }
+                "$path|SET|$name|$type|$value"
+            }
+        }
+    }
+}
+
+function Test-PostInstallStandalone {
+    param([string]$SourceText, [string]$BloatText, [hashtable]$Hashes)
+    Write-Section 'STANDALONE POST-INSTALL (ESTATICO; NUNCA EJECUTADO)'
+    $record=Get-FileRecord 'Apply-TMPCOptimizations.ps1'
+    if (-not $record.Exists -or -not $record.DecodeOk) { Add-Fail 'Standalone no disponible'; return }
+    if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSEdition -ne 'Desktop') {
+        Add-Fail 'Ejecutar este validador en Windows PowerShell 5.1 para validar su parser'
+    }
+    Test-PowerShellBlock 'Apply-TMPCOptimizations.ps1 (parser 5.1)' $record.Text
+    $tokens=$null; $errors=$null
+    $ast=[System.Management.Automation.Language.Parser]::ParseInput($record.Text.TrimStart([char]0xFEFF),[ref]$tokens,[ref]$errors)
+    $hashMatches=[regex]::Matches($record.Text,'SOURCE_AUTOUNATTEND_SHA256 = ([A-F0-9]{64})')
+    if ($hashMatches.Count -eq 1 -and $hashMatches[0].Groups[1].Value -eq $Hashes['autounattend.xml']) {
+        Add-Ok 'Standalone: SOURCE_AUTOUNATTEND_SHA256 coincide; deriva futura bloqueada'
+    } else { Add-Fail 'Standalone: hash fuente ausente/ambiguo/desincronizado' }
+    $fixedHashes=@{
+        'autounattend.xml'='70D5DA63FEA8078FDA45F8F20FCA82E4A476060DDB5304EDEB3DA8A21CC95FF6'
+        'ventoy.json'='2231E01E9B0BA0622888D97EFEDA0F476DBD73A9CB90B11B48656E1F889F2796'
+    }
+    foreach ($file in $fixedHashes.Keys) {
+        if ($Hashes[$file] -eq $fixedHashes[$file]) { Add-Ok "${file}: baseline v0.1.5 intacto" }
+        else { Add-Fail "${file}: revisar expresamente la sincronizacion del baseline v0.1.5" }
+    }
+    try {
+        # No dot-sourcing, Invoke-Expression, compiled optimizer code or execution:
+        # inspect literal DATA and constant arguments with the parser only.
+        foreach ($scope in @(@{Function='Get-SystemRegistryProfile';Hive='HKLM:'},@{Function='Get-UserRegistryProfile';Hive='HKCU:'})) {
+            $actual=@(Get-InventoryTuples (Get-StaticInventory $ast $scope.Function))
+            $expected=@(Get-SourceRegistryTuples $SourceText $scope.Hive)
+            $delta=@(Compare-Object ($expected | Sort-Object -Unique) ($actual | Sort-Object -Unique))
+            if ($delta.Count -eq 0) { Add-Ok "Standalone $($scope.Hive): inventario Registro EXACTO ($($expected.Count) operaciones fuente)" }
+            else {
+                Add-Fail "Standalone $($scope.Hive): delta Registro ($($delta.Count))"
+                foreach ($d in $delta) { Write-Host ("       {0} {1}" -f $d.SideIndicator,$d.InputObject) }
+            }
+            if (@($actual | Where-Object { -not $_.StartsWith($scope.Hive,[StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
+                Add-Fail 'Standalone: inventario cruza la frontera HKLM/HKCU'
+            }
+        }
+        $bloat=Get-StaticFunction $ast 'Invoke-BloatRemoval'
+        $bt=$null; $be=$null
+        $ba=[System.Management.Automation.Language.Parser]::ParseInput($BloatText,[ref]$bt,[ref]$be)
+        foreach ($name in @('packages','capabilities','optionalFeatures','specialApps')) {
+            $find={ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq ('$'+$name) }
+            $source=@($ba.FindAll($find,$true))
+            $target=@($bloat.FindAll($find,$true))
+            if ($source.Count -ne 1 -or $target.Count -ne 1) { throw "Lista no inequivoca: $name" }
+            $s=@($source[0].Right.FindAll({param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst]},$true) | ForEach-Object Value)
+            $t=@($target[0].Right.FindAll({param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst]},$true) | ForEach-Object Value)
+            if (@(Compare-Object $s $t).Count -eq 0) { Add-Ok "Standalone debloat $name EXACTO ($($s.Count))" }
+            else { Add-Fail "Standalone debloat $name difiere del XML" }
+        }
+        $binary=Get-StaticInventory $ast 'Invoke-UserBinaryPreferences'
+        $expectedBits=@()
+        $pattern='(?m)^\s*Set-BinaryBit -Path ''HKCU:\\([^'']+)'' -Name ''([^'']+)'' -ByteIndex (\d+) -BitMask 0x([0-9a-fA-F]+) -SetBit \$(True|False)'
+        foreach ($m in [regex]::Matches($SourceText,$pattern,[Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+            $bit=if ($m.Groups[5].Value -eq 'True') {'1'} else {'0'}
+            $expectedBits += '{0}|{1}|{2}|{3}|{4}' -f $m.Groups[1].Value,$m.Groups[2].Value,$m.Groups[3].Value,$m.Groups[4].Value,$bit
+        }
+        if ($expectedBits.Count -eq 10 -and @(Compare-Object $expectedBits ($binary -split '\r?\n')).Count -eq 0) {
+            Add-Ok 'Standalone: 10 preferencias binarias EXACTAS'
+        } else { Add-Fail 'Standalone: preferencias binarias difieren del XML' }
+        $sys=Get-StaticFunction $ast 'Invoke-SystemPhase'
+        $taskAssign=@($sys.FindAll({param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$scheduledTasks'},$true))
+        $tasks=@($taskAssign[0].Right.FindAll({param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst]},$true) | ForEach-Object Value)
+        $sourceTasks=@([regex]::Matches($SourceText,'(?m)^\s*@\{ TN="([^"]+)"; Action="/Disable"') | ForEach-Object { $_.Groups[1].Value })
+        if ($sourceTasks.Count -eq 10 -and @(Compare-Object $sourceTasks $tasks).Count -eq 0) { Add-Ok 'Standalone: 10 tareas del perfil EXACTAS; Autochk preservada' }
+        else { Add-Fail 'Standalone: lista de tareas difiere' }
+        $params=@($ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+        if ($params -contains 'UserOnly' -and $params -contains 'Restart' -and
+            $record.Text.Contains("if (-not `$UserOnly) { Invoke-SystemPhase }")) { Add-Ok 'Standalone: Full por defecto, UserOnly y Restart explicitos' }
+        else { Add-Fail 'Standalone: modos no inequivocos' }
+        $user=Get-StaticFunction $ast 'Invoke-UserPhase'
+        $userCommands=@($user.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
+        $allowed=@('Invoke-RegistryProfile','Get-UserRegistryProfile','Invoke-UserBinaryPreferences','Invoke-QuietHours',
+            'Invoke-DownloadsPreference','Join-Path','Test-Path','Write-Log','Invoke-Operation','Set-ItemProperty','Get-Item','Remove-ItemProperty')
+        if (@($userCommands | Where-Object { $_ -notin $allowed }).Count -eq 0 -and -not $user.Extent.Text.Contains('HKLM:')) {
+            Add-Ok 'Standalone: entrada UserOnly solo preferencias HKCU; sin fase global'
+        } else { Add-Fail 'Standalone: revisar comandos del grafo UserOnly' }
+        foreach ($functionName in @('Invoke-UserBinaryPreferences','Invoke-QuietHours','Invoke-DownloadsPreference')) {
+            $function=Get-StaticFunction $ast $functionName
+            $calls=@($function.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
+            $userAllowed=@('Invoke-Operation','New-Item','Test-Path','Get-Item','Set-ItemProperty','Get-ItemProperty','Remove-Item',
+                'New-Object','Add-Type','Write-Log','Invoke-Native','Out-Null')
+            if (@($calls | Where-Object { $_ -notin $userAllowed }).Count -gt 0) { throw "Grafo UserOnly con comando inesperado: $functionName" }
+            if ($functionName -ne 'Invoke-DownloadsPreference' -and $function.Extent.Text -match 'HKLM[:\\]|HKEY_LOCAL_MACHINE') {
+                throw "HKLM inesperado en $functionName"
+            }
+        }
+        Add-Ok 'Standalone: helpers UserOnly auditados sin debloat, energia, tasks ni OneDrive global'
+        $systemCalls=@($ast.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-SystemPhase'},$true))
+        if ($systemCalls.Count -ne 1 -or $systemCalls[0].Parent.Parent.Parent.Extent.Text -notmatch 'if \(-not \$UserOnly\)') {
+            throw 'Fase global no confinada al modo Full'
+        }
+        $nativeCalls=@($ast.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-Native'},$true))
+        foreach ($call in $nativeCalls) {
+            if ($call.CommandElements[1].SafeGetValue() -notin @('reg.exe','powercfg.exe','shutdown.exe')) { throw 'Ejecutable nativo inesperado' }
+        }
+        Add-Ok 'Standalone: unica entrada de sistema protegida por not UserOnly; ejecutables nativos acotados'
+        # Critical command exclusions operate on AST command names, not prose.
+        $commands=@($ast.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
+        $forbidden=@('diskpart','diskpart.exe','Format-Volume','Clear-Disk','Initialize-Disk','Format','clean','bcdedit',
+            'Invoke-WebRequest','Invoke-RestMethod','Start-BitsTransfer','curl','curl.exe','wget','Invoke-Expression',
+            'Disable-NetAdapter','Enable-NetAdapter','Set-MpPreference','Add-MpPreference','Stop-Process',
+            'Register-ScheduledTask','New-LocalUser','Remove-LocalUser','takeown','icacls','cmd.exe')
+        if (@($commands | Where-Object { $_ -in $forbidden }).Count -eq 0) { Add-Ok 'Standalone: sin comandos de disco, descargas, cuentas, Defender disable, impersonacion ni kills' }
+        else { Add-Fail 'Standalone: comando critico prohibido detectado' }
+        $delete=Get-StaticFunction $ast 'Remove-OneDriveRemnant'
+        foreach ($snippet in @('$allowed -notcontains $full',"Join-Path `$env:USERPROFILE 'OneDrive'",'Assert-NoReparsePath $full','FileAttributes]::ReparsePoint','$script:ProtectedOneDriveRoots','$script:OneDriveProtectionReady')) {
+            if (-not $delete.Extent.Text.Contains($snippet)) { throw 'Proteccion OneDrive ausente' }
+        }
+        # Every filesystem Remove-Item outside this function must target registry.
+        $removes=@($ast.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Remove-Item'},$true))
+        foreach ($remove in $removes) {
+            $owner=$remove.Parent
+            while ($owner -and $owner -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $owner=$owner.Parent }
+            if (-not $owner -or $owner.Name -notin @('Remove-OneDriveRemnant','Invoke-RegistryProfile','Invoke-DownloadsPreference','Invoke-OneDriveRemoval','Invoke-SystemPhase')) {
+                throw 'Borrado fuera de las funciones auditadas'
+            }
+        }
+        Add-Ok 'Standalone: OneDrive protegido, allowlist de restos y rechazo de reparse points'
+        foreach ($name in @('DisableAntiSpyware','DisableRealtimeMonitoring','DisableAntiVirus','DisableBehaviorMonitoring')) {
+            if ($record.Text.Contains($name)) { throw 'Decision Defender alterada' }
+        }
+        Add-Ok 'Standalone: Defender preservado; Store/Edge/WebView2 no son targets de debloat'
+        if ($record.Text.Contains('if ($Restart -and $exitCode -eq 0)') -and
+            $record.Text.Contains('if ($UserOnly -and ($Restart -or $NetFx3Source))')) {
+            Add-Ok 'Standalone: reinicio solo con Restart explicito y sin errores; UserOnly no reinicia'
+        } else { Add-Fail 'Standalone: gate de reinicio ausente' }
+    } catch { Add-Fail ("Standalone AST: {0}" -f $_.Exception.Message) }
+}
+
 function Get-HereStringMatches {
     param(
         [string]$Text,
@@ -334,10 +525,15 @@ function Test-GitAttributesCrossCheck {
         'docs/configuration-testing-limitations-sources.md',
         'docs/comprobaciones-posteriores-instalacion.md',
         'docs/post-installation-checks.md',
-        'scripts/validate-baseline.ps1'
+        'scripts/validate-baseline.ps1',
+        'Apply-TMPCOptimizations.ps1'
     )
     try {
-        $output = @(& git -C $script:Root check-attr eol -- $targets 2>$null)
+        if ((Get-Location).ProviderPath -ne $script:Root) {
+            Add-Warn 'Git: ejecutar desde la raiz para comprobar atributos de esta copia'
+            return
+        }
+        $output = @(& git check-attr eol -- $targets 2>$null)
     } catch {
         Add-Warn 'git check-attr no se pudo ejecutar'
         return
@@ -360,6 +556,7 @@ function Test-GitAttributesCrossCheck {
         'docs/comprobaciones-posteriores-instalacion.md'     = 'lf'
         'docs/post-installation-checks.md'                   = 'lf'
         'scripts/validate-baseline.ps1'                      = 'lf'
+        'Apply-TMPCOptimizations.ps1'                        = 'lf'
     }
     $mismatches = 0
     foreach ($line in $output) {
@@ -520,6 +717,7 @@ if (-not $script:Root) {
 Add-Ok ("Raiz del repositorio: {0}" -f $script:Root)
 
 $mandatoryFiles = @(
+    'Apply-TMPCOptimizations.ps1',
     'autounattend.xml',
     'ventoy.json',
     '.gitattributes',
@@ -544,11 +742,11 @@ foreach ($relativePath in $mandatoryFiles) {
 }
 
 $gitCmd = Get-Command git -ErrorAction SilentlyContinue
-if ($null -eq $gitCmd) {
-    Add-Warn 'Git no disponible: no se informa del estado del arbol de trabajo'
+if ($null -eq $gitCmd -or (Get-Location).ProviderPath -ne $script:Root) {
+    Add-Warn 'Git no disponible o cwd distinto de RepoRoot: sin consulta Git de esta copia'
 } else {
     try {
-        $branch = @(& git -C $script:Root rev-parse --abbrev-ref HEAD 2>$null)
+        $branch = @(& git rev-parse --abbrev-ref HEAD 2>$null)
         if ($LASTEXITCODE -eq 0 -and $branch.Count -ge 1) {
             Add-Ok ("Rama Git: {0}" -f $branch[0])
         } else {
@@ -558,7 +756,7 @@ if ($null -eq $gitCmd) {
         Add-Warn 'No se pudo consultar la rama Git'
     }
     try {
-        $statusLines = @(& git -C $script:Root status --porcelain 2>$null)
+        $statusLines = @(& git status --porcelain 2>$null)
         if ($LASTEXITCODE -ne 0) {
             Add-Warn 'No se pudo consultar el estado del arbol de trabajo'
         } elseif ($statusLines.Count -eq 0) {
@@ -851,6 +1049,8 @@ foreach ($source in $baselineHashSources) {
     }
 }
 
+Test-PostInstallStandalone -SourceText $sysText -BloatText $bloatText -Hashes $realHashes
+
 # ---------------------------------------------------------------------------
 # EOL / encoding
 # ---------------------------------------------------------------------------
@@ -858,6 +1058,7 @@ foreach ($source in $baselineHashSources) {
 Write-Section 'EOL / ENCODING'
 
 Test-FilePolicy -RelativePath 'autounattend.xml' -ExpectedEol 'LF' -ExpectedBom 'NONE'
+Test-FilePolicy -RelativePath 'Apply-TMPCOptimizations.ps1' -ExpectedEol 'LF' -ExpectedBom 'UTF8'
 Test-FilePolicy -RelativePath 'README.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'README.es.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'LICENSE' -ExpectedEol 'LF' -ExpectedBom 'NONE'
@@ -902,7 +1103,8 @@ if (-not $gitattributesRecord.Exists) {
         'LICENSE text eol=lf',
         'THIRD_PARTY_NOTICES.md text eol=lf',
         'docs/*.md text eol=lf',
-        'scripts/*.ps1 text eol=lf'
+        'scripts/*.ps1 text eol=lf',
+        'Apply-TMPCOptimizations.ps1 text eol=lf'
     )
     foreach ($rule in $requiredRules) {
         if ($lines -contains $rule) {
