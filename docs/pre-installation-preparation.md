@@ -3,7 +3,7 @@
 This document is a checklist to run **before** booting the Windows installer for
 a clean installation. It is oriented to the profile of this project:
 
-- Windows 11 25H2 x64 / amd64;
+- Windows 11 Pro 26H2 x64 / amd64;
 - use for gaming and programming;
 - privacy priority;
 - clean installation from the repository automation.
@@ -231,7 +231,7 @@ must not collect product keys, credentials or real identifiers.
 
 According to the current repository files:
 
-- The target platform is Windows 11 25H2 x64 / amd64.
+- The target platform is Windows 11 Pro 26H2 x64 / amd64.
 - The media is prepared with Ventoy and its `ventoy.json` configuration.
 - The expected answer file is `autounattend.xml`.
 - The Ventoy configuration declares a specific installation entry with that

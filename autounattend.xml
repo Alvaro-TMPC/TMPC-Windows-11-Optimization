@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
   <!-- FINAL profile: Gaming + Programming, aggressive app debloat, no Game Pass/Microsoft Store gaming, no OneDrive, minimal Windows notifications with critical Windows Security alerts preserved, conservative performance defaults, Windows locking and printing preserved. -->
-  <!-- File layout: windowsPE (setup-time requirement bypass) -> specialize (extract embedded scripts, disable network, enable .NET 3.5, run SYSTEM-wide customization) -> oobeSystem (re-enable network at first logon) -> Extensions (embedded PowerShell, extracted during specialize). Target reference: Windows 11 25H2. -->
+  <!-- File layout: windowsPE (setup-time requirement bypass) -> specialize (extract embedded scripts, disable network, enable .NET 3.5, run SYSTEM-wide customization) -> oobeSystem (re-enable network at first logon) -> Extensions (embedded PowerShell, extracted during specialize). Target reference: Windows 11 Pro 26H2 (build base 26300); historical clean-install baseline: Windows 11 25H2. -->
   <!-- Protected decisions (do not change without explicit approval): fictitious ProductKey, OOBE/BypassNRO, ConfigureStartPins, Windows Update profile, driver exclusion, Store/Edge/WebView2/Defender/OneDrive design, Balanced power plan, Game Mode on / Game DVR off, camera/mic user control, CloudStore/Quiet Hours behavior. -->
   <settings pass="offlineServicing"></settings>
   <settings pass="windowsPE">
@@ -1557,6 +1557,7 @@ exit 0
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'UploadUserActivities' -Type 'DWord' -Value 0 -Description 'Prevent uploading user activity history'
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'AllowCrossDeviceClipboard' -Type 'DWord' -Value 0 -Description 'Disable clipboard synchronization across devices'
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' -Name 'DisableWindowsConsumerFeatures' -Type 'DWord' -Value 1 -Description 'Disable Microsoft consumer experiences and promotional app suggestions'
+    Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' -Name 'DisableCloudOptimizedContent' -Type 'DWord' -Value 1 -Description 'Turn off cloud optimized content so promotional taskbar pins (such as the Outlook for Windows placeholder) are not created for new profiles'
     Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Name 'DisablePrivacyExperience' -Type 'DWord' -Value 1 -Description 'Do not relaunch the privacy settings experience after first logon or upgrades'
 
     # Force-deny nonessential Windows app access. Camera and microphone remain user-controlled for OBS/videocalls.
@@ -1686,20 +1687,71 @@ Windows Registry Editor Version 5.00
     # START MENU LAYOUT
     # ============================================================================
 
-    Write-Log "Configuring clean Start Menu layout..." "INFO"
+    Write-Log "Staging clean Start Menu policy..." "INFO"
 
-    # Protected implementation: empty pinned list with applyOnce, then user pin changes are kept.
+    # Protected implementation: ADMX-exact machine policy "Configure Start Pins" backed by a
+    # persistent empty JSON with applyOnce. The required value pair was identified from the
+    # system StartMenu.admx and validated in runtime on Windows 11 26H2 (manual staging, no
+    # gpedit, no gpupdate, no Registry.pol):
+    #   ConfigureStartPins     = REG_DWORD 1
+    #   ConfigureStartPinsJSON = REG_EXPAND_SZ with the path to LayoutModification.json
+    # Staging the policy does NOT prove the clean-install Start Menu result:
+    # START_PINS_CLEAN_INSTALL_RUNTIME = PENDING until the integrated XML passes a clean install.
     # Windows 11 only (build >= 22000); the Windows 10 branch below is legacy. Revalidate on new builds.
     $buildNumber = [System.Environment]::OSVersion.Version.Build
     Write-Log "Detected Windows build: $buildNumber" "INFO"
 
     if ($buildNumber -ge 22000) {
-        Write-Log "Applying Windows 11 clean Start Menu layout" "INFO"
         try {
-            Set-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start' -Name 'ConfigureStartPins' -Type 'String' -Value '{"applyOnce":true,"pinnedList":[]}' -Description 'Clean Start Menu once, then preserve user pin changes'
-            Write-Log "Windows 11 Start Menu layout applied successfully" "SUCCESS"
+            $startPinsDir = 'C:\ProgramData\TMPC-Windows-11-Optimization'
+            $startPinsJsonPath = 'C:\ProgramData\TMPC-Windows-11-Optimization\LayoutModification.json'
+            $startPinsJsonContent = '{"applyOnce":true,"pinnedList":[]}'
+            $startPinsEncoding = [System.Text.UTF8Encoding]::new($false)
+
+            foreach ($existingPinsPath in @($startPinsDir, $startPinsJsonPath)) {
+                if (Test-Path -LiteralPath $existingPinsPath) {
+                    $existingPinsItem = Get-Item -LiteralPath $existingPinsPath -Force -ErrorAction Stop
+                    if (($existingPinsItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint) {
+                        throw "Start pins path is a reparse point and will not be followed: $existingPinsPath"
+                    }
+                }
+            }
+
+            if (-not (Test-Path -LiteralPath $startPinsDir -PathType Container)) {
+                New-Item -Path $startPinsDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            }
+
+            [System.IO.File]::WriteAllText($startPinsJsonPath, $startPinsJsonContent, $startPinsEncoding)
+
+            $startPinsWritten = [System.IO.File]::ReadAllText($startPinsJsonPath, $startPinsEncoding)
+            if ($startPinsWritten -ne $startPinsJsonContent) {
+                throw "Start pins JSON content verification failed."
+            }
+            $startPinsParsed = ConvertFrom-Json -InputObject $startPinsWritten -ErrorAction Stop
+            if ($startPinsParsed.applyOnce -ne $true -or @($startPinsParsed.pinnedList).Count -ne 0) {
+                throw "Start pins JSON structure verification failed."
+            }
+
+            Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'ConfigureStartPins' -Type 'DWord' -Value 1 -Description 'Enable the ADMX Start pins policy once through the exact machine policy marker, then preserve user pin changes'
+            Set-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'ConfigureStartPinsJSON' -Type 'ExpandString' -Value 'C:\ProgramData\TMPC-Windows-11-Optimization\LayoutModification.json' -Description 'Point the ADMX Start pins policy at the persistent applyOnce JSON layout file'
+
+            $startPinsKey = Get-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -ErrorAction Stop
+            if ($startPinsKey.GetValueKind('ConfigureStartPins') -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
+                throw "ConfigureStartPins is not REG_DWORD."
+            }
+            if ($startPinsKey.GetValueKind('ConfigureStartPinsJSON') -ne [Microsoft.Win32.RegistryValueKind]::ExpandString) {
+                throw "ConfigureStartPinsJSON is not REG_EXPAND_SZ."
+            }
+            $startPinsPolicy = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'ConfigureStartPins','ConfigureStartPinsJSON' -ErrorAction Stop
+            if ($startPinsPolicy.ConfigureStartPins -ne 1 -or $startPinsPolicy.ConfigureStartPinsJSON -ne $startPinsJsonPath -or -not (Test-Path -LiteralPath $startPinsPolicy.ConfigureStartPinsJSON -PathType Leaf)) {
+                throw "ConfigureStartPins policy pair does not match the persistent JSON file."
+            }
+
+            Write-Log "Start pins policy staged and verified: ADMX pair (DWord marker + ExpandString JSON path) matches the persistent JSON" "SUCCESS"
+            Write-Log "CONFIGURATION_STAGED = PASS; START_PINS_CLEAN_INSTALL_RUNTIME = PENDING until the integrated XML passes a clean install" "WARNING"
         } catch {
-            Write-Log "Failed to apply Windows 11 Start Menu layout: $($_.Exception.Message)" "ERROR"
+            $script:CustomizationHadErrors = $true
+            Write-Log "Failed to stage the Windows 11 Start pins policy: $($_.Exception.Message)" "ERROR"
         }
     }
     else {
@@ -2532,7 +2584,7 @@ namespace Autounattend
                     throw "GroupBy under $downloadsTopViewHklm is not a String value"
                 }
                 if ([string]$sourceTopViewKey.GetValue('GroupBy') -ne 'System.DateModified') {
-                    throw "GroupBy under $downloadsTopViewHklm does not match the Windows 11 25H2 Downloads default"
+                    throw "GroupBy under $downloadsTopViewHklm does not match the expected Downloads Group by default"
                 }
 
                 if (-not (Test-Path -Path $folderTypesHkcuRoot)) {
@@ -2576,6 +2628,49 @@ namespace Autounattend
             Set-RegistryValue -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'HideRecommendedSection' -Type 'DWord' -Value 1 -Description 'Show or hide the lower section that displays recently opened files and suggested apps. Hiding this section also removes Windows Spotlight from the lock screen and suggested content in the Settings app'
             Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Start' -Name 'ShowRecentList' -Type 'DWord' -Value 0 -Description 'Display a list of recently installed applications at the top of the All Apps list'
             Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Start' -Name 'ShowFrequentList' -Type 'DWord' -Value 0 -Description 'Display your frequently launched applications at the top of the All Apps list for quick access'
+
+            # All apps view mode: initialize the List layout as a first-logon default
+            # without imposing it permanently. The value is written only when the user
+            # has no preference yet, so an existing choice is preserved, Category and
+            # Grid remain available and no recurring policy or additional task is
+            # created. Written here, in the one-time user phase, before the marker
+            # and cleanup, so the initial preference is in place early in the first
+            # interactive session.
+            $allAppsViewPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Start'
+            try {
+                if ([System.Environment]::OSVersion.Version.Build -lt 22000) {
+                    Write-Log "All apps view modes are not supported on this build; preference left unchanged" "WARNING"
+                } else {
+                    if (-not (Test-Path -Path $allAppsViewPath)) {
+                        New-Item -Path $allAppsViewPath -Force -ErrorAction Stop | Out-Null
+                    }
+                    $allAppsViewKey = Get-Item -Path $allAppsViewPath -ErrorAction Stop
+                    try {
+                        $allAppsViewExists = $allAppsViewKey.GetValueNames() -contains 'AllAppsViewMode'
+                    } finally {
+                        $allAppsViewKey.Close()
+                    }
+                    if ($allAppsViewExists) {
+                        Write-Log "All apps view mode preference already present; preserved" "INFO"
+                    } else {
+                        Set-ItemProperty -Path $allAppsViewPath -Name 'AllAppsViewMode' -Type DWord -Value 2 -Force -ErrorAction Stop
+                        $allAppsViewKey = Get-Item -Path $allAppsViewPath -ErrorAction Stop
+                        try {
+                            $allAppsViewKind = $allAppsViewKey.GetValueKind('AllAppsViewMode')
+                            $allAppsViewValue = $allAppsViewKey.GetValue('AllAppsViewMode')
+                        } finally {
+                            $allAppsViewKey.Close()
+                        }
+                        if ($allAppsViewKind -ne [Microsoft.Win32.RegistryValueKind]::DWord -or $allAppsViewValue -ne 2) {
+                            throw "AllAppsViewMode was not verified as REG_DWORD 2."
+                        }
+                        Write-Log "All apps view mode initialized to List (REG_DWORD 2) as an initial preference; user changes persist" "SUCCESS"
+                    }
+                }
+            } catch {
+                $script:CustomizationHadErrors = $true
+                Write-Log "Failed to initialize the All apps view mode preference: $($_.Exception.Message)" "ERROR"
+            }
             Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'Start_TrackProgs' -Type 'DWord' -Value 1 -Description 'Display your frequently launched applications at the top of the All Apps list for quick access'
             Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContent-338388Enabled' -Type 'DWord' -Value 0 -Description 'Display app suggestions and promotional content from the Microsoft Store in the Start Menu'
             Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'Start_TrackDocs' -Type 'DWord' -Value 0 -Description 'Display your recently opened documents and files in the Start Menu''s Recommended section for quick access'

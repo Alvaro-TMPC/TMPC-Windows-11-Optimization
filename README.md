@@ -18,7 +18,9 @@ For an existing installation, the additional self-contained
 [`Apply-TMPCOptimizations.ps1`](Apply-TMPCOptimizations.ps1) applies the relevant
 post-install portion of the same profile; see the section below.
 
-Target platform: Windows 11 25H2, x64 / amd64.
+Target platform: Windows 11 Pro 26H2, x64 / amd64 (build base 26300). The
+published v0.1.5 baseline was validated on Windows 11 Pro 25H2 (historical
+reference); see the tested-environment and limitations sections.
 
 ## What it does
 
@@ -81,8 +83,22 @@ answer file remains the authoritative source.
 
 ## Tested environment
 
-The baseline has completed real clean installations on Windows 11 Pro 25H2
-(x64 / amd64), including:
+Current reference: Windows 11 Pro 26H2 (x64 / amd64, build base 26300; the OS
+revision is not fixed). On a clean 26H2 installation used as test environment:
+
+- the Start pins policy pair was applied as the ADMX-exact machine policy and
+  its result was verified at runtime (empty Pinned section, later user pins
+  preserved);
+- the Outlook for Windows promotional taskbar pin was visually absent for a
+  genuinely new local user, with Edge, File Explorer and Microsoft Store kept;
+- `AllAppsViewMode` (DWord 2) was applied programmatically on an existing
+  profile: List visible after signing out and back in, and the value persisted.
+
+The integrated answer file with the latest changes has not been retested on
+another clean installation, and the standalone has no runtime test yet.
+
+Historical evidence: the published v0.1.5 baseline completed real clean
+installations on Windows 11 Pro 25H2 (x64 / amd64), including:
 
 - Setup, OOBE and first desktop reached without blocking errors;
 - local account creation with no mandatory network or Microsoft account prompt;
@@ -91,8 +107,9 @@ The baseline has completed real clean installations on Windows 11 Pro 25H2
 - final cleanup completed with no leftover setup tasks or temporary files;
 - Explorer defaults and the Downloads view override verified.
 
-Other Windows 11 versions, editions or builds are not guaranteed. Future builds
-may require revalidation.
+That evidence documents the historical 25H2 baseline; it is not a 26H2
+clean-install claim. Other Windows 11 versions, editions or builds are not
+guaranteed. Future builds may require revalidation.
 
 ## Important warning
 
@@ -111,14 +128,18 @@ A clean installation can destroy data irreversibly. Before you start:
 
 `autounattend.xml` remains the clean-install method. The self-contained
 [`Apply-TMPCOptimizations.ps1`](Apply-TMPCOptimizations.ps1), standalone version
-0.1.0, provides a post-install method **without formatting**, derived directly
-from the v0.1.5 answer file. It needs no other repository files, external
-dependencies or downloads.
+0.1.3, provides a post-install method **without formatting**, derived directly
+from the answer file (v0.1.5 plus the unreleased Start pins, cloud optimized
+content and All apps view candidates). It needs no other repository files,
+external dependencies or downloads.
 
-**Reference: Windows 11 Pro 25H2 x64 / amd64.** The script accepts only Windows
-11 25H2 (build 26200) in native x64 Windows PowerShell 5.1. The clean-install
-baseline has runtime evidence on that reference; this new standalone has only
-static validation and has **not** yet been tested on hardware or in a VM.
+**Reference: Windows 11 Pro 26H2 x64 / amd64.** The script accepts only Windows
+11 26H2 (build base 26300; the OS revision is not fixed) in native x64 Windows
+PowerShell 5.1. The published clean-install baseline (v0.1.5) has runtime
+evidence on the historical Windows 11 Pro 25H2 reference; the current standalone
+(including the unreleased Start pins, cloud optimized content and All apps view
+candidates) has only static validation and has **not** yet been tested on
+hardware or in a VM.
 Other versions/builds are untested and are rejected. This is not a claim of
 identical end state on an already customized PC.
 
@@ -184,12 +205,14 @@ close applications at the deadline); cancel with `shutdown.exe /a` if needed.
 
 | Baseline block | Post-install behavior |
 | --- | --- |
-| System registry/policies | Same HKLM names, types and values: privacy, Update/driver exclusion, Defender notifications, gaming, power, AI, Explorer, Start/Taskbar and sound. HKCR deletions resolve to machine Classes, matching the original SYSTEM phase. |
+| System registry/policies | Same HKLM names, types and values: privacy, Update/driver exclusion, Defender notifications, gaming, power, AI, Explorer, Start/Taskbar, cloud optimized content suppression and sound. HKCR deletions resolve to machine Classes, matching the original SYSTEM phase. |
 | User registry/personalization | Same complete HKCU inventory and binary masks; Quiet Hours uses the source's native COM ABI and recognized CloudStore fallback. Downloads copies HKLM to HKCU without resetting saved views. |
 | Debloat | Same 40 AppX targets, 4 capability targets and Recall; sequential checked removal. The source's OneNote **desktop** special uninstaller is deferred because arbitrary uninstall strings may affect an existing Office suite; its AppX package remains targeted. |
 | OneDrive | Same removal/blocking intent and default-profile auto-install prevention, adapted to verified identity and guarded software paths. No forced process termination, recursive ACL takeover or deferred file deletions. |
 | .NET Framework 3.5 | If not enabled, requires matching local media; no Windows Update fallback. Supply `-NetFx3Source "D:\sources\sxs"` in Full mode (replace `D:` with your mounted media drive). Without a source it is left unchanged and reported. |
-| Start pins / encryption | Exact `ConfigureStartPins` JSON with `applyOnce`; previously initialized pins may remain. `PreventDeviceEncryption` does not decrypt existing BitLocker encryption. |
+| Start pins / encryption | ADMX-exact machine policy pair `ConfigureStartPins` (DWord 1) + `ConfigureStartPinsJSON` (REG_EXPAND_SZ path) pointing to a persistent `LayoutModification.json` with `applyOnce`; the pair was validated manually on 26H2, while the integrated clean-install test is pending. `PreventDeviceEncryption` does not decrypt existing BitLocker encryption. |
+| Cloud optimized content | Machine policy `DisableCloudOptimizedContent` (DWord 1) suppresses cloud optimized content to prevent promotional taskbar pins, such as the Outlook for Windows placeholder, for new profiles. It does not remove pins that already exist, affects personalized cloud content globally (Windows Spotlight wallpapers become unavailable), is listed for Enterprise/Education editions in the CSP reference (no documented Pro support) and was only visually checked with a new user on Windows 11 Pro 26H2; integrated clean-install validation is pending. |
+| Start menu All apps view | Initial `AllAppsViewMode` (DWord 2 = List) written once in HKCU only when the value is absent; an existing user choice (List, Grid or Category) is preserved. It is a normal user preference, not a policy: no recurring policy or task is created and the view can be changed later. |
 | Setup/OOBE | Not reproduced: hardware bypasses, ProductKey/EULA, BypassNRO/OOBE screens, network disabling/re-enabling, installation and account creation. |
 | One-shot / cleanup | No Setup tasks, tokens, completion markers or Setup-folder cleanup are created. Logs are retained; restart is optional. |
 
@@ -267,7 +290,7 @@ open-source tool that boots ISO files directly from a USB drive.
 
    ```text
    <USB drive root>
-   ├── Win11_25H2_Spanish_x64_v2.iso
+   ├── Windows11_Client_x64_es-es_26300_9457.iso
    └── ventoy/
        ├── ventoy.json
        └── script/
@@ -279,7 +302,7 @@ open-source tool that boots ISO files directly from a USB drive.
      path declared as `template` in `ventoy.json`.
    - The Windows ISO goes to the root of the USB drive with the exact file name
      declared as `image` in `ventoy.json`, currently
-     `Win11_25H2_Spanish_x64_v2.iso`.
+     `Windows11_Client_x64_es-es_26300_9457.iso`.
 
 4. The ISO file name and path must match the `image` value in `ventoy.json`.
    If you use a different ISO, rename your file to match or edit `ventoy.json`
@@ -309,7 +332,7 @@ To install TMPC Windows 11 Optimization, choose
 3. Select the USB drive entry. Prefer the UEFI entry; this profile targets the
    amd64/UEFI path.
 4. Ventoy starts and lists the ISO files found on the drive. Select
-   `Win11_25H2_Spanish_x64_v2.iso`. Ventoy then shows the boot menu for that
+   `Windows11_Client_x64_es-es_26300_9457.iso`. Ventoy then shows the boot menu for that
    image: choose `Boot with /ventoy/script/autounattend.xml` to install with
    the profile, or `Boot without auto installation template` to boot the plain
    ISO without applying `autounattend.xml`.
@@ -438,11 +461,31 @@ Hashes of the current documented baseline:
 
 ```text
 autounattend.xml
-70D5DA63FEA8078FDA45F8F20FCA82E4A476060DDB5304EDEB3DA8A21CC95FF6
+5B0CBD45C392F379E70336E465926B869F964B439A10420C159AC42D5AF63B09
 
 ventoy.json
-2231E01E9B0BA0622888D97EFEDA0F476DBD73A9CB90B11B48656E1F889F2796
+058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B
 ```
+
+The current answer file targets Windows 11 Pro 26H2 (build base 26300) and
+stages the Start pins policy as the ADMX-exact machine policy pair
+(`ConfigureStartPins` = DWord 1 and `ConfigureStartPinsJSON` =
+REG_EXPAND_SZ path) pointing to a persistent empty layout with `applyOnce`. That
+pair was validated manually on Windows 11 26H2 (empty Pinned section, later user
+pins preserved), but the integrated answer file still requires a clean-install
+sign-in test before its Start result is considered validated. The current
+answer file also adds the `DisableCloudOptimizedContent` (DWord 1) machine
+policy to suppress cloud optimized promotional taskbar pins for new profiles;
+it does not remove existing pins, and the integrated clean-install result is
+still pending. The current answer file additionally initializes the All apps
+view as List (`AllAppsViewMode` = DWord 2) in the one-time user phase, only when
+the value is absent: `RUNTIME_EXISTING_PROFILE = PASS` (manual registry change
+on an existing Windows 11 Pro 26H2 profile, List visible after signing out and
+back in, with Category and Grid still available),
+`CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED` and
+`STANDALONE_RUNTIME = NOT_TESTED`. The rest of the profile keeps the runtime
+evidence of the published v0.1.5 baseline, which was validated on the historical
+Windows 11 Pro 25H2 reference.
 
 Verify them on your copy:
 
@@ -455,9 +498,12 @@ review the files before using them.
 
 ## Known limitations
 
-- Validated specifically on Windows 11 25H2. Compatibility with other
-  versions, editions or builds is not tested; future builds may require
-  revalidation.
+- The published v0.1.5 baseline was validated specifically on Windows 11 Pro
+  25H2 (historical reference). The current reference is Windows 11 Pro 26H2
+  (build base 26300): the integrated answer file still lacks a clean-install
+  revalidation of the latest changes and the standalone has no runtime test.
+  Compatibility with other versions, editions or builds is not tested; future
+  builds may require revalidation.
 - No hardware-specific drivers are included. Prepare chipset, network, audio
   and GPU drivers yourself.
 - No third-party software is installed by the profile.
@@ -465,13 +511,47 @@ review the files before using them.
   undocumented COM interface; it may change in future Windows builds.
 - The per-user override for the Downloads folder view depends on the current
   Windows behavior and is not a public API; a major update may remove it and
-  the one-time task does not re-apply it automatically.
+  the one-time task does not re-apply it automatically. Before copying the
+  folder type, the profile verifies the installed default
+  (`GroupBy = System.DateModified`); that value was verified on the historical
+  25H2 reference and has not been re-verified on 26H2. If it differs, the
+  override is skipped and the mismatch is recorded as an error instead of
+  writing an unverified view.
 - Paint may still show some AI-related elements or messages even though its AI
   policies are applied; a fully clean Paint AI UI was not achieved. In the test
   installation, Notepad showed no visible AI features.
 - A historical first-logon visual anomaly (light taskbar and wallpaper until a
   logoff/logon) did not reproduce on the current baseline; its root cause is
   still unconfirmed.
+- The Start pins policy pair in the current answer file (persistent empty
+  layout with `applyOnce`, applied at the next sign-in) was validated manually
+  on Windows 11 26H2; the integrated answer file still requires a clean-install
+  sign-in validation, and staging the policy does not by itself prove an empty
+  Start menu. Taskbar icons are independent of Start pins.
+- The `DisableCloudOptimizedContent` machine policy (added to suppress
+  promotional taskbar pins such as the Outlook for Windows placeholder on new
+  profiles) turns off cloud optimized content globally: personalized cloud
+  content and Windows Spotlight wallpapers become unavailable, while static
+  wallpapers still work. It does not remove pins that already exist. The CSP
+  reference lists the setting for Enterprise/Education editions: it is not
+  documented official support for Pro. It was visually checked with a
+  genuinely new local user on Windows 11 Pro 26H2 (Outlook not pinned; Edge,
+  File Explorer and Microsoft Store kept; empty Pinned section). Integrated
+  clean-install validation and side-effect coverage are still pending; the
+  historical 25H2 baseline did not include this policy, and the Start pins ADMX
+  pair keeps its previous manual 26H2 validation.
+- The initial List view for All apps is an `AllAppsViewMode` (DWord 2) user
+  preference written during the first-logon user customization phase only when
+  the value is absent; an existing preference is never overwritten and the
+  setting can be changed later to Grid or Category. On an existing Windows 11
+  Pro 26H2 profile, changing the value manually and signing out and back in
+  showed the List view (`RUNTIME_EXISTING_PROFILE = PASS`), with Category and
+  Grid still available. Automatic application by a clean installation
+  (`CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED`) and the standalone runtime
+  (`STANDALONE_RUNTIME = NOT_TESTED`) have not been tested; behavior on other
+  builds, including the historical 25H2 reference, is also untested.
+  `AllAppsViewMode` is an observed registry behavior, not a documented
+  Microsoft-supported interface.
 
 ## Repository layout
 

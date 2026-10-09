@@ -5,7 +5,10 @@ repositorio: qué decisiones aplica el perfil, qué se ha validado, qué sigue s
 validar, qué limitaciones existen y qué referencias de origen están presentes
 en los archivos.
 
-Plataforma objetivo: Windows 11 25H2, x64 / amd64.
+Plataforma objetivo: Windows 11 Pro 26H2, x64 / amd64 (build base 26300). El
+baseline publicado v0.1.5 se validó en la referencia histórica Windows 11 Pro
+25H2; a continuación se distinguen la evidencia histórica y la referencia
+actual.
 
 No es una guía de instalación. La preparación previa al formateo se documenta
 en `docs/preparacion-previa-instalacion.md`.
@@ -56,23 +59,54 @@ de claves del archivo de respuestas.
   Ctrl+Alt+Del siguen disponibles.
 - No se aplican optimizaciones agresivas de CPU, GPU, planificador ni red.
 - OOBE y `BypassNRO` se mantienen.
-- `ConfigureStartPins` se mantiene con lista vacía y `applyOnce`.
+- `ConfigureStartPins` se configura como el par ADMX exacto de política de
+  máquina en `HKLM\SOFTWARE\Policies\Microsoft\Windows\Explorer`:
+  `ConfigureStartPins` (DWord 1) y `ConfigureStartPinsJSON` (REG_EXPAND_SZ) con
+  la ruta a `C:\ProgramData\TMPC-Windows-11-Optimization\LayoutModification.json`;
+  el archivo contiene la lista vacía y `applyOnce`. El par se aplica en el
+  siguiente inicio de sesión; su resultado en Inicio se validó manualmente en
+  Windows 11 26H2 y todavía requiere validación runtime del archivo de
+  respuestas integrado en instalación limpia.
+- `DisableCloudOptimizedContent` se aplica como política de máquina
+  (`HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent`, DWord 1) para
+  desactivar el contenido optimizado en la nube y evitar anclajes promocionales
+  en la barra de tareas, como el marcador de Outlook para Windows, en perfiles
+  nuevos. No elimina anclados que ya existan y afecta globalmente al contenido
+  personalizado: la colección de fondos de Windows Spotlight deja de estar
+  disponible (los fondos estáticos siguen funcionando). La referencia CSP lista
+  la opción para ediciones Enterprise/Education, por lo que no es soporte Pro
+  documentado. Una comprobación visual con un usuario local genuinamente nuevo
+  en Windows 11 Pro 26H2 no mostró anclaje de Outlook, con Edge, Explorador de
+  archivos y Microsoft Store conservados y la sección Pinned vacía; la
+  validación integrada en instalación limpia y la cobertura de efectos
+  secundarios siguen pendientes. El baseline histórico 25H2 no incluía esta
+  política.
+- La vista de Todas las aplicaciones se inicializa como Lista: `AllAppsViewMode`
+  (DWord 2) se escribe una sola vez, en la fase de usuario del primer inicio de
+  sesión interactivo, y solo si el valor no existe. Se preserva cualquier
+  preferencia previa del usuario (Lista, Cuadrícula o Categoría). Es una
+  preferencia normal del usuario, no una política: no se crea ninguna política
+  ni tarea recurrente y la vista puede cambiarse después. Comportamiento
+  observado del Registro, no una interfaz documentada y soportada por Microsoft.
 - `ProductKey` es ficticia, formada por ceros; no es una clave real.
 - Los efectos de transparencia se desactivan.
 - El estado de "No molestar" se configura mediante la interfaz COM interna
   `IQuietHoursSettings` como vía principal; Windows / WpnUserService materializa
   el estado persistente. La escritura directa del blob de CloudStore de Quiet
   Hours se conserva únicamente como fallback para formatos materializados
-  reconocibles. Dependiente de Windows 11 25H2.
+  reconocibles. El mecanismo se validó en la referencia histórica Windows 11
+  Pro 25H2; la revalidación en Windows 11 26H2 sigue pendiente.
 - File Explorer define para el usuario creado durante la instalación: vista
   compacta activada, casillas de elemento desactivadas, extensiones de nombre de
   archivo visibles y elementos ocultos visibles. Todas se aplican en HKCU.
   `ShowSuperHidden` permanece en 0: los archivos protegidos del sistema siguen
   ocultos.
-- Windows 11 25H2 abre por defecto con "Agrupar por = Ninguno" las vistas de
-  las carpetas normales: elementos generales (Generic), Documents, Pictures,
-  Music y Videos. El perfil no aplica ninguna personalización de agrupación
-  sobre ellas: usa el comportamiento nativo de Windows.
+- Windows 11 abre por defecto con "Agrupar por = Ninguno" las vistas de las
+  carpetas normales: elementos generales (Generic), Documents, Pictures, Music
+  y Videos. El perfil no aplica ninguna personalización de agrupación sobre
+  ellas: usa el comportamiento nativo de Windows. Esto se verificó en la
+  referencia histórica Windows 11 Pro 25H2; no se ha vuelto a verificar en
+  Windows 11 26H2.
 - Downloads es la única excepción comprobada: su FolderType de Windows agrupa
   los elementos por fecha de modificación. El perfil crea un override por
   usuario del FolderType de shell: copia el FolderType de Downloads instalado
@@ -112,9 +146,9 @@ Sobre los archivos reales del repositorio:
 Hashes SHA-256 del baseline actual:
 
 - `autounattend.xml`:
-  `70D5DA63FEA8078FDA45F8F20FCA82E4A476060DDB5304EDEB3DA8A21CC95FF6`.
+  `5B0CBD45C392F379E70336E465926B869F964B439A10420C159AC42D5AF63B09`.
 - `ventoy.json`:
-  `2231E01E9B0BA0622888D97EFEDA0F476DBD73A9CB90B11B48656E1F889F2796`.
+  `058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B`.
 
 ### Gestión de errores de la fase SYSTEM (specialize)
 
@@ -218,6 +252,38 @@ compacta y casillas en ese equipo no se usa como criterio bloqueante; la
 agrupación de Downloads sí se valida funcionalmente porque no depende del
 espaciado táctil. No se introducen hacks de convertibilidad en el baseline.
 
+### Comprobado experimentalmente (usuario local genuinamente nuevo, Windows 11 Pro 26H2)
+
+Sobre una instalación Hyper-V existente de Windows 11 Pro 26H2 (build
+26300.9457) cuya política de pins de Inicio ya estaba validada, se preparó la
+política de máquina `DisableCloudOptimizedContent` (DWord 1) y se creó un
+usuario local genuinamente nuevo:
+
+- Outlook para Windows no quedó anclado en la barra de tareas.
+- Microsoft Edge, Explorador de archivos y Microsoft Store se conservaron.
+- La sección Pinned de Inicio quedó vacía.
+- La prueba integrada en instalación limpia con el nuevo archivo de respuestas
+  sigue pendiente.
+
+Es evidencia visual de un usuario y una build; no es cobertura de versiones ni
+implica soporte oficial documentado para Pro.
+
+### Comprobado experimentalmente (perfil existente, Windows 11 Pro 26H2)
+
+En un perfil existente de Windows 11 Pro 26H2 se estableció `AllAppsViewMode`
+(REG_DWORD 2) de forma programática y se cerró y volvió a abrir la sesión:
+
+- `RUNTIME_EXISTING_PROFILE = PASS`: la vista de Todas las aplicaciones mostró
+  el diseño Lista tras volver a iniciar sesión y el valor persistió.
+- Categoría y Cuadrícula siguieron disponibles como opciones.
+- `CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED`: el archivo de respuestas
+  integrado no ha ejecutado una instalación limpia que escriba este valor
+  automáticamente.
+- `STANDALONE_RUNTIME = NOT_TESTED`: el standalone no se ha ejecutado.
+
+Es un perfil y una build. No se afirma soporte oficial de Microsoft para
+`AllAppsViewMode`: es un comportamiento observado del Registro.
+
 ### Comprobado en instalación limpia real (Windows 11 Pro 25H2)
 
 El `autounattend.xml` corregido se grabó en el medio con el SHA-256 de origen
@@ -303,7 +369,7 @@ documentada; sus valores de Registro sí se comprobaron.
   aplican, pero la limpieza visual no se logró y el efecto concreto de cada
   función sigue sin confirmarse.
 - Compatibilidad con versiones, ediciones o builds distintos de Windows 11
-  25H2.
+  26H2.
 - Cualquier otro elemento marcado como pendiente en la documentación del
   repositorio.
 - La detección de postura del equipo de prueba está permanentemente en modo
@@ -313,33 +379,83 @@ documentada; sus valores de Registro sí se comprobaron.
   valida funcionalmente en ese equipo.
 
 **Una validación estática no sustituye una instalación limpia real.** El XML
-actual ha completado instalaciones limpias reales en Windows 11 Pro 25H2. El
-versionado o etiquetado de una release documenta ese baseline validado, pero
-no amplía ni garantiza la compatibilidad con otras versiones, ediciones o
-builds de Windows.
+publicado `v0.1.5` completó instalaciones limpias reales en la referencia
+histórica Windows 11 Pro 25H2. El archivo de respuestas actual tiene como
+objetivo Windows 11 Pro 26H2 (build base 26300) e incluye los candidatos no
+publicados de la política de pins de Inicio, de contenido optimizado en la nube
+y de la vista de Todas las aplicaciones: el par ADMX exacto de pins superó una
+prueba manual
+en Windows 11 26H2 (Pinned vacío en el siguiente inicio de sesión y pins
+posteriores del usuario conservados), la política de contenido optimizado se
+comprobó visualmente con un usuario nuevo en esa misma build y la preferencia
+inicial de Lista se verificó en un perfil existente de la misma build
+(`RUNTIME_EXISTING_PROFILE = PASS`; `CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED`;
+`STANDALONE_RUNTIME = NOT_TESTED`), pero el archivo de respuestas integrado
+todavía requiere validación de inicio de sesión en instalación limpia. El
+versionado o etiquetado de una release documenta el baseline validado
+correspondiente, pero no amplía ni garantiza la compatibilidad con otras
+versiones, ediciones o builds de Windows.
 
 ## 3. Limitaciones y dependencias
 
-- Windows 11 25H2 es la referencia actual. La compatibilidad con otras
-  versiones, ediciones o builds no está comprobada ni garantizada.
+- Windows 11 Pro 26H2 (build base 26300) es la referencia actual. Su archivo de
+  respuestas integrado todavía requiere una revalidación en instalación limpia
+  de los últimos cambios, y el standalone no tiene prueba runtime. La
+  compatibilidad con otras versiones, ediciones o builds no está comprobada ni
+  garantizada.
 - `BypassNRO` puede depender de la versión o build concreta de Windows.
-- `ConfigureStartPins` usa una implementación que debe revalidarse ante cambios
-  de Windows.
+- `ConfigureStartPins` usa el par ADMX de política de máquina con un JSON
+  persistente y `applyOnce`; su aplicación efectiva en el menú Inicio se validó
+  manualmente en Windows 11 26H2 y la validación runtime del archivo de
+  respuestas integrado en instalación limpia sigue pendiente; debe revalidarse
+  ante cambios de Windows. `applyOnce` requiere Windows 11 24H2 o posterior con
+  KB5062660.
+- `DisableCloudOptimizedContent` desactiva globalmente el contenido optimizado
+  en la nube. Evita anclajes promocionales en la barra de tareas de perfiles
+  nuevos (por ejemplo, el marcador de Outlook para Windows), pero no elimina
+  anclados ya existentes; el contenido personalizado y la colección de fondos
+  de Windows Spotlight dejan de estar disponibles. La referencia CSP lista la
+  opción para ediciones Enterprise/Education: no es soporte Pro documentado.
+  Se comprobó visualmente con un usuario local nuevo en Windows 11 Pro 26H2;
+  la validación integrada en instalación limpia, la cobertura de efectos
+  secundarios y la compatibilidad fuera de esa build siguen pendientes.
+  Revertirla solo requiere eliminar ese valor: no exige resetear la barra de
+  tareas, borrar perfiles ni tocar la política de pins de Inicio.
+- La vista inicial Lista de Todas las aplicaciones depende de `AllAppsViewMode`
+  (`HKCU\Software\Microsoft\Windows\CurrentVersion\Start`, DWord 2). Es un
+  comportamiento observado del Registro, no una interfaz documentada y
+  soportada por Microsoft, y debe revalidarse ante cambios de Windows. Solo se
+  escribe si el valor no existe, por lo que nunca se sobrescribe una
+  preferencia previa del usuario. La evidencia en perfil existente es un cambio
+  manual en Windows 11 Pro 26H2 (Lista visible tras cerrar y abrir sesión, con
+  Categoría y Cuadrícula todavía disponibles); la aplicación automática por una
+  instalación limpia (`CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED`) y el runtime
+  del standalone (`STANDALONE_RUNTIME = NOT_TESTED`) siguen pendientes, y el
+  comportamiento en otras builds, incluida la referencia histórica 25H2, no
+  está probado. Revertirla solo requiere cambiar o eliminar ese valor de
+  usuario; no existe ninguna política, tarea, GPO ni reaplicación recurrente.
 - La configuración de CloudStore/Quiet Hours depende de detalles de
-  implementación de Windows 11 25H2. La vía principal usa la interfaz interna
-  no documentada `IQuietHoursSettings`, que puede cambiar en futuras builds y
-  debe revalidarse.
+  implementación validados en la referencia histórica Windows 11 Pro 25H2; la
+  revalidación en la referencia actual Windows 11 26H2 sigue pendiente. La vía
+  principal usa la interfaz interna no documentada `IQuietHoursSettings`, que
+  puede cambiar en futuras builds y debe revalidarse.
 - El override por usuario del FolderType de Downloads no es una API pública de
   Microsoft; una actualización mayor puede eliminar `HKCU\...\FolderTypes` y
-  revertir el default de agrupación. El resto de carpetas normales usa el
-  default nativo de Windows 11 25H2 y no tiene override.
+  revertir el default de agrupación. Antes de copiar el FolderType, el perfil
+  verifica el default instalado (`GroupBy = System.DateModified`); ese valor se
+  verificó en la referencia histórica 25H2 y no se ha vuelto a verificar en
+  26H2. Si difiere, el override se omite y la discrepancia se registra como
+  error en lugar de escribir una vista no verificada. El resto de carpetas
+  normales usa el default nativo de Windows 11 (verificado en la referencia
+  histórica 25H2) y no tiene override.
 - Las funciones de IA de Notepad quedaron sin presencia visible en la prueba
   real; las funciones de IA de Paint siguen sin confirmarse y su limpieza
   visual no se logró.
 - Los hallazgos restantes de la revisión técnica siguen pendientes.
 - El versionado o etiquetado de releases no amplía el alcance de
-  compatibilidad: Windows 11 25H2 sigue siendo la única referencia validada
-  actualmente.
+  compatibilidad: la referencia actual es Windows 11 Pro 26H2 (build base
+  26300), cuya validación integrada sigue pendiente, mientras que el baseline
+  histórico 25H2 permanece validado.
 
 ## 4. Fuentes, licencias y atribuciones
 

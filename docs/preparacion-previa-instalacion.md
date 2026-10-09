@@ -4,7 +4,7 @@ Este documento es una lista de comprobación para ejecutar **antes** de arrancar
 el instalador de Windows en una instalación limpia. Está orientado al perfil de
 este proyecto:
 
-- Windows 11 25H2 x64 / amd64;
+- Windows 11 Pro 26H2 x64 / amd64;
 - uso para gaming y programación;
 - prioridad de privacidad;
 - instalación limpia a partir de la automatización del repositorio.
@@ -236,7 +236,7 @@ reales.
 
 Según los archivos actuales del repositorio:
 
-- La plataforma objetivo es Windows 11 25H2 x64 / amd64.
+- La plataforma objetivo es Windows 11 Pro 26H2 x64 / amd64.
 - El medio se prepara con Ventoy y su configuración `ventoy.json`.
 - El archivo de respuestas esperado es `autounattend.xml`.
 - La configuración de Ventoy declara una entrada de instalación concreta con

@@ -348,19 +348,37 @@ function Test-PostInstallStandalone {
         Add-Ok 'Standalone: SOURCE_AUTOUNATTEND_SHA256 coincide; deriva futura bloqueada'
     } else { Add-Fail 'Standalone: hash fuente ausente/ambiguo/desincronizado' }
     $fixedHashes=@{
-        'autounattend.xml'='70D5DA63FEA8078FDA45F8F20FCA82E4A476060DDB5304EDEB3DA8A21CC95FF6'
-        'ventoy.json'='2231E01E9B0BA0622888D97EFEDA0F476DBD73A9CB90B11B48656E1F889F2796'
+        'autounattend.xml'='5B0CBD45C392F379E70336E465926B869F964B439A10420C159AC42D5AF63B09'
+        'ventoy.json'='058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B'
     }
     foreach ($file in $fixedHashes.Keys) {
-        if ($Hashes[$file] -eq $fixedHashes[$file]) { Add-Ok "${file}: baseline v0.1.5 intacto" }
-        else { Add-Fail "${file}: revisar expresamente la sincronizacion del baseline v0.1.5" }
+        if ($Hashes[$file] -eq $fixedHashes[$file]) { Add-Ok "${file}: hash esperado del candidato vigente" }
+        else { Add-Fail "${file}: revisar expresamente la sincronizacion del baseline" }
     }
     try {
         # No dot-sourcing, Invoke-Expression, compiled optimizer code or execution:
         # inspect literal DATA and constant arguments with the parser only.
+        # ConfigureStartPins is staged explicitly in Invoke-SystemPhase (persistent
+        # JSON first, ADMX-exact machine policy pair afterwards), so the two exact
+        # data operations it represents are added back to the standalone side of
+        # the parity comparison.
+        $startPinsPath='C:\ProgramData\TMPC-Windows-11-Optimization\LayoutModification.json'
+        $startPinsFlagCall="-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'ConfigureStartPins' -Type 'DWord' -Value 1"
+        $startPinsJsonCall="-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'ConfigureStartPinsJSON' -Type 'ExpandString' -Value '$startPinsPath'"
+        $startPinsFlagExplicit="Set-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'ConfigureStartPins' -Type DWord -Value 1 -Force"
+        $startPinsJsonExplicit="Set-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'ConfigureStartPinsJSON' -Type ExpandString -Value '$startPinsPath' -Force"
+        $startPinsFlagTuple="HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer|SET|ConfigureStartPins|DWord|1"
+        $startPinsJsonTuple="HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer|SET|ConfigureStartPinsJSON|ExpandString|$startPinsPath"
+        $startPinsSystemText=(Get-StaticFunction $ast 'Invoke-SystemPhase').Extent.Text
+        $startPinsFlagCount=@([regex]::Matches($startPinsSystemText,[regex]::Escape($startPinsFlagExplicit))).Count
+        $startPinsJsonCount=@([regex]::Matches($startPinsSystemText,[regex]::Escape($startPinsJsonExplicit))).Count
         foreach ($scope in @(@{Function='Get-SystemRegistryProfile';Hive='HKLM:'},@{Function='Get-UserRegistryProfile';Hive='HKCU:'})) {
             $actual=@(Get-InventoryTuples (Get-StaticInventory $ast $scope.Function))
             $expected=@(Get-SourceRegistryTuples $SourceText $scope.Hive)
+            if ($scope.Hive -eq 'HKLM:' -and $startPinsFlagCount -eq 1 -and $startPinsJsonCount -eq 1) {
+                $actual+=$startPinsFlagTuple
+                $actual+=$startPinsJsonTuple
+            }
             $delta=@(Compare-Object ($expected | Sort-Object -Unique) ($actual | Sort-Object -Unique))
             if ($delta.Count -eq 0) { Add-Ok "Standalone $($scope.Hive): inventario Registro EXACTO ($($expected.Count) operaciones fuente)" }
             else {
@@ -371,6 +389,138 @@ function Test-PostInstallStandalone {
                 Add-Fail 'Standalone: inventario cruza la frontera HKLM/HKCU'
             }
         }
+        # Start pins candidate: persistent empty JSON staged through the ADMX-exact machine policy pair.
+        if ($SourceText.Contains($startPinsFlagCall) -and $SourceText.Contains($startPinsJsonCall)) {
+            Add-Ok 'Start pins: XML usa el par ADMX DWord 1 + ExpandString con ruta persistente'
+        } else { Add-Fail 'Start pins: XML no usa el par ADMX esperado' }
+        if (@([regex]::Matches($SourceText,[regex]::Escape($startPinsFlagCall))).Count -eq 1 -and
+            @([regex]::Matches($SourceText,[regex]::Escape($startPinsJsonCall))).Count -eq 1) {
+            Add-Ok 'Start pins: XML define cada operacion exactamente una vez (sin duplicados)'
+        } else { Add-Fail 'Start pins: operacion XML ausente o duplicada' }
+        if ($startPinsFlagCount -eq 1 -and $startPinsJsonCount -eq 1) {
+            Add-Ok 'Start pins: standalone aplica el par ADMX una sola vez desde Invoke-SystemPhase'
+        } else { Add-Fail 'Start pins: par explicito ausente o duplicado en Invoke-SystemPhase' }
+        $startPinsInventory=(Get-StaticInventory $ast 'Get-SystemRegistryProfile')
+        if ($startPinsInventory -match 'ConfigureStartPins\|') {
+            Add-Fail 'Start pins: inventario generico todavia contiene ConfigureStartPins (duplicado)'
+        } else { Add-Ok 'Start pins: inventario generico sin ConfigureStartPins (sin duplicados)' }
+        if ($SourceText.Contains("-Name 'ConfigureStartPins' -Type 'String'") -or $record.Text.Contains("-Name 'ConfigureStartPins' -Type String ")) {
+            Add-Fail 'Start pins: representacion antigua REG_SZ de ConfigureStartPins presente'
+        } else { Add-Ok 'Start pins: sin representacion antigua REG_SZ de ConfigureStartPins' }
+        if ($SourceText -match 'PolicyManager\\current\\device\\Start''\s+-Name\s+''ConfigureStartPins''') {
+            Add-Fail 'Start pins: escritura antigua en PolicyManager\current\device\Start presente'
+        } else { Add-Ok 'Start pins: sin ConfigureStartPins en PolicyManager\current\device\Start' }
+        $jsonLiteral='{"applyOnce":true,"pinnedList":[]}'
+        if ($SourceText.Contains($jsonLiteral) -and $record.Text.Contains($jsonLiteral)) {
+            Add-Ok 'Start pins: JSON exacto compartido por XML y standalone'
+        } else { Add-Fail 'Start pins: JSON exacto ausente o divergente' }
+        try {
+            $parsedJson=ConvertFrom-Json -InputObject $jsonLiteral
+            if ($parsedJson.applyOnce -eq $true -and @($parsedJson.pinnedList).Count -eq 0) {
+                Add-Ok 'Start pins: JSON parseable con applyOnce=true y pinnedList vacio'
+            } else { Add-Fail 'Start pins: JSON no cumple applyOnce/pinnedList esperados' }
+        } catch { Add-Fail 'Start pins: JSON literal no parseable' }
+        if ($startPinsPath.StartsWith('C:\ProgramData\Autounattend',[StringComparison]::OrdinalIgnoreCase)) {
+            Add-Fail 'Start pins: el JSON persistente esta bajo la ruta de cleanup'
+        } else { Add-Ok 'Start pins: JSON persistente fuera de la ruta de cleanup' }
+        if ($SourceText -match '(?is)Remove-Item.{0,200}TMPC-Windows-11-Optimization') {
+            Add-Fail 'Start pins: cleanup intenta borrar la ruta persistente'
+        } else { Add-Ok 'Start pins: cleanup no toca la ruta persistente' }
+        $xWrite=$SourceText.IndexOf('[System.IO.File]::WriteAllText($startPinsJsonPath')
+        $xFlag=$SourceText.IndexOf($startPinsFlagCall)
+        $xJson=$SourceText.IndexOf($startPinsJsonCall)
+        $xKind=$SourceText.IndexOf("GetValueKind('ConfigureStartPins')")
+        if ($xWrite -ge 0 -and $xFlag -gt $xWrite -and $xJson -gt $xFlag -and $xKind -gt $xJson) {
+            Add-Ok 'Start pins: XML crea el JSON antes del par ADMX y verifica tipos despues'
+        } else { Add-Fail 'Start pins: orden XML JSON -> par ADMX -> verificacion incorrecto' }
+        $iWrite=$record.Text.IndexOf('[System.IO.File]::WriteAllText($startPinsJsonPath')
+        $iContent=$record.Text.IndexOf('if ($startPinsWritten -ne $startPinsJsonContent)')
+        $iFlag=$record.Text.IndexOf($startPinsFlagExplicit)
+        $iJson=$record.Text.IndexOf($startPinsJsonExplicit)
+        $iKind=$record.Text.IndexOf("GetValueKind('ConfigureStartPins')")
+        if ($iWrite -ge 0 -and $iContent -gt $iWrite -and $iFlag -gt $iContent -and $iJson -gt $iFlag -and $iKind -gt $iJson) {
+            Add-Ok 'Start pins: standalone crea y verifica el JSON antes del par ADMX y verifica tipos despues'
+        } else { Add-Fail 'Start pins: orden standalone JSON -> par ADMX -> verificacion incorrecto' }
+        if ($startPinsSystemText.Contains($startPinsFlagExplicit) -and $startPinsSystemText.Contains($startPinsJsonExplicit) -and -not (Get-StaticFunction $ast 'Invoke-UserPhase').Extent.Text.Contains('ConfigureStartPins')) {
+            Add-Ok 'Start pins: la politica de maquina vive solo en Invoke-SystemPhase; UserOnly sin cambio global'
+        } else { Add-Fail 'Start pins: riesgo de politica global fuera de Full' }
+        if ($record.Text.Contains($startPinsPath) -and $record.Text.Contains('GetValueKind')) {
+            Add-Ok 'Standalone: staging y verificacion de tipos del par ADMX presentes'
+        } else { Add-Fail 'Standalone: falta staging o verificacion del par ADMX' }
+        # Cloud optimized content policy: machine-level suppression of cloud
+        # optimized promotional taskbar pins (for example the Outlook
+        # placeholder). Exactly one inventory entry in the standalone and one
+        # operation in the XML; HKLM only, DWord 1; never part of UserOnly.
+        $cloudContentCall="-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' -Name 'DisableCloudOptimizedContent' -Type 'DWord' -Value 1"
+        $cloudContentTuple='HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent|SET|DisableCloudOptimizedContent|DWord|1'
+        $cloudContentInv=(Get-StaticInventory $ast 'Get-SystemRegistryProfile')
+        if ($SourceText.Contains($cloudContentCall)) {
+            Add-Ok 'Cloud optimized content: XML usa la ruta HKLM exacta con DisableCloudOptimizedContent, DWord y valor 1'
+        } else { Add-Fail 'Cloud optimized content: operacion XML ausente o con forma distinta' }
+        if (@([regex]::Matches($SourceText,[regex]::Escape($cloudContentCall))).Count -eq 1) {
+            Add-Ok 'Cloud optimized content: XML define la operacion exactamente una vez'
+        } else { Add-Fail 'Cloud optimized content: operacion XML ausente o duplicada' }
+        if (@([regex]::Matches($cloudContentInv,'(?m)^DisableCloudOptimizedContent\|DWord\|1\r?$')).Count -eq 1) {
+            Add-Ok 'Cloud optimized content: standalone la declara exactamente una vez en el inventario HKLM'
+        } else { Add-Fail 'Cloud optimized content: definicion standalone ausente o duplicada' }
+        if (@(Get-InventoryTuples $cloudContentInv) -contains $cloudContentTuple) {
+            Add-Ok 'Cloud optimized content: inventario standalone HKLM equivalente al XML'
+        } else { Add-Fail 'Cloud optimized content: inventario standalone no equivalente al XML' }
+        if (-not (Get-StaticFunction $ast 'Invoke-UserPhase').Extent.Text.Contains('DisableCloudOptimizedContent')) {
+            Add-Ok 'Cloud optimized content: UserOnly no aplica la politica global'
+        } else { Add-Fail 'Cloud optimized content: la politica global aparece en UserOnly' }
+        if ((Get-StaticFunction $ast 'Invoke-SystemPhase').Extent.Text.Contains("GetValueKind('DisableCloudOptimizedContent')")) {
+            Add-Ok 'Cloud optimized content: verificacion de tipo en Invoke-SystemPhase'
+        } else { Add-Fail 'Cloud optimized content: falta la verificacion de tipo en Invoke-SystemPhase' }
+        # All apps view mode: first-run HKCU "List" preference. Applied once in the
+        # user phase, only when the value is absent (an existing user choice is
+        # preserved), never from the system phase and never part of the generic
+        # inventories, so no recurring policy or additional task is created.
+        # Status: RUNTIME_EXISTING_PROFILE = PASS (manual on 26H2);
+        # CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED; STANDALONE_RUNTIME = NOT_TESTED.
+        $allAppsPath='HKCU:\Software\Microsoft\Windows\CurrentVersion\Start'
+        $allAppsWrite="-Name 'AllAppsViewMode' -Type DWord -Value 2"
+        $allAppsPresence="GetValueNames() -contains 'AllAppsViewMode'"
+        $allAppsGuard='-lt 22000'
+        $allAppsUserPhase=(Get-StaticFunction $ast 'Invoke-UserPhase').Extent.Text
+        $allAppsFunction=(Get-StaticFunction $ast 'Invoke-AllAppsViewPreference').Extent.Text
+        $allAppsXmlWrite=@([regex]::Matches($SourceText,[regex]::Escape($allAppsWrite))).Count
+        $allAppsXmlPresence=@([regex]::Matches($SourceText,[regex]::Escape($allAppsPresence))).Count
+        if ($allAppsXmlPresence -eq 1 -and $allAppsXmlWrite -eq 1) {
+            Add-Ok 'All apps view mode: XML comprueba la presencia y escribe REG_DWORD 2 exactamente una vez'
+        } else { Add-Fail 'All apps view mode: operacion XML ausente o duplicada' }
+        if ($SourceText.Contains($allAppsPath) -and $SourceText.Contains($allAppsGuard)) {
+            Add-Ok 'All apps view mode: XML usa la ruta HKCU Start y el gate de build Windows 11'
+        } else { Add-Fail 'All apps view mode: ruta o gate de build ausentes en el XML' }
+        $xAllAppsPresence=$SourceText.IndexOf($allAppsPresence)
+        $xAllAppsWrite=$SourceText.IndexOf($allAppsWrite)
+        if ($xAllAppsPresence -ge 0 -and $xAllAppsWrite -gt $xAllAppsPresence) {
+            Add-Ok 'All apps view mode: XML comprueba la existencia antes de escribir y preserva la preferencia'
+        } else { Add-Fail 'All apps view mode: orden de no sobrescritura incorrecto en el XML' }
+        if ($allAppsFunction.Contains($allAppsPath) -and
+            @([regex]::Matches($allAppsFunction,[regex]::Escape($allAppsPresence))).Count -eq 1 -and
+            @([regex]::Matches($allAppsFunction,[regex]::Escape($allAppsWrite))).Count -eq 1) {
+            Add-Ok 'All apps view mode: standalone define ruta, comprobacion de presencia y escritura REG_DWORD 2'
+        } else { Add-Fail 'All apps view mode: definicion standalone ausente o duplicada' }
+        if ($allAppsFunction -notmatch 'HKLM[:\\]|HKEY_LOCAL_MACHINE' -and $allAppsFunction.Contains($allAppsGuard)) {
+            Add-Ok 'All apps view mode: funcion HKCU pura con gate de build; sin operaciones HKLM'
+        } else { Add-Fail 'All apps view mode: la funcion standalone cruza la frontera HKLM o carece de gate' }
+        $sAllAppsPresence=$allAppsFunction.IndexOf($allAppsPresence)
+        $sAllAppsWrite=$allAppsFunction.IndexOf($allAppsWrite)
+        if ($sAllAppsPresence -ge 0 -and $sAllAppsWrite -gt $sAllAppsPresence) {
+            Add-Ok 'All apps view mode: standalone comprueba la existencia antes de escribir y preserva la preferencia'
+        } else { Add-Fail 'All apps view mode: orden de no sobrescritura incorrecto en el standalone' }
+        if (@([regex]::Matches($allAppsUserPhase,'Invoke-AllAppsViewPreference')).Count -eq 1 -and
+            -not (Get-StaticFunction $ast 'Invoke-SystemPhase').Extent.Text.Contains('AllAppsViewMode')) {
+            Add-Ok 'All apps view mode: se aplica una sola vez desde la fase de usuario; ausente en la fase de sistema'
+        } else { Add-Fail 'All apps view mode: llamada UserOnly ausente, duplicada o presente en la fase de sistema' }
+        if (-not (Get-StaticInventory $ast 'Get-SystemRegistryProfile').Contains('AllAppsViewMode') -and
+            -not (Get-StaticInventory $ast 'Get-UserRegistryProfile').Contains('AllAppsViewMode')) {
+            Add-Ok 'All apps view mode: fuera de los inventarios genericos (sin sobrescritura recurrente)'
+        } else { Add-Fail 'All apps view mode: presente en un inventario generico (sobrescribiria la preferencia)' }
+        if ($record.Text -match '(?i)gpupdate|registry\.pol|gpedit') {
+            Add-Fail 'Standalone: sin gpupdate/Registry.pol/gpedit (sin fallback especulativo)'
+        } else { Add-Ok 'Standalone: sin gpupdate/Registry.pol/gpedit (sin fallback especulativo)' }
         $bloat=Get-StaticFunction $ast 'Invoke-BloatRemoval'
         $bt=$null; $be=$null
         $ba=[System.Management.Automation.Language.Parser]::ParseInput($BloatText,[ref]$bt,[ref]$be)
@@ -407,11 +557,11 @@ function Test-PostInstallStandalone {
         $user=Get-StaticFunction $ast 'Invoke-UserPhase'
         $userCommands=@($user.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
         $allowed=@('Invoke-RegistryProfile','Get-UserRegistryProfile','Invoke-UserBinaryPreferences','Invoke-QuietHours',
-            'Invoke-DownloadsPreference','Join-Path','Test-Path','Write-Log','Invoke-Operation','Set-ItemProperty','Get-Item','Remove-ItemProperty')
+            'Invoke-DownloadsPreference','Invoke-AllAppsViewPreference','Join-Path','Test-Path','Write-Log','Invoke-Operation','Set-ItemProperty','Get-Item','Remove-ItemProperty')
         if (@($userCommands | Where-Object { $_ -notin $allowed }).Count -eq 0 -and -not $user.Extent.Text.Contains('HKLM:')) {
             Add-Ok 'Standalone: entrada UserOnly solo preferencias HKCU; sin fase global'
         } else { Add-Fail 'Standalone: revisar comandos del grafo UserOnly' }
-        foreach ($functionName in @('Invoke-UserBinaryPreferences','Invoke-QuietHours','Invoke-DownloadsPreference')) {
+        foreach ($functionName in @('Invoke-UserBinaryPreferences','Invoke-QuietHours','Invoke-DownloadsPreference','Invoke-AllAppsViewPreference')) {
             $function=Get-StaticFunction $ast $functionName
             $calls=@($function.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
             $userAllowed=@('Invoke-Operation','New-Item','Test-Path','Get-Item','Set-ItemProperty','Get-ItemProperty','Remove-Item',
@@ -967,10 +1117,111 @@ if ($null -ne $ventoyJson) {
     }
     Write-Host ("       VTOY_SECONDARY_BOOT_MENU={0}; image={1}; template={2}; autosel={3}; timeout={4}" -f $vsm, $image, $template, $autosel, $timeout)
     if ([string]$vsm -eq '0') { Add-Ok 'VTOY_SECONDARY_BOOT_MENU = "0"' } else { Add-Fail ('VTOY_SECONDARY_BOOT_MENU = {0} (esperado "0")' -f $vsm) }
-    if ([string]$image -eq '/Win11_25H2_Spanish_x64_v2.iso') { Add-Ok 'image = "/Win11_25H2_Spanish_x64_v2.iso"' } else { Add-Fail ("image = {0} (esperado /Win11_25H2_Spanish_x64_v2.iso)" -f $image) }
+    if ([string]$image -eq '/Windows11_Client_x64_es-es_26300_9457.iso') { Add-Ok 'image = "/Windows11_Client_x64_es-es_26300_9457.iso"' } else { Add-Fail ("image = {0} (esperado /Windows11_Client_x64_es-es_26300_9457.iso)" -f $image) }
     if ([string]$template -eq '/ventoy/script/autounattend.xml') { Add-Ok 'template = "/ventoy/script/autounattend.xml"' } else { Add-Fail ("template = {0} (esperado /ventoy/script/autounattend.xml)" -f $template) }
     if ([string]$autosel -eq '1') { Add-Ok 'autosel = 1' } else { Add-Fail ("autosel = {0} (esperado 1)" -f $autosel) }
     if ([string]$timeout -eq '0') { Add-Ok 'timeout = 0' } else { Add-Fail ("timeout = {0} (esperado 0)" -f $timeout) }
+}
+
+# ---------------------------------------------------------------------------
+# Plataforma objetivo 26H2
+# ---------------------------------------------------------------------------
+
+Write-Section 'PLATAFORMA 26H2'
+
+$platformStandalone = Get-FileRecord -RelativePath 'Apply-TMPCOptimizations.ps1'
+if ($platformStandalone.Exists -and $platformStandalone.DecodeOk) {
+    $platformText = $platformStandalone.Text
+    if ($platformText.Contains('Only Windows 11 26H2 x64 (build base 26300) is accepted')) {
+        Add-Ok 'Standalone: el preflight anuncia Windows 11 26H2 (base 26300) como objetivo'
+    } else {
+        Add-Fail 'Standalone: el preflight no anuncia el objetivo 26H2'
+    }
+    $platformGate = '$build -lt 26300 -or $build -ge 26400 -or $displayVersion -ne ''26H2'''
+    if ($platformText.Contains($platformGate) -and $platformText.Contains('$os.ProductType -ne 1')) {
+        Add-Ok 'Standalone: el preflight rechaza builds fuera de 26300-26399 y ediciones de servidor'
+    } else {
+        Add-Fail 'Standalone: falta el rechazo robusto de build/edicion en el preflight'
+    }
+    if ($platformText.Contains("Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'") -and
+        $platformText.Contains('$displayVersion = [string]$version.DisplayVersion')) {
+        Add-Ok 'Standalone: el preflight deriva DisplayVersion de CurrentVersion'
+    } else {
+        Add-Fail 'Standalone: DisplayVersion no se comprueba de forma explicita'
+    }
+    if ($platformText -notmatch '26200' -and $platformText -notmatch "-ne '25H2'") {
+        Add-Ok 'Standalone: sin preflight operativo residual de 25H2/26200'
+    } else {
+        Add-Fail 'Standalone: queda preflight operativo de 25H2/26200'
+    }
+} else {
+    Add-Fail 'Standalone no disponible para las comprobaciones de plataforma'
+}
+
+$platformXml = Get-FileRecord -RelativePath 'autounattend.xml'
+if ($platformXml.Exists -and $platformXml.DecodeOk) {
+    if ($platformXml.Text.Contains('Target reference: Windows 11 Pro 26H2 (build base 26300)')) {
+        Add-Ok 'autounattend.xml: referencia objetivo 26H2 (base 26300) presente'
+    } else {
+        Add-Fail 'autounattend.xml: falta la referencia objetivo 26H2'
+    }
+    if ($platformXml.Text.Contains('Target reference: Windows 11 25H2.')) {
+        Add-Fail 'autounattend.xml: referencia objetivo 25H2 obsoleta presente'
+    } else {
+        Add-Ok 'autounattend.xml: sin referencia objetivo operativa a 25H2'
+    }
+} else {
+    Add-Fail 'autounattend.xml no disponible para las comprobaciones de plataforma'
+}
+
+$platformPresence = @(
+    @{ Path = 'README.md'; Snippet = 'Target platform: Windows 11 Pro 26H2, x64 / amd64'; Description = 'README EN: plataforma objetivo 26H2' },
+    @{ Path = 'README.es.md'; Snippet = 'Plataforma objetivo: Windows 11 Pro 26H2, x64 / amd64'; Description = 'README ES: plataforma objetivo 26H2' },
+    @{ Path = 'docs/configuration-testing-limitations-sources.md'; Snippet = 'Target platform: Windows 11 Pro 26H2, x64 / amd64'; Description = 'Doc EN: plataforma objetivo 26H2' },
+    @{ Path = 'docs/configuracion-pruebas-limitaciones-fuentes.md'; Snippet = 'Plataforma objetivo: Windows 11 Pro 26H2, x64 / amd64'; Description = 'Doc ES: plataforma objetivo 26H2' },
+    @{ Path = 'docs/pre-installation-preparation.md'; Snippet = '- Windows 11 Pro 26H2 x64 / amd64;'; Description = 'Preparacion EN: plataforma 26H2' },
+    @{ Path = 'docs/preparacion-previa-instalacion.md'; Snippet = '- Windows 11 Pro 26H2 x64 / amd64;'; Description = 'Preparacion ES: plataforma 26H2' },
+    @{ Path = 'docs/pre-installation-preparation.md'; Snippet = 'The target platform is Windows 11 Pro 26H2 x64 / amd64.'; Description = 'Preparacion EN: medio de instalacion 26H2' },
+    @{ Path = 'docs/preparacion-previa-instalacion.md'; Snippet = 'La plataforma objetivo es Windows 11 Pro 26H2 x64 / amd64.'; Description = 'Preparacion ES: medio de instalacion 26H2' }
+)
+foreach ($check in $platformPresence) {
+    $record = Get-FileRecord -RelativePath $check.Path
+    if ($record.Exists -and $record.DecodeOk -and $record.Text.Contains($check.Snippet)) {
+        Add-Ok $check.Description
+    } else {
+        Add-Fail ("{0}: fragmento no encontrado" -f $check.Description)
+    }
+}
+
+$platformObsolete = @(
+    @{ Path = 'README.md'; Snippet = 'Target platform: Windows 11 25H2,'; Description = 'README EN: sin objetivo operativo 25H2' },
+    @{ Path = 'README.es.md'; Snippet = 'Plataforma objetivo: Windows 11 25H2,'; Description = 'README ES: sin objetivo operativo 25H2' },
+    @{ Path = 'docs/configuration-testing-limitations-sources.md'; Snippet = 'Target platform: Windows 11 25H2,'; Description = 'Doc EN: sin objetivo operativo 25H2' },
+    @{ Path = 'docs/configuracion-pruebas-limitaciones-fuentes.md'; Snippet = 'Plataforma objetivo: Windows 11 25H2,'; Description = 'Doc ES: sin objetivo operativo 25H2' },
+    @{ Path = 'docs/pre-installation-preparation.md'; Snippet = 'The target platform is Windows 11 25H2'; Description = 'Preparacion EN: sin objetivo operativo 25H2' },
+    @{ Path = 'docs/preparacion-previa-instalacion.md'; Snippet = 'La plataforma objetivo es Windows 11 25H2'; Description = 'Preparacion ES: sin objetivo operativo 25H2' }
+)
+foreach ($check in $platformObsolete) {
+    $record = Get-FileRecord -RelativePath $check.Path
+    if ($record.Exists -and $record.DecodeOk -and $record.Text.Contains($check.Snippet)) {
+        Add-Fail ("{0}: fragmento obsoleto presente" -f $check.Description)
+    } else {
+        Add-Ok $check.Description
+    }
+}
+
+if ($null -ne $ventoyJson) {
+    $imageEntry = @($ventoyJson.auto_install)
+    if ($imageEntry.Count -ge 1 -and [string]$imageEntry[0].image -eq '/Windows11_Client_x64_es-es_26300_9457.iso') {
+        Add-Ok 'Ventoy: la imagen declarada es la ISO 26H2 confirmada'
+    } else {
+        Add-Fail 'Ventoy: la imagen declarada no es la ISO 26H2 confirmada'
+    }
+    if ([string]$imageEntry[0].image -notmatch '25H2') {
+        Add-Ok 'Ventoy: sin referencia operativa a la ISO 25H2'
+    } else {
+        Add-Fail 'Ventoy: la imagen declarada sigue siendo la ISO 25H2'
+    }
 }
 
 # ---------------------------------------------------------------------------

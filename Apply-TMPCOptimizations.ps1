@@ -16,12 +16,14 @@
 .PARAMETER NetFx3Source
     Optional local sources\sxs directory from matching Windows media. No download.
 .NOTES
-    Standalone version: 0.1.0. Source profile: v0.1.5.
-    Reference validated for the clean-install baseline: Windows 11 Pro 25H2 x64.
+    Standalone version: 0.1.3. Source profile: v0.1.5 plus the unreleased Start pins, cloud content policy and All apps view candidates.
+    Supported reference: Windows 11 Pro 26H2 (build base 26300), x64. The OS revision (UBR)
+    is not fixed. The published v0.1.5 clean-install baseline was validated on Windows 11
+    Pro 25H2 x64 (historical reference).
     This standalone has STATIC validation only; NO_RUNTIME_VALIDATION.
-    Restricted to Windows 11 25H2 (build 26200), native AMD64 PowerShell 5.1.
+    Restricted to Windows 11 26H2 (build base 26300), native AMD64 PowerShell 5.1.
     Project: https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization
-    SOURCE_AUTOUNATTEND_SHA256 = 70D5DA63FEA8078FDA45F8F20FCA82E4A476060DDB5304EDEB3DA8A21CC95FF6
+    SOURCE_AUTOUNATTEND_SHA256 = 5B0CBD45C392F379E70336E465926B869F964B439A10420C159AC42D5AF63B09
     validate-baseline.ps1 checks this binding AND the registry/removal inventories.
     Derived from autounattend.xml, including material based on
     memstechtips/UnattendedWinstall, revision cca752363772a845eb0fed9d3a5b89b5d0a10d20.
@@ -68,7 +70,13 @@
       privacy, permissions, AI, sound, Update/Store, Explorer, Start and Taskbar.
       HKCR deletions adapt to HKLM\Software\Classes (original SYSTEM context).
       PreventDeviceEncryption does NOT decrypt an already encrypted device.
-      ConfigureStartPins retains EXACT applyOnce JSON; existing pins may remain.
+      ConfigureStartPins is staged as the ADMX-exact machine policy pair
+      (DWORD marker + REG_EXPAND_SZ JSON path) with a persistent applyOnce
+      JSON; the clean-install Start result remains runtime-pending.
+      DisableCloudOptimizedContent (DWord 1) suppresses cloud optimized
+      promotional taskbar pins, such as the Outlook placeholder, for new
+      profiles; it does not remove existing pins and its integrated
+      clean-install result remains runtime-pending.
       Windows 10 layout branch is SETUP_ONLY_NOT_APPLICABLE on this target.
     1736-2057,2654-2698: ORCHESTRATION_NOT_NEEDED: empty extension hooks,
       SYSTEM token duplication, retries, one-shot/marker/recovery, final Setup
@@ -211,6 +219,7 @@ AITEnable|DWord|0
 [HKLM:\Software\Policies\Microsoft\Windows\CloudContent]
 DisableTailoredExperiencesWithDiagnosticData|DWord|1
 DisableWindowsConsumerFeatures|DWord|1
+DisableCloudOptimizedContent|DWord|1
 [HKLM:\SOFTWARE\Policies\Microsoft\Windows\System]
 PublishUserActivities|DWord|0
 EnableActivityFeed|DWord|0
@@ -294,7 +303,6 @@ HideRecommendedSection|DWord|1
 DisableSearchBoxSuggestions|DWord|1
 [HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Start]
 HideRecommendedSection|DWord|1
-ConfigureStartPins|String|{"applyOnce":true,"pinnedList":[]}
 [HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer]
 HideSCAMeetNow|DWord|1
 [HKLM:\Software\Policies\Microsoft\Dsh]
@@ -704,7 +712,7 @@ function Invoke-DownloadsPreference {
         $key = Get-Item -LiteralPath "$source\$top"
         try {
             if ($key.GetValueKind('GroupBy') -ne [Microsoft.Win32.RegistryValueKind]::String -or
-                $key.GetValue('GroupBy') -ne 'System.DateModified') { throw 'Downloads default does not match 25H2.' }
+                $key.GetValue('GroupBy') -ne 'System.DateModified') { throw 'Downloads default does not match the expected Group by value.' }
         } finally { $key.Close() }
         if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
         Invoke-Native 'reg.exe' @('copy',$source.Replace(':',''),$target.Replace(':',''),'/s','/f')
@@ -717,11 +725,41 @@ function Invoke-DownloadsPreference {
     }
 }
 
+function Invoke-AllAppsViewPreference {
+    # Initial "All apps" layout: use List as the first-run default without
+    # imposing it permanently. An existing user preference is preserved;
+    # Category and Grid remain available and no recurring policy, task or
+    # marker is created.
+    Invoke-Operation 'HKCU All apps view mode initially List (existing preference preserved)' {
+        if ([System.Environment]::OSVersion.Version.Build -lt 22000) {
+            Write-Log 'All apps view modes are not supported on this build; preference left unchanged.' 'WARNING'
+            return
+        }
+        $path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Start'
+        if (-not (Test-Path -LiteralPath $path)) { New-Item -Path $path -Force | Out-Null }
+        $key = Get-Item -LiteralPath $path
+        try { $present = $key.GetValueNames() -contains 'AllAppsViewMode' } finally { $key.Close() }
+        if ($present) {
+            Write-Log 'AllAppsViewMode already present; user preference preserved.' 'INFO'
+            return
+        }
+        Set-ItemProperty -LiteralPath $path -Name 'AllAppsViewMode' -Type DWord -Value 2 -Force
+        $key = Get-Item -LiteralPath $path
+        try {
+            if ($key.GetValueKind('AllAppsViewMode') -ne [Microsoft.Win32.RegistryValueKind]::DWord -or $key.GetValue('AllAppsViewMode') -ne 2) {
+                throw 'AllAppsViewMode was not verified as REG_DWORD 2.'
+            }
+        } finally { $key.Close() }
+        Write-Log 'AllAppsViewMode initialized to List (REG_DWORD 2) as an initial preference; user changes persist.' 'SUCCESS'
+    }
+}
+
 function Invoke-UserPhase {
     Invoke-RegistryProfile (Get-UserRegistryProfile) 'HKCU:'
     Invoke-UserBinaryPreferences
     Invoke-QuietHours
     Invoke-DownloadsPreference
+    Invoke-AllAppsViewPreference
     $wallpaper = Join-Path $env:SystemRoot 'Web\Wallpaper\Windows\img19.jpg'
     if (-not (Test-Path -LiteralPath $wallpaper -PathType Leaf)) {
         Write-Log 'Baseline dark wallpaper missing; existing wallpaper preserved.' 'WARNING'
@@ -1007,6 +1045,39 @@ function Invoke-SystemPhase {
     Invoke-BloatRemoval
     Invoke-OneDriveRemoval
     Invoke-RegistryProfile (Get-SystemRegistryProfile) 'HKLM:'
+    Invoke-Operation 'Cloud optimized content policy verified (DWord 1)' {
+        $cloudContentKey = Get-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'
+        if ($cloudContentKey.GetValueKind('DisableCloudOptimizedContent') -ne [Microsoft.Win32.RegistryValueKind]::DWord) { throw 'DisableCloudOptimizedContent is not REG_DWORD.' }
+        $cloudContentValue = (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' -Name 'DisableCloudOptimizedContent').DisableCloudOptimizedContent
+        if ($cloudContentValue -ne 1) { throw 'DisableCloudOptimizedContent is not 1.' }
+    }
+    Invoke-Operation 'Start pins machine policy staged and verified (ADMX pair + persistent JSON)' {
+        $startPinsDir = 'C:\ProgramData\TMPC-Windows-11-Optimization'
+        $startPinsJsonPath = 'C:\ProgramData\TMPC-Windows-11-Optimization\LayoutModification.json'
+        $startPinsJsonContent = '{"applyOnce":true,"pinnedList":[]}'
+        if (Test-Path -LiteralPath $startPinsDir -PathType Leaf) { throw 'Start pins directory path is a file.' }
+        if (Test-Path -LiteralPath $startPinsDir) { Assert-NoReparsePath $startPinsDir }
+        else {
+            New-Item -Path $startPinsDir -ItemType Directory -Force | Out-Null
+            Assert-NoReparsePath $startPinsDir
+        }
+        if (Test-Path -LiteralPath $startPinsJsonPath -PathType Container) { throw 'Start pins JSON path is a directory.' }
+        if (Test-Path -LiteralPath $startPinsJsonPath) { Assert-NoReparsePath $startPinsJsonPath }
+        [System.IO.File]::WriteAllText($startPinsJsonPath, $startPinsJsonContent, [System.Text.UTF8Encoding]::new($false))
+        $startPinsWritten = [System.IO.File]::ReadAllText($startPinsJsonPath, [System.Text.UTF8Encoding]::new($false))
+        if ($startPinsWritten -ne $startPinsJsonContent) { throw 'Start pins JSON content mismatch.' }
+        $startPinsParsed = ConvertFrom-Json -InputObject $startPinsWritten
+        if ($startPinsParsed.applyOnce -ne $true -or @($startPinsParsed.pinnedList).Count -ne 0) { throw 'Start pins JSON structure mismatch.' }
+        Set-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'ConfigureStartPins' -Type DWord -Value 1 -Force
+        Set-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'ConfigureStartPinsJSON' -Type ExpandString -Value 'C:\ProgramData\TMPC-Windows-11-Optimization\LayoutModification.json' -Force
+        $startPinsKey = Get-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer'
+        if ($startPinsKey.GetValueKind('ConfigureStartPins') -ne [Microsoft.Win32.RegistryValueKind]::DWord) { throw 'ConfigureStartPins is not REG_DWORD.' }
+        if ($startPinsKey.GetValueKind('ConfigureStartPinsJSON') -ne [Microsoft.Win32.RegistryValueKind]::ExpandString) { throw 'ConfigureStartPinsJSON is not REG_EXPAND_SZ.' }
+        $startPinsPolicy = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'ConfigureStartPins','ConfigureStartPinsJSON'
+        if ($startPinsPolicy.ConfigureStartPins -ne 1 -or $startPinsPolicy.ConfigureStartPinsJSON -ne $startPinsJsonPath -or -not (Test-Path -LiteralPath $startPinsPolicy.ConfigureStartPinsJSON -PathType Leaf)) { throw 'ConfigureStartPins policy pair does not match the persistent JSON.' }
+        $startPinsFinal = [System.IO.File]::ReadAllText($startPinsPolicy.ConfigureStartPinsJSON, [System.Text.UTF8Encoding]::new($false))
+        if ($startPinsFinal -ne $startPinsJsonContent) { throw 'Start pins JSON changed after policy staging.' }
+    }
     Invoke-Operation 'Standard Balanced power plan' { Invoke-Native 'powercfg.exe' @('/setactive','381b4222-f694-41f0-9685-ff5bb260df2e') }
     Invoke-Operation 'Hibernation off' { Invoke-Native 'powercfg.exe' @('/hibernate','off') }
     # Baseline reg imports run as SYSTEM: resolve HKCR to machine Classes,
@@ -1054,7 +1125,7 @@ function Invoke-SystemPhase {
         if ($result.RestartNeeded) { $script:RestartNeeded=$true }
     }
     $script:RestartNeeded = $true
-    Write-Log 'ConfigureStartPins applyOnce policy retained; already initialized Start pins may not reset. Existing encryption is not undone.' 'WARNING'
+    Write-Log 'CONFIGURATION_STAGED = PASS for the ADMX Start pins pair; START_PINS_CLEAN_INSTALL_RUNTIME = PENDING. It takes effect at the next sign-in; the Start result is not claimed without runtime validation. Existing encryption is not undone.' 'WARNING'
 }
 
 function Complete-Run {
@@ -1073,8 +1144,10 @@ try {
     }
     $os = Get-CimInstance Win32_OperatingSystem
     $version = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-    if ($os.ProductType -ne 1 -or [int]$os.BuildNumber -ne 26200 -or $version.DisplayVersion -ne '25H2') {
-        throw 'Only Windows 11 25H2 x64 (build 26200) is accepted; other builds are untested.'
+    $build = [int]$os.BuildNumber
+    $displayVersion = [string]$version.DisplayVersion
+    if ($os.ProductType -ne 1 -or $build -lt 26300 -or $build -ge 26400 -or $displayVersion -ne '26H2') {
+        throw 'Only Windows 11 26H2 x64 (build base 26300) is accepted; other versions/builds are untested.'
     }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     if ($sid -in @('S-1-5-18','S-1-5-19','S-1-5-20')) { throw 'Run from a real user account, not a service account.' }
@@ -1098,7 +1171,7 @@ try {
     New-Item -Path $logs -ItemType Directory -Force | Out-Null
     Assert-NoReparsePath $logs
     $script:LogPath = Join-Path $logs ('Apply-{0}-{1}-{2}.log' -f $script:Mode,(Get-Date -Format 'yyyyMMdd-HHmmss'),[Guid]::NewGuid().ToString('N'))
-    Write-Log "Standalone 0.1.0; mode $script:Mode; reference Windows 11 25H2 x64. Static review only; standalone runtime not yet validated."
+    Write-Log "Standalone 0.1.3; mode $script:Mode; supported reference Windows 11 Pro 26H2 x64 (build base 26300; UBR not fixed). Static review only; standalone runtime not yet validated."
     if (-not $UserOnly) { Invoke-SystemPhase }
     if ($script:CanApplyUser) { Invoke-UserPhase }
     else {
