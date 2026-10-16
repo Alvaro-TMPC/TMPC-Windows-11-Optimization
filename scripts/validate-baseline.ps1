@@ -274,6 +274,117 @@ function Test-ExplorerDefaults {
     }
 }
 
+function Test-XmlHardening {
+    param([string]$SystemText, [string]$BloatText, [string]$OneDriveText)
+
+    $sysTokens=$null; $sysErrors=$null
+    $sysAst=[System.Management.Automation.Language.Parser]::ParseInput($SystemText,[ref]$sysTokens,[ref]$sysErrors)
+    $sysCommands=@()
+    if (@($sysErrors).Count -eq 0) {
+        $sysCommands=@($sysAst.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
+    } else {
+        Add-Fail 'XML hardening: SystemCustomizations no parseable'
+    }
+
+    # OneNote: no arbitrary uninstall string, no forced process termination.
+    $bloatTokens=$null; $bloatErrors=$null
+    $bloatAst=[System.Management.Automation.Language.Parser]::ParseInput($BloatText,[ref]$bloatTokens,[ref]$bloatErrors)
+    if (@($bloatErrors).Count -eq 0) {
+        $bloatCommands=@($bloatAst.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
+        foreach ($danger in @('Stop-Process','takeown','icacls','cmd.exe')) {
+            if (@($bloatCommands | Where-Object { $_ -eq $danger }).Count -gt 0) { Add-Fail ("OneNote: comando peligroso presente en BloatRemoval: {0}" -f $danger) }
+            else { Add-Ok ("OneNote: comando peligroso ausente en BloatRemoval: {0}" -f $danger) }
+        }
+    } else { Add-Fail 'OneNote: BloatRemoval no parseable para las comprobaciones de endurecimiento' }
+    if (-not $BloatText.Contains('$uninstallString')) { Add-Ok 'OneNote: sin ejecucion de UninstallString en BloatRemoval' }
+    else { Add-Fail 'OneNote: UninstallString ejecutable presente en BloatRemoval' }
+    if ($BloatText.Contains('desktop uninstall deferred; no uninstall string is executed')) { Add-Ok 'OneNote: desinstalacion de escritorio diferida y advertida' }
+    else { Add-Fail 'OneNote: falta el aviso de aplazamiento del desinstalador de escritorio' }
+    if ($BloatText.Contains("'OneNote'")) { Add-Ok 'OneNote: objetivo conservado en la lista de apps especiales' }
+    else { Add-Fail 'OneNote: objetivo eliminado de la lista de apps especiales' }
+
+    # OneDrive: no shell execution, no ownership/ACL changes, no forced kills
+    # and no deletion-on-reboot entries. Command names come from the AST, not
+    # from prose mentions in comments.
+    $odTokens=$null; $odErrors=$null
+    $odAst=[System.Management.Automation.Language.Parser]::ParseInput($OneDriveText,[ref]$odTokens,[ref]$odErrors)
+    if (@($odErrors).Count -eq 0) {
+        $odCommands=@($odAst.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
+        foreach ($danger in @('cmd.exe','takeown','icacls','Stop-Process')) {
+            if (@($odCommands | Where-Object { $_ -eq $danger }).Count -gt 0) { Add-Fail ("OneDrive: comando peligroso presente: {0}" -f $danger) }
+            else { Add-Ok ("OneDrive: comando peligroso ausente: {0}" -f $danger) }
+        }
+    } else { Add-Fail 'OneDrive: OneDriveRemoval no parseable para las comprobaciones de endurecimiento' }
+    if ($OneDriveText -notmatch 'MoveFileEx|MOVEFILE_DELAY_UNTIL_REBOOT|Schedule-DeleteOnReboot') {
+        Add-Ok 'OneDrive: sin borrados diferidos al reinicio'
+    } else { Add-Fail 'OneDrive: borrado diferido al reinicio presente' }
+    $uninstallerPattern='^"?(.+?OneDriveSetup\.exe)"?\s+(/uninstall(?:\s+/allusers)?)\s*$'
+    foreach ($check in @(
+        @{ Fragment=$uninstallerPattern; Description='OneDrive: firma estricta de UninstallString OneDriveSetup.exe presente' },
+        @{ Fragment='Get-TMPCSignature'; Description='OneDrive: verificacion de firma a traves del seam' },
+        @{ Fragment='Start-TMPCVerifiedUninstaller'; Description='OneDrive: ejecucion solo a traves del ejecutor verificado' },
+        @{ Fragment='Remove-OneDriveRemnant'; Description='OneDrive: eliminacion solo por la allowlist de restos' },
+        @{ Fragment='Assert-NoReparsePath'; Description='OneDrive: rechazo de reparse points presente' },
+        @{ Fragment='UserFolder'; Description='OneDrive: inventario de raices de sincronizacion personalizadas presente' },
+        @{ Fragment='%USERPROFILE%\OneDrive'; Description='OneDrive: proteccion explicita de la carpeta de usuario presente' }
+    )) {
+        if ($OneDriveText.Contains($check.Fragment)) { Add-Ok $check.Description }
+        else { Add-Fail ("{0}: fragmento no encontrado" -f $check.Description) }
+    }
+
+    # Embedded registry engine (mirror of the standalone idempotent contract).
+    if (@($sysErrors).Count -eq 0) {
+        try {
+            $embeddedSet=(Get-StaticFunction $sysAst 'Set-RegistryValue').Extent.Text
+            $embeddedRead=$embeddedSet.IndexOf('Get-RegistryEntryState -Path $Path -Name $Name')
+            $embeddedWrite=$embeddedSet.IndexOf('Set-ItemProperty -Path $Path -Name $Name')
+            $embeddedLastRead=$embeddedSet.LastIndexOf('Get-RegistryEntryState -Path $Path -Name $Name')
+            if ($embeddedRead -ge 0 -and $embeddedWrite -gt $embeddedRead -and $embeddedLastRead -gt $embeddedWrite -and
+                $embeddedSet.Contains('ALREADY_COMPLIANT') -and $embeddedSet.Contains('READ_DENIED') -and
+                $embeddedSet.Contains('WRITE_DENIED') -and $embeddedSet.Contains('VERIFY_FAILED')) {
+                Add-Ok 'XML: Set-RegistryValue lee el estado, escribe solo si difiere y verifica; estados diferenciables'
+            } else { Add-Fail 'XML: Set-RegistryValue no cumple el contrato idempotente verificado' }
+            foreach ($removalName in @('Remove-RegistryValue','Remove-RegistryKey')) {
+                $removal=(Get-StaticFunction $sysAst $removalName).Extent.Text
+                if ($removal.Contains('ALREADY_COMPLIANT') -and $removal.Contains('VERIFY_FAILED') -and $removal.Contains('READ_DENIED')) {
+                    Add-Ok ("XML: {0} trata la ausencia como conforme y verifica el borrado" -f $removalName)
+                } else { Add-Fail ("XML: {0} no cumple el contrato de borrado verificado" -f $removalName) }
+            }
+            if ((Get-StaticFunction $sysAst 'Set-BinaryBit').Extent.Text.Contains('ALREADY_COMPLIANT') -and
+                (Get-StaticFunction $sysAst 'Set-BinaryBit').Extent.Text.Contains('VERIFY_FAILED') -and
+                (Get-StaticFunction $sysAst 'Get-RegistryEntryState').Extent.Text.Contains('ItemNotFoundException')) {
+                Add-Ok 'XML: preferencias binarias idempotentes y verificadas; lectura denegada no se confunde con ausencia'
+            } else { Add-Fail 'XML: preferencias binarias o discriminacion de lectura incompletas' }
+        } catch { Add-Fail ("XML hardening AST: {0}" -f $_.Exception.Message) }
+    }
+
+    # XML-wide command-name exclusions that are safe to assert globally.
+    foreach ($danger in @('takeown','Stop-Process')) {
+        if (@($sysCommands | Where-Object { $_ -eq $danger }).Count -gt 0) { Add-Fail ("XML: comando peligroso presente: {0}" -f $danger) }
+        else { Add-Ok ("XML: comando peligroso ausente: {0}" -f $danger) }
+    }
+}
+
+function Test-TestsSuite {
+    $runnerRecord=Get-FileRecord -RelativePath 'scripts/tests/Invoke-TMPCTests.ps1'
+    $helpersRecord=Get-FileRecord -RelativePath 'scripts/tests/TMPC.Tests.Helpers.ps1'
+    if (-not $runnerRecord.Exists) { Add-Fail 'scripts/tests/Invoke-TMPCTests.ps1: no existe' }
+    if (-not $helpersRecord.Exists) { Add-Fail 'scripts/tests/TMPC.Tests.Helpers.ps1: no existe' }
+    if (-not $runnerRecord.Exists -or -not $helpersRecord.Exists) { return }
+    if (-not $helpersRecord.DecodeOk -or -not $runnerRecord.DecodeOk) { Add-Fail 'Suite de tests: no es UTF-8 valido'; return }
+    $doubleMarkers=@('Get-TMPCRegistryEntryState','Write-TMPCRegistryEntry','Remove-TMPCRegistryEntry','Get-TMPCPathItem','Get-TMPCSignature','Start-TMPCVerifiedUninstaller','Get-TMPCSystemInfo','Get-RegistryEntryState')
+    $missingDoubles=@($doubleMarkers | Where-Object { -not $helpersRecord.Text.Contains($_) })
+    if ($missingDoubles.Count -eq 0) { Add-Ok 'Suite de tests: dobles en memoria para Registro, sistema de archivos, firma, ejecucion y preflight' }
+    else { Add-Fail ("Suite de tests: faltan dobles: {0}" -f ($missingDoubles -join ', ')) }
+    $caseMarkers=@('ALREADY_COMPLIANT','READ_DENIED','WRITE_DENIED','VERIFY_FAILED','SKIPPED_NOT_APPLICABLE')
+    $missingCases=@($caseMarkers | Where-Object { -not $runnerRecord.Text.Contains($_) })
+    if ($missingCases.Count -eq 0) { Add-Ok 'Suite de tests: casos negativos de estados presentes' }
+    else { Add-Fail ("Suite de tests: faltan casos de estados: {0}" -f ($missingCases -join ', ')) }
+    if ($runnerRecord.Text.Contains('SkipValidatorCase') -and $helpersRecord.Text.Contains('function Assert-TestThrows') -and $runnerRecord.Text.Contains('Assert-TestThrows')) {
+        Add-Ok 'Suite de tests: runner con caso de validador integrado y assertion de excepciones en los helpers'
+    } else { Add-Fail 'Suite de tests: estructura del runner/helpers inesperada' }
+}
+
 function Get-StaticFunction {
     param($Ast, [string]$Name)
     $nodes = @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $Name }, $true))
@@ -316,7 +427,12 @@ function Get-SourceRegistryTuples {
             }
         }
         if (-not $args.ContainsKey('Path')) { continue }
-        $path=$args['Path'].SafeGetValue()
+        $pathAst=$args['Path']
+        # The generic inventories are literal data. Special operations staged
+        # with variables (for example the wallpaper block) are validated by
+        # dedicated checks instead of the tuple comparison.
+        if ($pathAst -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
+        $path=$pathAst.Value
         if (-not $path.StartsWith($Hive,[StringComparison]::OrdinalIgnoreCase)) { continue }
         switch ($command.GetCommandName()) {
             'Remove-RegistryKey' { "$path|REMOVEKEY" }
@@ -348,7 +464,7 @@ function Test-PostInstallStandalone {
         Add-Ok 'Standalone: SOURCE_AUTOUNATTEND_SHA256 coincide; deriva futura bloqueada'
     } else { Add-Fail 'Standalone: hash fuente ausente/ambiguo/desincronizado' }
     $fixedHashes=@{
-        'autounattend.xml'='5B0CBD45C392F379E70336E465926B869F964B439A10420C159AC42D5AF63B09'
+        'autounattend.xml'='D99BF0EC59A8CB322A84E99F36373FEDD6358350A0D053A02FEB24C11A608EA4'
         'ventoy.json'='058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B'
     }
     foreach ($file in $fixedHashes.Keys) {
@@ -482,6 +598,8 @@ function Test-PostInstallStandalone {
         $allAppsWrite="-Name 'AllAppsViewMode' -Type DWord -Value 2"
         $allAppsPresence="GetValueNames() -contains 'AllAppsViewMode'"
         $allAppsGuard='-lt 22000'
+        $allAppsSoloPresence='Get-TMPCRegistryEntryState -Path $path -Name ''AllAppsViewMode'''
+        $allAppsSoloWrite='Write-TMPCRegistryEntry -Path $path -Name ''AllAppsViewMode'' -Type ''DWord'' -Value 2'
         $allAppsUserPhase=(Get-StaticFunction $ast 'Invoke-UserPhase').Extent.Text
         $allAppsFunction=(Get-StaticFunction $ast 'Invoke-AllAppsViewPreference').Extent.Text
         $allAppsXmlWrite=@([regex]::Matches($SourceText,[regex]::Escape($allAppsWrite))).Count
@@ -498,15 +616,16 @@ function Test-PostInstallStandalone {
             Add-Ok 'All apps view mode: XML comprueba la existencia antes de escribir y preserva la preferencia'
         } else { Add-Fail 'All apps view mode: orden de no sobrescritura incorrecto en el XML' }
         if ($allAppsFunction.Contains($allAppsPath) -and
-            @([regex]::Matches($allAppsFunction,[regex]::Escape($allAppsPresence))).Count -eq 1 -and
-            @([regex]::Matches($allAppsFunction,[regex]::Escape($allAppsWrite))).Count -eq 1) {
-            Add-Ok 'All apps view mode: standalone define ruta, comprobacion de presencia y escritura REG_DWORD 2'
-        } else { Add-Fail 'All apps view mode: definicion standalone ausente o duplicada' }
+            $allAppsFunction.IndexOf($allAppsSoloPresence) -ge 0 -and
+            $allAppsFunction.LastIndexOf($allAppsSoloPresence) -gt $allAppsFunction.IndexOf($allAppsSoloWrite) -and
+            $allAppsFunction.IndexOf($allAppsSoloWrite) -gt $allAppsFunction.IndexOf($allAppsSoloPresence)) {
+            Add-Ok 'All apps view mode: standalone define ruta, lectura previa, escritura condicional y reverificacion REG_DWORD 2'
+        } else { Add-Fail 'All apps view mode: definicion standalone ausente o incompleta' }
         if ($allAppsFunction -notmatch 'HKLM[:\\]|HKEY_LOCAL_MACHINE' -and $allAppsFunction.Contains($allAppsGuard)) {
             Add-Ok 'All apps view mode: funcion HKCU pura con gate de build; sin operaciones HKLM'
         } else { Add-Fail 'All apps view mode: la funcion standalone cruza la frontera HKLM o carece de gate' }
-        $sAllAppsPresence=$allAppsFunction.IndexOf($allAppsPresence)
-        $sAllAppsWrite=$allAppsFunction.IndexOf($allAppsWrite)
+        $sAllAppsPresence=$allAppsFunction.IndexOf($allAppsSoloPresence)
+        $sAllAppsWrite=$allAppsFunction.IndexOf($allAppsSoloWrite)
         if ($sAllAppsPresence -ge 0 -and $sAllAppsWrite -gt $sAllAppsPresence) {
             Add-Ok 'All apps view mode: standalone comprueba la existencia antes de escribir y preserva la preferencia'
         } else { Add-Fail 'All apps view mode: orden de no sobrescritura incorrecto en el standalone' }
@@ -557,7 +676,8 @@ function Test-PostInstallStandalone {
         $user=Get-StaticFunction $ast 'Invoke-UserPhase'
         $userCommands=@($user.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
         $allowed=@('Invoke-RegistryProfile','Get-UserRegistryProfile','Invoke-UserBinaryPreferences','Invoke-QuietHours',
-            'Invoke-DownloadsPreference','Invoke-AllAppsViewPreference','Join-Path','Test-Path','Write-Log','Invoke-Operation','Set-ItemProperty','Get-Item','Remove-ItemProperty')
+            'Invoke-DownloadsPreference','Invoke-AllAppsViewPreference','Join-Path','Test-Path','Write-Log','Invoke-Operation','Set-ItemProperty','Get-Item','Remove-ItemProperty',
+            'Get-TMPCRegistryEntryState','Write-TMPCRegistryEntry','Remove-TMPCRegistryEntry')
         if (@($userCommands | Where-Object { $_ -notin $allowed }).Count -eq 0 -and -not $user.Extent.Text.Contains('HKLM:')) {
             Add-Ok 'Standalone: entrada UserOnly solo preferencias HKCU; sin fase global'
         } else { Add-Fail 'Standalone: revisar comandos del grafo UserOnly' }
@@ -565,7 +685,8 @@ function Test-PostInstallStandalone {
             $function=Get-StaticFunction $ast $functionName
             $calls=@($function.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
             $userAllowed=@('Invoke-Operation','New-Item','Test-Path','Get-Item','Set-ItemProperty','Get-ItemProperty','Remove-Item',
-                'New-Object','Add-Type','Write-Log','Invoke-Native','Out-Null')
+                'New-Object','Add-Type','Write-Log','Invoke-Native','Out-Null',
+                'Get-TMPCRegistryEntryState','Write-TMPCRegistryEntry')
             if (@($calls | Where-Object { $_ -notin $userAllowed }).Count -gt 0) { throw "Grafo UserOnly con comando inesperado: $functionName" }
             if ($functionName -ne 'Invoke-DownloadsPreference' -and $function.Extent.Text -match 'HKLM[:\\]|HKEY_LOCAL_MACHINE') {
                 throw "HKLM inesperado en $functionName"
@@ -598,7 +719,7 @@ function Test-PostInstallStandalone {
         foreach ($remove in $removes) {
             $owner=$remove.Parent
             while ($owner -and $owner -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $owner=$owner.Parent }
-            if (-not $owner -or $owner.Name -notin @('Remove-OneDriveRemnant','Invoke-RegistryProfile','Invoke-DownloadsPreference','Invoke-OneDriveRemoval','Invoke-SystemPhase')) {
+            if (-not $owner -or $owner.Name -notin @('Remove-OneDriveRemnant','Invoke-RegistryProfile','Invoke-DownloadsPreference','Invoke-OneDriveRemoval','Invoke-SystemPhase','Remove-TMPCRegistryEntry')) {
                 throw 'Borrado fuera de las funciones auditadas'
             }
         }
@@ -607,10 +728,43 @@ function Test-PostInstallStandalone {
             if ($record.Text.Contains($name)) { throw 'Decision Defender alterada' }
         }
         Add-Ok 'Standalone: Defender preservado; Store/Edge/WebView2 no son targets de debloat'
-        if ($record.Text.Contains('if ($Restart -and $exitCode -eq 0)') -and
+        if ($record.Text.Contains('Test-TMPCRestartRequested -RestartRequested $Restart.IsPresent -ExitCode $exitCode') -and
+            $record.Text.Contains('return ($RestartRequested -and $ExitCode -eq 0)') -and
             $record.Text.Contains('if ($UserOnly -and ($Restart -or $NetFx3Source))')) {
             Add-Ok 'Standalone: reinicio solo con Restart explicito y sin errores; UserOnly no reinicia'
         } else { Add-Fail 'Standalone: gate de reinicio ausente' }
+        # Idempotent verified registry engine: read -> compare -> conditional
+        # verified write, with distinguishable per-operation states.
+        $registryEngine=(Get-StaticFunction $ast 'Invoke-RegistryProfile').Extent.Text
+        $engineFirstRead=$registryEngine.IndexOf('Get-TMPCRegistryEntryState -Path $path -Name $name')
+        $engineWrite=$registryEngine.IndexOf('Write-TMPCRegistryEntry -Path $path -Name $name')
+        $engineLastRead=$registryEngine.LastIndexOf('Get-TMPCRegistryEntryState -Path $path -Name $name')
+        if ($engineFirstRead -ge 0 -and $engineWrite -gt $engineFirstRead -and $engineLastRead -gt $engineWrite -and
+            -not $registryEngine.Contains('Set-ItemProperty')) {
+            Add-Ok 'Motor idempotente: Invoke-RegistryProfile lee, escribe solo si difiere y reverifica a traves del seam'
+        } else { Add-Fail 'Motor idempotente: el patron leer -> escribir -> verificar no se cumple' }
+        $engineTokens=@('ALREADY_COMPLIANT','READ_DENIED','WRITE_DENIED','WRITE_FAILED','VERIFY_FAILED','CONFLICTING_STATE')
+        $engineMissing=@($engineTokens | Where-Object { -not $record.Text.Contains($_) })
+        if ($engineMissing.Count -eq 0) {
+            Add-Ok 'Motor idempotente: estados diferenciables presentes (ALREADY_COMPLIANT, READ_DENIED, WRITE_DENIED, WRITE_FAILED, VERIFY_FAILED, CONFLICTING_STATE)'
+        } else { Add-Fail ("Motor idempotente: faltan estados: {0}" -f ($engineMissing -join ', ')) }
+        if (@($engineTokens | Where-Object { -not $registryEngine.Contains($_) -and $_ -ne 'CONFLICTING_STATE' }).Count -eq 0 -and
+            $registryEngine.Contains('READ_DENIED') -and $registryEngine.Contains('WRITE_DENIED') -and
+            $registryEngine.Contains('VERIFY_FAILED') -and $registryEngine.Contains('ALREADY_COMPLIANT')) {
+            Add-Ok 'Motor idempotente: el perfil de Registro distingue conforme, lectura/escritura denegadas y verificacion'
+        } else { Add-Fail 'Motor idempotente: el perfil de Registro no distingue los estados esperados' }
+        if ($record.Text.Contains("'SKIPPED_NOT_APPLICABLE'") -and $record.Text.Contains("'COMPLIANT'") -and
+            $record.Text.Contains('already compliant: $script:Compliant; skipped: $script:Skipped')) {
+            Add-Ok 'Motor idempotente: contadores y niveles de log distinguen aplicadas, conformes y omitidas'
+        } else { Add-Fail 'Motor idempotente: contadores o niveles de log ausentes' }
+        foreach ($seam in @('Get-TMPCRegistryEntryState','Write-TMPCRegistryEntry','Remove-TMPCRegistryEntry','Test-TMPCRegistryStateEqual','Get-TMPCPathItem','Get-TMPCSignature','Start-TMPCVerifiedUninstaller','Get-TMPCSystemInfo')) {
+            $nodes=@($ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $seam},$true))
+            if ($nodes.Count -ne 1) { throw "Seam no inequivoco: $seam" }
+        }
+        Add-Ok 'Motor idempotente: puntos de inyeccion (seams) de Registro, sistema de archivos, firma, ejecucion y preflight definidos una sola vez'
+        if ($registryEngine.Contains('Test-TMPCRegistryStateEqual')) {
+            Add-Ok 'Motor idempotente: comparacion exacta de tipo y valor (incluidas cadenas ordinales y binarios byte a byte)'
+        } else { Add-Fail 'Motor idempotente: falta la comparacion exacta de tipo/valor' }
     } catch { Add-Fail ("Standalone AST: {0}" -f $_.Exception.Message) }
 }
 
@@ -676,6 +830,8 @@ function Test-GitAttributesCrossCheck {
         'docs/comprobaciones-posteriores-instalacion.md',
         'docs/post-installation-checks.md',
         'scripts/validate-baseline.ps1',
+        'scripts/tests/TMPC.Tests.Helpers.ps1',
+        'scripts/tests/Invoke-TMPCTests.ps1',
         'Apply-TMPCOptimizations.ps1'
     )
     try {
@@ -706,6 +862,8 @@ function Test-GitAttributesCrossCheck {
         'docs/comprobaciones-posteriores-instalacion.md'     = 'lf'
         'docs/post-installation-checks.md'                   = 'lf'
         'scripts/validate-baseline.ps1'                      = 'lf'
+        'scripts/tests/TMPC.Tests.Helpers.ps1'               = 'lf'
+        'scripts/tests/Invoke-TMPCTests.ps1'                 = 'lf'
         'Apply-TMPCOptimizations.ps1'                        = 'lf'
     }
     $mismatches = 0
@@ -880,7 +1038,9 @@ $mandatoryFiles = @(
     'docs/configuracion-pruebas-limitaciones-fuentes.md',
     'docs/configuration-testing-limitations-sources.md',
     'docs/comprobaciones-posteriores-instalacion.md',
-    'docs/post-installation-checks.md'
+    'docs/post-installation-checks.md',
+    'scripts/tests/TMPC.Tests.Helpers.ps1',
+    'scripts/tests/Invoke-TMPCTests.ps1'
 )
 foreach ($relativePath in $mandatoryFiles) {
     $record = Get-FileRecord -RelativePath $relativePath
@@ -1064,6 +1224,13 @@ if ($null -eq $doc) {
         Write-Section 'EXPLORER DEFAULTS'
         Test-ExplorerDefaults -Text $sysText
     }
+
+    Write-Section 'XML HARDENING (ONENOTE/ONEDRIVE)'
+    if ($null -ne $sysText -and $null -ne $bloatText -and $null -ne $oneDriveText) {
+        Test-XmlHardening -SystemText $sysText -BloatText $bloatText -OneDriveText $oneDriveText
+    } else {
+        Add-Fail 'XML hardening: no se pudieron extraer todos los bloques embebidos'
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -1127,35 +1294,59 @@ if ($null -ne $ventoyJson) {
 # Plataforma objetivo 26H2
 # ---------------------------------------------------------------------------
 
-Write-Section 'PLATAFORMA 26H2'
+Write-Section 'COMPATIBILIDAD POR CAPAS (TESTED_ON / NOT_RUNTIME_TESTED)'
 
 $platformStandalone = Get-FileRecord -RelativePath 'Apply-TMPCOptimizations.ps1'
 if ($platformStandalone.Exists -and $platformStandalone.DecodeOk) {
     $platformText = $platformStandalone.Text
-    if ($platformText.Contains('Only Windows 11 26H2 x64 (build base 26300) is accepted')) {
-        Add-Ok 'Standalone: el preflight anuncia Windows 11 26H2 (base 26300) como objetivo'
+    if ($platformText.Contains('function Get-TMPCPreflightResult') -and $platformText.Contains('function Get-TMPCSystemInfo')) {
+        Add-Ok 'Standalone: preflight por capas con sonda de entorno inyectable'
     } else {
-        Add-Fail 'Standalone: el preflight no anuncia el objetivo 26H2'
+        Add-Fail 'Standalone: falta el preflight por capas'
     }
-    $platformGate = '$build -lt 26300 -or $build -ge 26400 -or $displayVersion -ne ''26H2'''
-    if ($platformText.Contains($platformGate) -and $platformText.Contains('$os.ProductType -ne 1')) {
-        Add-Ok 'Standalone: el preflight rechaza builds fuera de 26300-26399 y ediciones de servidor'
+    foreach ($check in @(
+        @{ Fragment = '$info.ProductType -ne 1'; Description = 'Standalone: rechazo de ediciones de servidor' },
+        @{ Fragment = '$info.Build -lt 22000'; Description = 'Standalone: rechazo de familias anteriores a Windows 11' },
+        @{ Fragment = "PSEdition -ne 'Desktop'"; Description = 'Standalone: rechazo de PowerShell no Desktop' },
+        @{ Fragment = 'PSVersionMajor -ne 5'; Description = 'Standalone: rechazo de PowerShell distinto de 5.1' },
+        @{ Fragment = 'Is64BitProcess'; Description = 'Standalone: rechazo de procesos de 32 bits' },
+        @{ Fragment = "ProcessArch -ne 'AMD64'"; Description = 'Standalone: rechazo de arquitectura de proceso no AMD64' },
+        @{ Fragment = "MachineArch -ne 'AMD64'"; Description = 'Standalone: rechazo de arquitectura nativa no AMD64' },
+        @{ Fragment = 'S-1-5-18'; Description = 'Standalone: rechazo de cuentas de servicio' },
+        @{ Fragment = 'Full mode requires Windows PowerShell opened with Run as administrator'; Description = 'Standalone: Full exige elevacion' },
+        @{ Fragment = 'if ($UserOnly -and ($Restart -or $NetFx3Source))'; Description = 'Standalone: UserOnly rechaza parametros incompatibles' },
+        @{ Fragment = 'CanApplyUser'; Description = 'Standalone: identidad HKCU verificada o diferida' },
+        @{ Fragment = 'NOT_RUNTIME_TESTED'; Description = 'Standalone: estado NOT_RUNTIME_TESTED registrado' },
+        @{ Fragment = 'TESTED_ON'; Description = 'Standalone: referencia probada TESTED_ON declarada' }
+    )) {
+        if ($platformText.Contains($check.Fragment)) { Add-Ok $check.Description } else { Add-Fail ("{0}: fragmento no encontrado" -f $check.Description) }
+    }
+    if ($platformText -notmatch '\$build -lt 26300 -or \$build -ge 26400' -and $platformText -notmatch "-ne '26H2'") {
+        Add-Ok 'Standalone: sin bloqueo por build 26300-26399 ni DisplayVersion 26H2'
     } else {
-        Add-Fail 'Standalone: falta el rechazo robusto de build/edicion en el preflight'
+        Add-Fail 'Standalone: permanece el bloqueo obsoleto por build/version'
     }
-    if ($platformText.Contains("Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'") -and
-        $platformText.Contains('$displayVersion = [string]$version.DisplayVersion')) {
-        Add-Ok 'Standalone: el preflight deriva DisplayVersion de CurrentVersion'
-    } else {
-        Add-Fail 'Standalone: DisplayVersion no se comprueba de forma explicita'
-    }
-    if ($platformText -notmatch '26200' -and $platformText -notmatch "-ne '25H2'") {
+    if ($platformText -notmatch '26200') {
         Add-Ok 'Standalone: sin preflight operativo residual de 25H2/26200'
     } else {
         Add-Fail 'Standalone: queda preflight operativo de 25H2/26200'
     }
 } else {
     Add-Fail 'Standalone no disponible para las comprobaciones de plataforma'
+}
+
+foreach ($compatDoc in @('docs/configuracion-pruebas-limitaciones-fuentes.md','docs/configuration-testing-limitations-sources.md')) {
+    $compatRecord = Get-FileRecord -RelativePath $compatDoc
+    if ($compatRecord.Exists -and $compatRecord.DecodeOk) {
+        $missingCategories = @('TESTED_ON','SUPPORTED_BY_DESIGN','NOT_RUNTIME_TESTED','UNSUPPORTED','INCOMPATIBLE' | Where-Object { -not $compatRecord.Text.Contains($_) })
+        if ($missingCategories.Count -eq 0) {
+            Add-Ok ("{0}: categorias de compatibilidad documentadas" -f $compatDoc)
+        } else {
+            Add-Fail ("{0}: faltan categorias de compatibilidad: {1}" -f $compatDoc, ($missingCategories -join ', '))
+        }
+    } else {
+        Add-Fail ("{0}: no disponible para las categorias de compatibilidad" -f $compatDoc)
+    }
 }
 
 $platformXml = Get-FileRecord -RelativePath 'autounattend.xml'
@@ -1302,6 +1493,9 @@ foreach ($source in $baselineHashSources) {
 
 Test-PostInstallStandalone -SourceText $sysText -BloatText $bloatText -Hashes $realHashes
 
+Write-Section 'SUITE DE TESTS AISLADA'
+Test-TestsSuite
+
 # ---------------------------------------------------------------------------
 # EOL / encoding
 # ---------------------------------------------------------------------------
@@ -1329,6 +1523,8 @@ if (Test-Path -LiteralPath $scriptsDir) {
         Test-FilePolicy -RelativePath ('scripts/' + $scriptFile.Name) -ExpectedEol 'LF' -ExpectedBom 'UTF8'
     }
 }
+Test-FilePolicy -RelativePath 'scripts/tests/TMPC.Tests.Helpers.ps1' -ExpectedEol 'LF' -ExpectedBom 'UTF8'
+Test-FilePolicy -RelativePath 'scripts/tests/Invoke-TMPCTests.ps1' -ExpectedEol 'LF' -ExpectedBom 'UTF8'
 
 # ---------------------------------------------------------------------------
 # Documentacion
@@ -1355,6 +1551,7 @@ if (-not $gitattributesRecord.Exists) {
         'THIRD_PARTY_NOTICES.md text eol=lf',
         'docs/*.md text eol=lf',
         'scripts/*.ps1 text eol=lf',
+        'scripts/tests/*.ps1 text eol=lf',
         'Apply-TMPCOptimizations.ps1 text eol=lf'
     )
     foreach ($rule in $requiredRules) {

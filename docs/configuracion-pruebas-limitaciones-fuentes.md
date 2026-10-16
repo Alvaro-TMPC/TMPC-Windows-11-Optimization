@@ -146,9 +146,44 @@ Sobre los archivos reales del repositorio:
 Hashes SHA-256 del baseline actual:
 
 - `autounattend.xml`:
-  `5B0CBD45C392F379E70336E465926B869F964B439A10420C159AC42D5AF63B09`.
+  `D99BF0EC59A8CB322A84E99F36373FEDD6358350A0D053A02FEB24C11A608EA4`.
 - `ventoy.json`:
   `058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B`.
+
+Baseline actual: motor de Registro idempotente y verificado en XML y
+standalone (leer -> comparar tipo y valor exactos -> escribir solo si difiere
+-> releer y verificar), con estados diferenciables (`ALREADY_COMPLIANT`,
+`APPLIED`, `READ_DENIED`, `WRITE_DENIED`, `VERIFY_FAILED`,
+`SKIPPED_NOT_APPLICABLE`) y contadores separados para operaciones aplicadas,
+ya conformes y omitidas. Los borrados tratan la ausencia de clave o valor como
+conforme y verifican el resultado; una lectura denegada nunca se interpreta
+como ausencia. Los bloques embebidos de OneNote y OneDrive están endurecidos
+(sin ejecución de cadenas de desinstalación arbitrarias, sin terminación
+forzada de procesos, sin `takeown`/`icacls`, sin borrados diferidos al
+reinicio y con allowlist estricta y rechazo de reparse points para restos de
+OneDrive). La suite aislada `scripts/tests` (dobles en memoria; nunca toca el
+Registro, el sistema de archivos ni procesos del anfitrión) cubre el motor,
+el preflight, los códigos de salida y los rechazos de seguridad.
+
+### Compatibilidad admitida y clasificación
+
+Categorías documentales del contrato de compatibilidad:
+
+- `TESTED_ON`: Windows 11 Pro 26H2, build base 26300, x64 (la revisión UBR no
+  está fijada).
+- `SUPPORTED_BY_DESIGN`: Windows 11 cliente (build >= 22000), AMD64 nativo,
+  Windows PowerShell 5.1 Desktop, proceso de 64 bits, cuenta de usuario real;
+  Full exige consola elevada y UserOnly mantiene su contrato sin elevación.
+- `NOT_RUNTIME_TESTED`: cualquier otra build de Windows 11 dentro de ese marco;
+  se acepta, aplican las guardas por operación, las degradaciones se informan y
+  no se afirma compatibilidad completa; una actualización de UBR no fuerza un
+  rechazo.
+- `UNSUPPORTED`: Windows 10 o familias anteriores y ediciones de servidor.
+- `INCOMPATIBLE`: hosts no AMD64, PowerShell de 32 bits o no Desktop.
+
+El sistema admitido se separa de lo efectivamente comprobado: la única
+referencia runtime probada del standalone es 26H2; el baseline histórico
+publicado v0.1.5 corresponde a Windows 11 Pro 25H2.
 
 ### Gestión de errores de la fase SYSTEM (specialize)
 
@@ -439,6 +474,17 @@ versiones, ediciones o builds de Windows.
   revalidación en la referencia actual Windows 11 26H2 sigue pendiente. La vía
   principal usa la interfaz interna no documentada `IQuietHoursSettings`, que
   puede cambiar en futuras builds y debe revalidarse.
+- "No molestar" solo se desactiva en el momento de aplicar el perfil; no es una
+  garantía permanente. Windows 11 puede volver a activarlo mediante su
+  activación automática (Configuración > Sistema > Notificaciones:
+  determinados horarios, duplicación de pantalla, durante juegos, aplicaciones
+  a pantalla completa y la primera hora posterior a una actualización de
+  características de Windows; una sesión de concentración también lo activa
+  automáticamente). TMPC no configura ni desactiva esas reglas del usuario o
+  del sistema, por lo que una reactivación posterior no demuestra por sí sola
+  un fallo de TMPC. La causa exacta observada en un PC real sigue sin
+  confirmarse. Condiciones y valores actuales: soporte oficial de Microsoft,
+  https://support.microsoft.com/en-us/windows/experience/notifications-and-do-not-disturb-in-windows.
 - El override por usuario del FolderType de Downloads no es una API pública de
   Microsoft; una actualización mayor puede eliminar `HKCU\...\FolderTypes` y
   revertir el default de agrupación. Antes de copiar el FolderType, el perfil

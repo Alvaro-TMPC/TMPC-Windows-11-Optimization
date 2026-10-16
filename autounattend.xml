@@ -238,7 +238,68 @@ function Get-UserSID {
 }
 
 # Registry helpers. Mutations use -ErrorAction Stop so real failures set
-# $script:CustomizationHadErrors (F3 hardening). Binary helpers preserve the existing blob.
+# $script:CustomizationHadErrors. Binary helpers preserve the existing blob.
+# The engine mirrors the standalone one: read the live state, compare kind and
+# value exactly, write only when needed and verify the result. States:
+# ALREADY_COMPLIANT (no write), APPLIED (write verified), READ_DENIED,
+# WRITE_DENIED, WRITE_FAILED, VERIFY_FAILED and CONFLICTING_STATE. A failed
+# read never assumes absence and never leads to a blind write. Logs carry the
+# description and the state, not registry blobs or raw error payloads.
+function Get-RegistryEntryState {
+    param([string]$Path, [string]$Name)
+    $pathExists = $false
+    $valueExists = $false
+    $kind = $null
+    $value = $null
+    try {
+        $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        $key = $null
+    } catch [System.Management.Automation.DriveNotFoundException] {
+        $key = $null
+    }
+    if ($key) {
+        $pathExists = $true
+        try {
+            if ($Name) {
+                $valueExists = @($key.GetValueNames()) -contains $Name
+                if ($valueExists) {
+                    $kind = $key.GetValueKind($Name)
+                    $value = $key.GetValue($Name)
+                }
+            }
+        } finally { $key.Close() }
+    }
+    [pscustomobject]@{ PathExists = $pathExists; ValueExists = $valueExists; Kind = $kind; Value = $value }
+}
+
+function Test-RegistryStateEqual {
+    param([string]$Type, $Expected, $Kind, $Value)
+    $expectedKind = switch ($Type) {
+        'DWord' { [Microsoft.Win32.RegistryValueKind]::DWord }
+        'String' { [Microsoft.Win32.RegistryValueKind]::String }
+        'ExpandString' { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+        'Binary' { [Microsoft.Win32.RegistryValueKind]::Binary }
+        default { throw 'Unsupported registry type.' }
+    }
+    if ($Kind -ne $expectedKind) { return $false }
+    if ($Type -eq 'Binary') {
+        if ($null -eq $Value -or $Value -isnot [byte[]]) { return $false }
+        if ($Value.Length -ne $Expected.Length) { return $false }
+        for ($i = 0; $i -lt $Expected.Length; $i++) { if ($Value[$i] -ne $Expected[$i]) { return $false } }
+        return $true
+    }
+    if ($Type -eq 'DWord') { return ([int]$Value -eq [int]$Expected) }
+    return [string]::Equals([string]$Value, [string]$Expected, [StringComparison]::Ordinal)
+}
+
+function Get-RegistryErrorReason {
+    param($ErrorRecord)
+    $reason = $ErrorRecord.Exception.Message
+    if ($reason -in @('READ_DENIED','WRITE_DENIED','WRITE_FAILED','VERIFY_FAILED','CONFLICTING_STATE','Unsupported registry type.')) { return $reason }
+    return '{0}, HRESULT 0x{1:X8}' -f $ErrorRecord.Exception.GetType().Name, $ErrorRecord.Exception.HResult
+}
+
 function Set-RegistryValue {
     param(
         [string]$Path,
@@ -249,15 +310,35 @@ function Set-RegistryValue {
     )
 
     try {
-        if (-not (Test-Path $Path)) {
-            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+        $state = $null
+        try { $state = Get-RegistryEntryState -Path $Path -Name $Name }
+        catch { throw 'READ_DENIED' }
+        $expected = $Value
+        if ($Type -eq 'Binary') { $expected = [byte[]]$Value }
+        if ($Type -eq 'DWord') { $expected = [int]$Value }
+        if ($state.ValueExists -and (Test-RegistryStateEqual -Type $Type -Expected $expected -Kind $state.Kind -Value $state.Value)) {
+            Write-Log "$Description | $Path\$Name | ALREADY_COMPLIANT; no write performed" "INFO"
+            return
         }
-        Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force -ErrorAction Stop
-        Write-Log "$Description | $Path\$Name = $Value" "SUCCESS"
+        try {
+            if (-not $state.PathExists) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
+            Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force -ErrorAction Stop
+        } catch {
+            $denied = ($_.Exception -is [System.UnauthorizedAccessException]) -or ($_.Exception -is [System.Security.SecurityException])
+            if ($denied) { throw 'WRITE_DENIED' }
+            throw 'WRITE_FAILED'
+        }
+        $after = $null
+        try { $after = Get-RegistryEntryState -Path $Path -Name $Name }
+        catch { throw 'VERIFY_FAILED' }
+        if (-not ($after.ValueExists -and (Test-RegistryStateEqual -Type $Type -Expected $expected -Kind $after.Kind -Value $after.Value))) {
+            throw 'VERIFY_FAILED'
+        }
+        Write-Log "$Description | $Path\$Name | APPLIED and verified" "SUCCESS"
     }
     catch {
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to set $Path\$Name : $($_.Exception.Message)" "ERROR"
+        Write-Log "Failed to set $Path\$Name | $(Get-RegistryErrorReason $_)" "ERROR"
     }
 }
 
@@ -269,17 +350,24 @@ function Remove-RegistryValue {
     )
 
     try {
-        if (Test-Path $Path) {
-            $existingValue = Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
-            if ($existingValue) {
-                Remove-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
-                Write-Log "$Description | Removed $Path\$Name" "SUCCESS"
-            }
+        $state = $null
+        try { $state = Get-RegistryEntryState -Path $Path -Name $Name }
+        catch { throw 'READ_DENIED' }
+        if (-not $state.ValueExists) {
+            Write-Log "$Description | $Path\$Name | ALREADY_COMPLIANT; value absent" "INFO"
+            return
         }
+        try { Remove-ItemProperty -Path $Path -Name $Name -ErrorAction Stop }
+        catch { throw 'WRITE_DENIED' }
+        $after = $null
+        try { $after = Get-RegistryEntryState -Path $Path -Name $Name }
+        catch { throw 'VERIFY_FAILED' }
+        if ($after.ValueExists) { throw 'VERIFY_FAILED' }
+        Write-Log "$Description | Removed $Path\$Name | APPLIED and verified" "SUCCESS"
     }
     catch {
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to remove $Path\$Name : $($_.Exception.Message)" "ERROR"
+        Write-Log "Failed to remove $Path\$Name | $(Get-RegistryErrorReason $_)" "ERROR"
     }
 }
 
@@ -290,14 +378,24 @@ function Remove-RegistryKey {
     )
 
     try {
-        if (Test-Path $Path) {
-            Remove-Item -Path $Path -Recurse -Force -ErrorAction Stop
-            Write-Log "$Description | Removed key $Path" "SUCCESS"
+        $state = $null
+        try { $state = Get-RegistryEntryState -Path $Path -Name $null }
+        catch { throw 'READ_DENIED' }
+        if (-not $state.PathExists) {
+            Write-Log "$Description | $Path | ALREADY_COMPLIANT; key absent" "INFO"
+            return
         }
+        try { Remove-Item -Path $Path -Recurse -Force -ErrorAction Stop }
+        catch { throw 'WRITE_DENIED' }
+        $after = $null
+        try { $after = Get-RegistryEntryState -Path $Path -Name $null }
+        catch { throw 'VERIFY_FAILED' }
+        if ($after.PathExists) { throw 'VERIFY_FAILED' }
+        Write-Log "$Description | Removed key $Path | APPLIED and verified" "SUCCESS"
     }
     catch {
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to remove key $Path : $($_.Exception.Message)" "ERROR"
+        Write-Log "Failed to remove key $Path | $(Get-RegistryErrorReason $_)" "ERROR"
     }
 }
 
@@ -308,14 +406,24 @@ function New-RegistryKey {
     )
 
     try {
-        if (-not (Test-Path $Path)) {
-            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
-            Write-Log "$Description | Created key $Path" "SUCCESS"
+        $state = $null
+        try { $state = Get-RegistryEntryState -Path $Path -Name $null }
+        catch { throw 'READ_DENIED' }
+        if ($state.PathExists) {
+            Write-Log "$Description | $Path | ALREADY_COMPLIANT; key exists" "INFO"
+            return
         }
+        try { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
+        catch { throw 'WRITE_DENIED' }
+        $after = $null
+        try { $after = Get-RegistryEntryState -Path $Path -Name $null }
+        catch { throw 'VERIFY_FAILED' }
+        if (-not $after.PathExists) { throw 'VERIFY_FAILED' }
+        Write-Log "$Description | Created key $Path | APPLIED and verified" "SUCCESS"
     }
     catch {
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to create key $Path : $($_.Exception.Message)" "ERROR"
+        Write-Log "Failed to create key $Path | $(Get-RegistryErrorReason $_)" "ERROR"
     }
 }
 
@@ -330,34 +438,53 @@ function Set-BinaryBit {
     )
 
     try {
-        if (-not (Test-Path $Path)) {
-            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
-        }
-
-        $currentValue = Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
-        if ($null -eq $currentValue -or $null -eq $currentValue.$Name) {
+        $state = $null
+        try { $state = Get-RegistryEntryState -Path $Path -Name $Name }
+        catch { throw 'READ_DENIED' }
+        $bytes = $null
+        if (-not $state.ValueExists -or $null -eq $state.Value) {
             $bytes = New-Object byte[] ([Math]::Max(12, $ByteIndex + 1))
         } else {
-            $bytes = $currentValue.$Name
+            $bytes = $state.Value
+            if ($bytes -isnot [byte[]]) { throw 'CONFLICTING_STATE' }
             if ($bytes.Length -le $ByteIndex) {
-                $newBytes = New-Object byte[] ($ByteIndex + 1)
-                [Array]::Copy($bytes, $newBytes, $bytes.Length)
-                $bytes = $newBytes
+                $expanded = New-Object byte[] ($ByteIndex + 1)
+                [Array]::Copy($bytes, $expanded, $bytes.Length)
+                $bytes = $expanded
             }
         }
 
-        if ($SetBit) {
-            $bytes[$ByteIndex] = $bytes[$ByteIndex] -bor $BitMask
-        } else {
-            $bytes[$ByteIndex] = $bytes[$ByteIndex] -band (-bnot $BitMask)
+        $target = if ($SetBit) { $bytes[$ByteIndex] -bor $BitMask } else { $bytes[$ByteIndex] -band (-bnot $BitMask) }
+        if ($state.ValueExists -and $target -eq $bytes[$ByteIndex]) {
+            Write-Log "$Description | $Path\$Name bit mask 0x$($BitMask.ToString('X2')) at byte $ByteIndex | ALREADY_COMPLIANT; no write performed" "INFO"
+            return
         }
 
-        Set-ItemProperty -Path $Path -Name $Name -Value $bytes -Type Binary -Force -ErrorAction Stop
-        Write-Log "$Description | $Path\$Name bit mask 0x$($BitMask.ToString('X2')) at byte $ByteIndex = $SetBit" "SUCCESS"
+        $updated = New-Object byte[] $bytes.Length
+        [Array]::Copy($bytes, $updated, $bytes.Length)
+        $updated[$ByteIndex] = $target
+        try {
+            if (-not $state.PathExists) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
+            Set-ItemProperty -Path $Path -Name $Name -Value $updated -Type Binary -Force -ErrorAction Stop
+        } catch {
+            $denied = ($_.Exception -is [System.UnauthorizedAccessException]) -or ($_.Exception -is [System.Security.SecurityException])
+            if ($denied) { throw 'WRITE_DENIED' }
+            throw 'WRITE_FAILED'
+        }
+        $after = $null
+        try { $after = Get-RegistryEntryState -Path $Path -Name $Name }
+        catch { throw 'VERIFY_FAILED' }
+        if (-not ($after.ValueExists -and $after.Kind -eq [Microsoft.Win32.RegistryValueKind]::Binary -and $after.Value -is [byte[]])) {
+            throw 'VERIFY_FAILED'
+        }
+        $final = $after.Value
+        if ($final.Length -ne $updated.Length) { throw 'VERIFY_FAILED' }
+        for ($i = 0; $i -lt $updated.Length; $i++) { if ($final[$i] -ne $updated[$i]) { throw 'VERIFY_FAILED' } }
+        Write-Log "$Description | $Path\$Name bit mask 0x$($BitMask.ToString('X2')) at byte $ByteIndex = $SetBit | APPLIED and verified" "SUCCESS"
     }
     catch {
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to modify binary bit $Path\$Name : $($_.Exception.Message)" "ERROR"
+        Write-Log "Failed to modify binary bit $Path\$Name | $(Get-RegistryErrorReason $_)" "ERROR"
     }
 }
 
@@ -371,29 +498,52 @@ function Set-BinaryByte {
     )
 
     try {
-        if (-not (Test-Path $Path)) {
-            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
-        }
-
-        $currentValue = Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
-        if ($null -eq $currentValue -or $null -eq $currentValue.$Name) {
+        $state = $null
+        try { $state = Get-RegistryEntryState -Path $Path -Name $Name }
+        catch { throw 'READ_DENIED' }
+        $bytes = $null
+        if (-not $state.ValueExists -or $null -eq $state.Value) {
             $bytes = New-Object byte[] ([Math]::Max(12, $ByteIndex + 1))
         } else {
-            $bytes = $currentValue.$Name
+            $bytes = $state.Value
+            if ($bytes -isnot [byte[]]) { throw 'CONFLICTING_STATE' }
             if ($bytes.Length -le $ByteIndex) {
-                $newBytes = New-Object byte[] ($ByteIndex + 1)
-                [Array]::Copy($bytes, $newBytes, $bytes.Length)
-                $bytes = $newBytes
+                $expanded = New-Object byte[] ($ByteIndex + 1)
+                [Array]::Copy($bytes, $expanded, $bytes.Length)
+                $bytes = $expanded
             }
         }
 
-        $bytes[$ByteIndex] = $ByteValue
-        Set-ItemProperty -Path $Path -Name $Name -Value $bytes -Type Binary -Force -ErrorAction Stop
-        Write-Log "$Description | $Path\$Name byte $ByteIndex = 0x$($ByteValue.ToString('X2'))" "SUCCESS"
+        if ($state.ValueExists -and $ByteValue -eq $bytes[$ByteIndex]) {
+            Write-Log "$Description | $Path\$Name byte $ByteIndex | ALREADY_COMPLIANT; no write performed" "INFO"
+            return
+        }
+
+        $updated = New-Object byte[] $bytes.Length
+        [Array]::Copy($bytes, $updated, $bytes.Length)
+        $updated[$ByteIndex] = $ByteValue
+        try {
+            if (-not $state.PathExists) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
+            Set-ItemProperty -Path $Path -Name $Name -Value $updated -Type Binary -Force -ErrorAction Stop
+        } catch {
+            $denied = ($_.Exception -is [System.UnauthorizedAccessException]) -or ($_.Exception -is [System.Security.SecurityException])
+            if ($denied) { throw 'WRITE_DENIED' }
+            throw 'WRITE_FAILED'
+        }
+        $after = $null
+        try { $after = Get-RegistryEntryState -Path $Path -Name $Name }
+        catch { throw 'VERIFY_FAILED' }
+        if (-not ($after.ValueExists -and $after.Kind -eq [Microsoft.Win32.RegistryValueKind]::Binary -and $after.Value -is [byte[]])) {
+            throw 'VERIFY_FAILED'
+        }
+        $final = $after.Value
+        if ($final.Length -ne $updated.Length) { throw 'VERIFY_FAILED' }
+        for ($i = 0; $i -lt $updated.Length; $i++) { if ($final[$i] -ne $updated[$i]) { throw 'VERIFY_FAILED' } }
+        Write-Log "$Description | $Path\$Name byte $ByteIndex = 0x$($ByteValue.ToString('X2')) | APPLIED and verified" "SUCCESS"
     }
     catch {
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to modify binary byte $Path\$Name : $($_.Exception.Message)" "ERROR"
+        Write-Log "Failed to modify binary byte $Path\$Name | $(Get-RegistryErrorReason $_)" "ERROR"
     }
 }
 
@@ -819,61 +969,19 @@ if ($enabledFeatures.Count -gt 0) {
     }
 }
 
-# Special apps — registry-based uninstall
+# Special apps — desktop uninstallers are NOT executed.
+# The original registry-driven flow could run an arbitrary UninstallString as
+# SYSTEM, and a broad 'OneNote*' match could target a full Office installation.
+# For an existing PC that is not safely equivalent: the exact special app target
+# is kept for inventory parity with the standalone, the OneNote AppX package
+# remains targeted in $packages above, and the desktop removal is deferred with
+# a warning instead of executing uninstall strings. Deferred, never reported as
+# done.
 if ($specialApps.Count -gt 0) {
     Write-Log "Processing special apps..."
 
-    $uninstallPaths = @(
-        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
-        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
-    )
-
     foreach ($specialApp in $specialApps) {
-        Write-Log "Processing special app: $specialApp"
-
-        $processNames = switch ($specialApp) {
-            'OneNote' { @('OneNote', 'ONENOTE', 'ONENOTEM') }
-            default { Write-Log "Unknown special app: $specialApp"; continue }
-        }
-
-        foreach ($name in $processNames) {
-            Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        }
-
-        $uninstalled = $false
-        foreach ($basePath in $uninstallPaths) {
-            $keys = Get-ChildItem -Path $basePath -ErrorAction SilentlyContinue |
-                    Where-Object { $_.PSChildName -like "$specialApp*" }
-
-            foreach ($key in $keys) {
-                $uninstallString = (Get-ItemProperty -Path $key.PSPath -ErrorAction SilentlyContinue).UninstallString
-                if (-not $uninstallString) { continue }
-
-                Write-Log "Found uninstall string: $uninstallString"
-                $uninstalled = $true
-                $silent = if ($uninstallString -like '*OfficeClickToRun.exe*') { 'DisplayLevel=False' } else { '/silent' }
-
-                try {
-                    if ($uninstallString -match '^"([^"]+)"(.*)$') {
-                        $uninstallProcess = Start-Process -FilePath $matches[1] -ArgumentList "$($matches[2].Trim()) $silent" -NoNewWindow -Wait -PassThru -ErrorAction Stop
-                    } else {
-                        $uninstallProcess = Start-Process -FilePath $uninstallString -ArgumentList $silent -NoNewWindow -Wait -PassThru -ErrorAction Stop
-                    }
-
-                    if ($uninstallProcess.ExitCode -eq 0) {
-                        Write-Log "Completed uninstall for $specialApp"
-                    } else {
-                        Write-Log "Uninstall for $specialApp returned exit code $($uninstallProcess.ExitCode)"
-                        $script:HadErrors = $true
-                    }
-                } catch {
-                    Write-Log "Failed to uninstall ${specialApp}: $($_.Exception.Message)"
-                    $script:HadErrors = $true
-                }
-            }
-        }
-
-        if (-not $uninstalled) { Write-Log "No uninstall strings found for $specialApp" }
+        Write-Log "Special app $specialApp : desktop uninstall deferred; no uninstall string is executed. Remove separately if present. Its baseline AppX package is targeted above."
     }
 }
 
@@ -904,18 +1012,25 @@ exit 0
 
 <#
   .SYNOPSIS
-      Removes Microsoft OneDrive from Windows 10/11 systems.
-      Script Version: 1.2
+      Removes Microsoft OneDrive from Windows 10/11 systems (TMPC-hardened variant).
+      Script Version: 1.2 (TMPC-hardened)
 
   .DESCRIPTION
       This script detects and removes Microsoft OneDrive installations including:
       - OneDrive AppxPackage (Microsoft.OneDriveSync)
-      - Registry-based uninstallation using HKLM and HKU uninstall entries
-      - OneDrive files and folders from the current users' AppData folder. (NOTE: Userdata in %USERPROFILE%\OneDrive is preserved)
+      - Registry-based uninstallation using HKLM and HKU uninstall entries, only
+        through a strict, signature-verified OneDriveSetup.exe allowlist
+      - OneDrive files and folders from the current users' AppData folder. (NOTE: Userdata in %USERPROFILE%\OneDrive and any custom sync root are preserved)
       - System-wide OneDrive installation files
       - OneDrive scheduled tasks
       - Start Menu shortcuts
       - Default user profile configuration to prevent auto-installation
+
+      Local TMPC hardening over the upstream flow: no cmd.exe execution, no
+      forced process termination, no takeown/icacls ownership or ACL changes, no
+      deletion-on-reboot entries, no traversal of junctions/reparse points, and
+      explicit protection for %USERPROFILE%\OneDrive and custom OneDrive sync
+      roots. OneDrive running with possible pending sync defers cleanup.
 
       This script is designed to run in any context: user sessions, SYSTEM account, or scheduled tasks.
 
@@ -970,56 +1085,205 @@ function Write-Log {
     Write-Host $Message
 }
 
-# Function to schedule file for deletion on reboot
-function Schedule-DeleteOnReboot {
-    param([string]$Path)
-
-    $code = '[DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, int dwFlags);'
-    if (-not ([System.Management.Automation.PSTypeName]'Win32.Kernel32').Type) {
-        Add-Type -MemberDefinition $code -Name 'Kernel32' -Namespace 'Win32' -ErrorAction SilentlyContinue
+# ---------------------------------------------------------------------------
+# TEST SEAM (embedded variant): the registry, filesystem, Authenticode and
+# final-execution primitives below are the only system I/O entry points for the
+# hardened OneDrive flow. The isolated test suite extracts these functions and
+# replaces them with in-memory doubles, so no registry key, file, signature or
+# process is touched during tests. Keep the signatures stable.
+# ---------------------------------------------------------------------------
+function Get-RegistryEntryState {
+    param([string]$Path, [string]$Name)
+    $pathExists = $false
+    $valueExists = $false
+    $kind = $null
+    $value = $null
+    try {
+        $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        $key = $null
+    } catch [System.Management.Automation.DriveNotFoundException] {
+        $key = $null
     }
-    return [Win32.Kernel32]::MoveFileEx($Path, $null, 4)  # 4 = MOVEFILE_DELAY_UNTIL_REBOOT
+    if ($key) {
+        $pathExists = $true
+        try {
+            if ($Name) {
+                $valueExists = @($key.GetValueNames()) -contains $Name
+                if ($valueExists) {
+                    $kind = $key.GetValueKind($Name)
+                    $value = $key.GetValue($Name)
+                }
+            }
+        } finally { $key.Close() }
+    }
+    [pscustomobject]@{ PathExists = $pathExists; ValueExists = $valueExists; Kind = $kind; Value = $value }
+}
+
+function Get-RegistryErrorReason {
+    param($ErrorRecord)
+    $reason = $ErrorRecord.Exception.Message
+    if ($reason -in @('READ_DENIED','WRITE_DENIED','WRITE_FAILED','VERIFY_FAILED','CONFLICTING_STATE','Unsupported registry type.')) { return $reason }
+    return '{0}, HRESULT 0x{1:X8}' -f $ErrorRecord.Exception.GetType().Name, $ErrorRecord.Exception.HResult
+}
+
+function Remove-RegistryEntryIfPresent {
+    # Idempotent removal: an absent key or value is already compliant; any
+    # deletion is verified. Returns the state string; throws the state on error.
+    param([string]$Path, [string]$Name)
+    $state = $null
+    try { $state = Get-RegistryEntryState -Path $Path -Name $Name }
+    catch { throw 'READ_DENIED' }
+    if (-not $state.PathExists) { return 'ALREADY_COMPLIANT' }
+    if ($Name -and -not $state.ValueExists) { return 'ALREADY_COMPLIANT' }
+    try {
+        if ($Name) { Remove-ItemProperty -Path $Path -Name $Name -ErrorAction Stop }
+        else { Remove-Item -Path $Path -Recurse -Force -ErrorAction Stop }
+    } catch { throw 'WRITE_DENIED' }
+    $after = $null
+    try { $after = Get-RegistryEntryState -Path $Path -Name $Name }
+    catch { throw 'VERIFY_FAILED' }
+    if ($Name) { if ($after.ValueExists) { throw 'VERIFY_FAILED' } }
+    else { if ($after.PathExists) { throw 'VERIFY_FAILED' } }
+    return 'APPLIED'
+}
+
+function Get-TMPCPathItem {
+    param([string]$Path)
+    Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+}
+
+function Assert-NoReparsePath {
+    param([string]$Path)
+    $item = Get-TMPCPathItem -Path $Path
+    while ($item) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Linked path preserved.' }
+        $parent = Split-Path -Parent $item.FullName
+        if (-not $parent -or $parent -eq $item.FullName) { break }
+        $item = Get-TMPCPathItem -Path $parent
+    }
+}
+
+function Remove-OneDriveRemnant {
+    param([string]$Path, [string[]]$AllowedRoots, [string[]]$ProtectedRoots)
+    # Sole filesystem deletion entry point for OneDrive remnants: exact
+    # allowlist, protected sync roots and link rejection, one level at a time.
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    foreach ($root in @($ProtectedRoots)) {
+        if (-not $root) { continue }
+        $sync = [IO.Path]::GetFullPath($root).TrimEnd('\')
+        if ($full -eq $sync -or $full.StartsWith($sync+'\',[StringComparison]::OrdinalIgnoreCase) -or
+            $sync.StartsWith($full+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Sync-root overlap; personal files preserved.' }
+    }
+    if ($AllowedRoots -notcontains $full) { throw 'Deletion target rejected; OneDrive user data is protected.' }
+    $leaf = $null
+    try { $leaf = Get-TMPCPathItem -Path $full }
+    catch [System.Management.Automation.ItemNotFoundException] { $leaf = $null }
+    if ($null -eq $leaf) { return 'ALREADY_COMPLIANT' }
+    if (($leaf.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Linked remnant preserved.' }
+    Assert-NoReparsePath $full
+    # Inspect one level at a time, BEFORE descending: never traverse a junction.
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($full)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        $item = Get-TMPCPathItem -Path $current
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Linked remnant preserved.' }
+        if ($item.PSIsContainer) {
+            foreach ($child in @(Get-ChildItem -LiteralPath $current -Force)) { $pending.Push($child.FullName) }
+        }
+    }
+    Remove-Item -LiteralPath $full -Recurse -Force
+    if (Test-Path -LiteralPath $full) { throw 'Software remnant still present.' }
+    return 'APPLIED'
+}
+
+function Get-TMPCSignature {
+    param([string]$Path)
+    Get-AuthenticodeSignature -LiteralPath $Path
+}
+
+function Start-TMPCVerifiedUninstaller {
+    param([string]$FilePath, [string]$Arguments)
+    Start-Process -FilePath $FilePath -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
+}
+
+function Invoke-OneDriveUninstaller {
+    param([string]$RegistryPath)
+    # No cmd.exe, arbitrary registry command or shell expansion: only the
+    # installed OneDriveSetup.exe with baseline uninstall switches, inside known
+    # software locations and with a valid Microsoft signature, is executed.
+    # This variant runs as SYSTEM during Setup, where the machine entry is the
+    # inbox stub (System32\OneDriveSetup.exe); user-scope entries are deferred
+    # by the caller instead of being executed as SYSTEM.
+    $state = $null
+    try { $state = Get-RegistryEntryState -Path $RegistryPath -Name 'UninstallString' }
+    catch { throw 'READ_DENIED' }
+    if (-not $state.PathExists -or -not $state.ValueExists) { return $false }
+    if ($state.Kind -ne [Microsoft.Win32.RegistryValueKind]::String) {
+        Write-Log "OneDrive uninstall entry is not a string value; preserved for manual review."
+        return $false
+    }
+    $command = [string]$state.Value
+    if ($command -notmatch '^"?(.+?OneDriveSetup\.exe)"?\s+(/uninstall(?:\s+/allusers)?)\s*$') {
+        Write-Log "OneDrive uninstall command is not a recognized safe form; preserved for manual review."
+        return $false
+    }
+    $exe = [IO.Path]::GetFullPath($matches[1])
+    $arguments = $matches[2]
+    $roots = @((Join-Path $env:ProgramFiles 'Microsoft OneDrive'), (Join-Path $env:SystemRoot 'System32'), (Join-Path $env:SystemRoot 'SysWOW64'))
+    $trusted = $false
+    foreach ($root in $roots) {
+        if ($exe.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)) { $trusted = $true }
+    }
+    if (-not $trusted) { throw 'Uninstaller outside known software locations.' }
+    Assert-NoReparsePath $exe
+    $signature = Get-TMPCSignature -Path $exe
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+        throw 'OneDrive uninstaller signature not verified.'
+    }
+    $process = Start-TMPCVerifiedUninstaller -FilePath $exe -Arguments $arguments
+    if ($null -eq $process -or $process.ExitCode -ne 0) { throw 'OneDrive uninstaller failed.' }
+    return $true
 }
 
 Write-Host "Starting OneDrive removal process. See $logFile for details."
 Write-Log "Starting OneDrive removal process"
 
-# Get the interactive user when running as SYSTEM (not needed for regular user execution)
+# Get the interactive user when running as SYSTEM (not needed for regular user execution).
+# Logs avoid user names: only detection steps and outcomes are recorded.
 function Get-TargetUser {
     Write-Log "Get-TargetUser: Starting user detection"
 
     try {
         $user = Get-WmiObject Win32_ComputerSystem | Select-Object -ExpandProperty UserName
-        Write-Log "Get-TargetUser: Win32_ComputerSystem returned: '$user'"
         if ($user -and $user -ne "NT AUTHORITY\SYSTEM") {
-            $username = $user.Split('\')[1]
-            Write-Log "Get-TargetUser: Extracted username: '$username'"
-            return $username
+            Write-Log "Get-TargetUser: interactive user detected through Win32_ComputerSystem"
+            return $user.Split('\')[1]
         }
-        Write-Log "Get-TargetUser: User is null or SYSTEM, trying fallback method"
+        Write-Log "Get-TargetUser: user is null or a system account, trying fallback method"
     }
     catch {
-        Write-Log "Get-TargetUser: Win32_ComputerSystem failed: $($_.Exception.Message)"
+        Write-Log "Get-TargetUser: Win32_ComputerSystem detection failed"
     }
 
     # Fallback: find user running explorer.exe
     try {
         $explorer = Get-CimInstance Win32_Process -Filter "Name = 'explorer.exe'" -ErrorAction SilentlyContinue | Select-Object -First 1
-        Write-Log "Get-TargetUser: Explorer process found: $($explorer -ne $null)"
         if ($explorer) {
             $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction Stop
-            Write-Log "Get-TargetUser: Explorer owner: Domain='$($owner.Domain)', User='$($owner.User)', ReturnValue='$($owner.ReturnValue)'"
             if ($owner.ReturnValue -eq 0 -and $owner.User) {
+                Write-Log "Get-TargetUser: interactive user detected through explorer.exe"
                 return $owner.User
             }
         }
-        Write-Log "Get-TargetUser: No usable explorer owner found"
+        Write-Log "Get-TargetUser: no usable explorer owner found"
     }
     catch {
-        Write-Log "Get-TargetUser: Explorer method failed: $($_.Exception.Message)"
+        Write-Log "Get-TargetUser: explorer detection failed"
     }
 
-    Write-Log "Get-TargetUser: No user found, returning null"
+    Write-Log "Get-TargetUser: no user found, returning null"
     return $null
 }
 
@@ -1034,32 +1298,71 @@ function Get-UserSID {
                 return $key.PSChildName
             }
         }
-        Write-Log "Get-UserSID: No profile found for user '$Username'"
+        Write-Log "Get-UserSID: no profile found for the target user"
         return $null
     }
     catch {
-        Write-Log "Get-UserSID: Failed for user '$Username': $($_.Exception.Message)"
+        Write-Log "Get-UserSID: profile lookup failed"
         return $null
     }
 }
 
-# Determine user profile to check
-Write-Log "Current environment: USERNAME='$env:USERNAME', USERPROFILE='$env:USERPROFILE'"
-
+# Determine user profile to check (logs avoid user names and profile paths).
 if ($env:USERNAME -eq "SYSTEM" -or $env:USERNAME -like "*$" -or $env:USERPROFILE -like "*\system32\config\systemprofile") {
-    Write-Log "Running as SYSTEM, attempting to detect target user"
+    Write-Log "Running as a system account, attempting to detect the target user"
     $targetUser = Get-TargetUser
     if ($targetUser) {
         $userProfilePath = "C:\Users\$targetUser"
-        Write-Log "Running as SYSTEM, targeting user: '$targetUser', profile path: '$userProfilePath'"
+        Write-Log "Running as a system account; a target user profile will be used"
     } else {
-        Write-Log "Running as SYSTEM but no target user found"
+        Write-Log "Running as a system account but no target user was found; user paths are skipped"
         $userProfilePath = $null
     }
 } else {
     $targetUser = $env:USERNAME
     $userProfilePath = $env:USERPROFILE
-    Write-Log "Running as regular user: '$targetUser', profile path: '$userProfilePath'"
+    Write-Log "Running as a regular user; using the current profile"
+}
+
+# OneDrive custom sync-root protection inventory (read BEFORE uninstall or
+# configuration cleanup changes those keys). Only the UserFolder value is read;
+# account tokens and credentials are never touched.
+$syncRoots = New-Object System.Collections.Generic.List[string]
+foreach ($hive in @(Get-ChildItem -LiteralPath 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue)) {
+    $accounts = $hive.PSPath + '\SOFTWARE\Microsoft\OneDrive\Accounts'
+    if (-not (Test-Path -LiteralPath $accounts)) { continue }
+    foreach ($account in @(Get-ChildItem -LiteralPath $accounts -ErrorAction SilentlyContinue)) {
+        $accountState = $null
+        try { $accountState = Get-RegistryEntryState -Path $account.PSPath -Name 'UserFolder' } catch { $accountState = $null }
+        if ($null -ne $accountState -and $accountState.ValueExists -and $accountState.Value) {
+            $null = $syncRoots.Add([string]$accountState.Value)
+        }
+    }
+}
+if ($userProfilePath) { $null = $syncRoots.Add((Join-Path $userProfilePath 'OneDrive')) }
+if ($env:USERPROFILE) { $null = $syncRoots.Add((Join-Path $env:USERPROFILE 'OneDrive')) }
+
+# Exact allowlist of OneDrive software remnants this script may delete. Content
+# under %USERPROFILE%\OneDrive is NEVER a deletion target.
+$remnantRoots = New-Object System.Collections.Generic.List[string]
+$null = $remnantRoots.Add((Join-Path $env:ProgramFiles 'Microsoft OneDrive'))
+$null = $remnantRoots.Add((Join-Path $env:ProgramData 'Microsoft OneDrive'))
+$null = $remnantRoots.Add((Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\OneDrive.lnk'))
+if ($userProfilePath) {
+    $null = $remnantRoots.Add((Join-Path $userProfilePath 'AppData\Local\Microsoft\OneDrive'))
+    $null = $remnantRoots.Add((Join-Path $userProfilePath 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk'))
+}
+
+# Resolve the user registry hive path (provider-qualified) once; it is used by
+# the uninstaller allowlist and by the user-specific key cleanup.
+$userRegistryHive = $null
+if ($userProfilePath -and $targetUser) {
+    $userSID = Get-UserSID -Username $targetUser
+    if ($userSID) {
+        $userRegistryHive = "Registry::HKEY_USERS\$userSID"
+    } else {
+        Write-Log "Could not resolve the target user registry hive; user-specific cleanup and user-scope uninstall are deferred"
+    }
 }
 
 # Step 1: Remove OneDrive AppxPackage and check registry for OneDrive installation
@@ -1078,270 +1381,141 @@ catch {
     $script:HadErrors = $true
 }
 
-$uninstallExecuted = $false
+# Step 2: checked uninstallation through the strict verified path.
+# Nothing is force-terminated: OneDrive running with possible pending sync work
+# defers executable and remnant cleanup until the user closes it after checking
+# local files. User-scope uninstall entries are not executed as SYSTEM.
+$oneDriveRunning = @(Get-Process -Name '*OneDrive*' -ErrorAction SilentlyContinue).Count -gt 0
+if ($oneDriveRunning) {
+    Write-Log "OneDrive is running; quit it after verifying local files. Uninstall and remnant cleanup deferred."
+} else {
+    $machineUninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe'
+    $userUninstallKey = $null
+    if ($userRegistryHive) { $userUninstallKey = $userRegistryHive + '\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe' }
 
-# Check HKLM first (system-wide installation)
-$hklmUninstallKey = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe"
-Write-Log "Checking HKLM uninstall registry key: $hklmUninstallKey"
-
-try {
-    $uninstallString = reg.exe query $hklmUninstallKey /v UninstallString 2>$null
-    if ($LASTEXITCODE -eq 0 -and $uninstallString) {
-        $uninstallLine = $uninstallString | Where-Object { $_ -match "UninstallString" } | Select-Object -First 1
-        if ($uninstallLine -match "REG_SZ\s+(.+)") {
-            $uninstallCommand = $matches[1].Trim()
-            Write-Log "Found HKLM uninstall command: $uninstallCommand"
-
-            Write-Log "Stopping OneDrive processes"
-            Stop-Process -Name "*OneDrive*" -Force -ErrorAction SilentlyContinue | Out-Null
-
-            Write-Log "Executing HKLM registry-based uninstaller"
-
-            if ($uninstallCommand -match '^"([^"]+)"(.*)') {
-                $exePath = $matches[1]
-                $arguments = $matches[2].Trim()
-                Write-Log "Command: '$exePath' Arguments: '$arguments'"
-                $uninstallProcess = Start-Process -FilePath $exePath -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop
-                if ($uninstallProcess.ExitCode -ne 0) {
-                    throw "HKLM OneDrive uninstaller returned exit code $($uninstallProcess.ExitCode)."
-                }
-            } else {
-                Write-Log "Command: '$uninstallCommand'"
-                cmd.exe /c $uninstallCommand 2>&1 | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                    throw "HKLM OneDrive uninstall command returned exit code $LASTEXITCODE."
-                }
-            }
-            Write-Log "HKLM registry-based uninstaller completed"
-            $uninstallExecuted = $true
-        } else {
-            Write-Log "Could not parse UninstallString from HKLM registry output"
-            $script:HadErrors = $true
-        }
-    } else {
-        Write-Log "OneDrive uninstall registry key not found in HKLM"
-    }
-}
-catch {
-    Write-Log "HKLM registry-based uninstall failed: $($_.Exception.Message)"
-    $script:HadErrors = $true
-}
-
-# Check HKU if HKLM didn't execute (user-specific installation)
-if (-not $uninstallExecuted -and $targetUser) {
-    $userSID = Get-UserSID -Username $targetUser
-    if ($userSID) {
-        Write-Log "User SID for '$targetUser': $userSID"
-
-        $uninstallKey = "HKU\$userSID\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe"
-        Write-Log "Checking HKU uninstall registry key: $uninstallKey"
-
-        try {
-            $uninstallString = reg.exe query $uninstallKey /v UninstallString 2>$null
-            if ($LASTEXITCODE -eq 0 -and $uninstallString) {
-                $uninstallLine = $uninstallString | Where-Object { $_ -match "UninstallString" } | Select-Object -First 1
-                if ($uninstallLine -match "REG_SZ\s+(.+)") {
-                    $uninstallCommand = $matches[1].Trim()
-                    Write-Log "Found HKU uninstall command: $uninstallCommand"
-
-                    Write-Log "Stopping OneDrive processes"
-                    Stop-Process -Name "*OneDrive*" -Force -ErrorAction SilentlyContinue | Out-Null
-
-                    Write-Log "Executing HKU registry-based uninstaller"
-
-                    if ($uninstallCommand -match '^"([^"]+)"(.*)') {
-                        $exePath = $matches[1]
-                        $arguments = $matches[2].Trim()
-                        Write-Log "Command: '$exePath' Arguments: '$arguments'"
-                        $uninstallProcess = Start-Process -FilePath $exePath -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop
-                        if ($uninstallProcess.ExitCode -ne 0) {
-                            throw "HKU OneDrive uninstaller returned exit code $($uninstallProcess.ExitCode)."
-                        }
-                    } else {
-                        Write-Log "Command: '$uninstallCommand'"
-                        cmd.exe /c $uninstallCommand 2>&1 | Out-Null
-                        if ($LASTEXITCODE -ne 0) {
-                            throw "HKU OneDrive uninstall command returned exit code $LASTEXITCODE."
-                        }
-                    }
-                    Write-Log "HKU registry-based uninstaller completed"
-                } else {
-                    Write-Log "Could not parse UninstallString from HKU registry output"
-                    $script:HadErrors = $true
-                }
-            } else {
-                Write-Log "OneDrive uninstall registry key not found in HKU"
-            }
-        }
-        catch {
-            Write-Log "HKU registry-based uninstall failed: $($_.Exception.Message)"
-            $script:HadErrors = $true
-        }
-    } else {
-        Write-Log "Could not get user SID for '$targetUser'"
+    $machineUninstalled = $false
+    Write-Log "Checking the HKLM OneDrive uninstall entry"
+    try {
+        $machineUninstalled = Invoke-OneDriveUninstaller -RegistryPath $machineUninstallKey
+    } catch {
+        Write-Log "HKLM OneDrive uninstall failed: $(Get-RegistryErrorReason $_)"
         $script:HadErrors = $true
     }
-}
+    if ($machineUninstalled) { Write-Log "HKLM registry-based uninstaller completed" }
 
-# Step 3: Always run cleanup tasks
-Write-Log "Starting cleanup tasks"
+    # Positive absence requires a successful read that says the entry does not
+    # exist; a denied read never authorizes assuming absence.
+    $machineAbsent = $false
+    $machineState = $null
+    try { $machineState = Get-RegistryEntryState -Path $machineUninstallKey -Name $null } catch { $machineState = $null }
+    if ($null -ne $machineState) { $machineAbsent = -not $machineState.PathExists }
 
-# 3.1: Delete OneDrive registry keys
-$hklmUninstallKey = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe"
-Write-Log "Deleting HKLM OneDrive uninstall registry key: $hklmUninstallKey"
-reg.exe delete $hklmUninstallKey /f 2>&1 | Out-Null
-if ($LASTEXITCODE -eq 0) {
-    Write-Log "HKLM registry key deleted successfully"
-} else {
-    Write-Log "HKLM registry key not found or already deleted"
-}
-
-if ($targetUser -and $userSID) {
-    $uninstallKey = "HKU\$userSID\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe"
-    Write-Log "Deleting HKU OneDrive uninstall registry key: $uninstallKey"
-    reg.exe delete $uninstallKey /f 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Log "HKU registry key deleted successfully"
+    $userScopedPresent = $true
+    if ($userUninstallKey) {
+        $userState = $null
+        try { $userState = Get-RegistryEntryState -Path $userUninstallKey -Name $null } catch { $userState = $null }
+        if ($null -ne $userState) { $userScopedPresent = [bool]$userState.PathExists }
     } else {
-        Write-Log "HKU registry key not found or already deleted"
+        $userScopedPresent = $false
     }
-}
-
-# 3.1b: Delete OneDrive main registry keys
-Write-Log "Deleting OneDrive configuration registry keys"
-
-$systemRegistryPaths = @(
-    "HKLM\SOFTWARE\Microsoft\OneDrive",
-    "HKLM\SOFTWARE\WOW6432Node\Microsoft\OneDrive"
-)
-
-foreach ($path in $systemRegistryPaths) {
-    Write-Log "Deleting registry key: $path"
-    reg.exe delete $path /f 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Log "Registry key deleted successfully: $path"
-    } else {
-        Write-Log "Registry key not found or already deleted: $path"
-    }
-}
-
-if ($targetUser) {
-    if (-not $userSID) {
-        $userSID = Get-UserSID -Username $targetUser
+    if ($userScopedPresent) {
+        Write-Log "A user-scope OneDrive installation is registered for the target profile; user-scope uninstall and user remnants are deferred to the interactive account"
     }
 
-    if ($userSID) {
-        Write-Log "Deleting user-specific OneDrive registry keys for user: $targetUser (SID: $userSID)"
-        $userRegistryPaths = @(
-            "HKU\$userSID\SOFTWARE\Microsoft\OneDrive",
-            "HKU\$userSID\SOFTWARE\WOW6432Node\Microsoft\OneDrive"
-        )
-
-        foreach ($path in $userRegistryPaths) {
-            Write-Log "Deleting registry key: $path"
-            reg.exe delete $path /f 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Log "Registry key deleted successfully: $path"
-            } else {
-                Write-Log "Registry key not found or already deleted: $path"
-            }
-        }
-    } else {
-        Write-Log "Could not get user SID for '$targetUser', skipping user-specific registry cleanup"
-    }
-}
-
-# 3.2: Delete OneDrive AppData folder
-if ($userProfilePath) {
-    $currentUserOneDrivePath = Join-Path $userProfilePath "AppData\Local\Microsoft\OneDrive"
-    Write-Log "Checking OneDrive AppData folder: $currentUserOneDrivePath"
-
-    if (Test-Path $currentUserOneDrivePath) {
-        Write-Log "Removing OneDrive folder for user: $targetUser"
+    # Remove only a positively uninstalled entry. A failed or unrecognized
+    # uninstall keeps its evidence for manual review.
+    if ($machineUninstalled) {
         try {
-            takeown /f $currentUserOneDrivePath /r /d y 2>&1 | Out-Null
-            icacls $currentUserOneDrivePath /grant "${env:USERNAME}:F" /t 2>&1 | Out-Null
-            Remove-Item $currentUserOneDrivePath -Recurse -Force -ErrorAction Stop
-            if (Test-Path $currentUserOneDrivePath) {
-                throw "OneDrive AppData folder still exists after removal."
-            }
-            Write-Log "OneDrive folder removed for user: $targetUser"
-        }
-        catch {
-            Write-Log "Failed to remove OneDrive folder for user: $targetUser - $($_.Exception.Message)"
+            $entryState = Remove-RegistryEntryIfPresent -Path $machineUninstallKey
+            Write-Log "HKLM uninstall entry cleanup: $entryState"
+        } catch {
+            Write-Log "HKLM uninstall entry cleanup failed: $(Get-RegistryErrorReason $_)"
             $script:HadErrors = $true
         }
+    }
+
+    if (-not $machineUninstalled -and -not $machineAbsent) {
+        Write-Log "OneDrive uninstall not confirmed; configuration keys and remnants preserved. Manual review needed."
     } else {
-        Write-Log "OneDrive AppData folder not found"
-    }
-}
-
-# 3.3: Delete OneDrive Start Menu entry
-if ($userProfilePath) {
-    $startMenuPath = Join-Path $userProfilePath "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk"
-    Write-Log "Checking OneDrive Start Menu shortcut: $startMenuPath"
-
-    if (Test-Path $startMenuPath) {
-        Remove-Item $startMenuPath -Force -ErrorAction SilentlyContinue
-        Write-Log "OneDrive Start Menu shortcut removed"
-    } else {
-        Write-Log "OneDrive Start Menu shortcut not found"
-    }
-}
-
-if (Test-Path "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk") {
-    Remove-Item "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk" -Force -ErrorAction SilentlyContinue
-    Write-Log "System-wide Start Menu shortcut removed"
-}
-
-# 3.4: Remove remaining OneDrive program/data folders while preserving Windows setup binaries
-$systemPaths = @(
-    "C:\Program Files\Microsoft OneDrive",
-    "C:\ProgramData\Microsoft OneDrive"
-)
-
-foreach ($path in $systemPaths) {
-    if (Test-Path $path) {
-        Write-Log "Removing: $path"
-        if (Test-Path $path -PathType Container) {
-            takeown /f $path /r /d y 2>&1 | Out-Null
-            icacls $path /grant "${env:USERNAME}:F" /t 2>&1 | Out-Null
-        } else {
-            takeown /f $path 2>&1 | Out-Null
-            icacls $path /grant "${env:USERNAME}:F" 2>&1 | Out-Null
-        }
-        Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
-$remaining = $systemPaths | Where-Object { Test-Path $_ }
-if ($remaining) {
-    Write-Log "Some files locked, scheduling for deletion on reboot"
-    foreach ($path in $remaining) {
-        if (Test-Path $path -PathType Container) {
-            Get-ChildItem $path -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                Schedule-DeleteOnReboot $_.FullName | Out-Null
+        foreach ($path in @('HKLM:\SOFTWARE\Microsoft\OneDrive','HKLM:\SOFTWARE\WOW6432Node\Microsoft\OneDrive')) {
+            try {
+                $keyState = Remove-RegistryEntryIfPresent -Path $path
+                Write-Log "OneDrive configuration key removal: $keyState"
+            } catch {
+                Write-Log "OneDrive configuration key removal failed: $(Get-RegistryErrorReason $_)"
+                $script:HadErrors = $true
             }
-        } else {
-            Schedule-DeleteOnReboot $path | Out-Null
         }
-        Write-Log "Scheduled for reboot deletion: $path"
     }
 }
 
-# 3.5: Delete OneDrive scheduled tasks
-# Remove OneDrive from Explorer navigation pane if the namespace entry exists
+# Step 3: allowlisted remnant cleanup (no ownership or ACL changes, no
+# deletion-on-reboot entries). Content under %USERPROFILE%\OneDrive and every
+# custom sync root are protected by Remove-OneDriveRemnant.
+if (-not $oneDriveRunning) {
+    Write-Log "Starting allowlisted remnant cleanup"
+
+    if ($machineUninstalled -or $machineAbsent) {
+        foreach ($path in @((Join-Path $env:ProgramFiles 'Microsoft OneDrive'), (Join-Path $env:ProgramData 'Microsoft OneDrive'), (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\OneDrive.lnk'))) {
+            try {
+                $remnantState = Remove-OneDriveRemnant -Path $path -AllowedRoots @($remnantRoots) -ProtectedRoots @($syncRoots)
+                Write-Log "OneDrive allowlisted machine path: $remnantState"
+            } catch {
+                Write-Log "OneDrive machine remnant preserved: $(Get-RegistryErrorReason $_)"
+                $script:HadErrors = $true
+            }
+        }
+    }
+
+    if (-not $userScopedPresent) {
+        if ($userRegistryHive) {
+            foreach ($path in @(($userRegistryHive + '\SOFTWARE\Microsoft\OneDrive'), ($userRegistryHive + '\SOFTWARE\WOW6432Node\Microsoft\OneDrive'))) {
+                try {
+                    $keyState = Remove-RegistryEntryIfPresent -Path $path
+                    Write-Log "User OneDrive configuration key removal: $keyState"
+                } catch {
+                    Write-Log "User OneDrive configuration key removal failed: $(Get-RegistryErrorReason $_)"
+                    $script:HadErrors = $true
+                }
+            }
+        }
+        if ($userProfilePath) {
+            foreach ($path in @((Join-Path $userProfilePath 'AppData\Local\Microsoft\OneDrive'), (Join-Path $userProfilePath 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk'))) {
+                try {
+                    $remnantState = Remove-OneDriveRemnant -Path $path -AllowedRoots @($remnantRoots) -ProtectedRoots @($syncRoots)
+                    Write-Log "OneDrive allowlisted user path: $remnantState"
+                } catch {
+                    Write-Log "OneDrive user remnant preserved: $(Get-RegistryErrorReason $_)"
+                    $script:HadErrors = $true
+                }
+            }
+        }
+    } else {
+        Write-Log "User-scope OneDrive remnants are preserved while a user-scope installation is registered"
+    }
+}
+
+# OneDrive Explorer navigation pane entry: idempotent and verified.
 $oneDriveClsid = "{018D5C66-4533-4307-9B53-224DE2ED1FE6}"
 foreach ($key in @(
     "HKLM:\SOFTWARE\Classes\CLSID\$oneDriveClsid",
     "HKLM:\SOFTWARE\Classes\WOW6432Node\CLSID\$oneDriveClsid"
 )) {
     try {
-        if (Test-Path $key) {
-            Set-ItemProperty -Path $key -Name "System.IsPinnedToNameSpaceTree" -Value 0 -Type DWord -Force -ErrorAction Stop
+        $pinState = Get-RegistryEntryState -Path $key -Name 'System.IsPinnedToNameSpaceTree'
+        if (-not $pinState.PathExists) { continue }
+        if ($pinState.ValueExists -and $pinState.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $pinState.Value -eq 0) {
+            Write-Log "OneDrive Explorer namespace entry already unpinned"
+            continue
         }
+        Set-ItemProperty -Path $key -Name "System.IsPinnedToNameSpaceTree" -Value 0 -Type DWord -Force -ErrorAction Stop
+        $pinAfter = Get-RegistryEntryState -Path $key -Name 'System.IsPinnedToNameSpaceTree'
+        if (-not ($pinAfter.ValueExists -and $pinAfter.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $pinAfter.Value -eq 0)) {
+            throw 'VERIFY_FAILED'
+        }
+        Write-Log "OneDrive Explorer namespace entry unpinned and verified"
     } catch {
-        Write-Log "Failed to update OneDrive Explorer namespace entry '$key': $($_.Exception.Message)"
+        Write-Log "Failed to update OneDrive Explorer namespace entry: $(Get-RegistryErrorReason $_)"
         $script:HadErrors = $true
     }
 }
@@ -1354,10 +1528,12 @@ try {
             Write-Log "Found OneDrive scheduled task: $($task.TaskName) - State: $($task.State)"
             try {
                 Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false -ErrorAction Stop
-                Write-Log "Deleted scheduled task: $($task.TaskName)"
+                $remainingTask = Get-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue
+                if ($remainingTask) { throw 'VERIFY_FAILED' }
+                Write-Log "Deleted scheduled task and verified its removal: $($task.TaskName)"
             }
             catch {
-                Write-Log "Failed to delete scheduled task: $($task.TaskName) - $($_.Exception.Message)"
+                Write-Log "Failed to delete scheduled task: $($task.TaskName) - $(Get-RegistryErrorReason $_)"
                 $script:HadErrors = $true
             }
         }
@@ -1370,24 +1546,79 @@ catch {
     $script:HadErrors = $true
 }
 
-# 3.6: Configure default user registry to prevent OneDrive auto-install
-$markerKey = "HKLM\SOFTWARE\Autounattend\OneDriveRemoval"
-$markerValue = reg.exe query $markerKey /v "DefaultUserConfigured" 2>$null
-
-if ($LASTEXITCODE -eq 0) {
+# Configure the Default user registry to prevent OneDrive auto-install on new
+# profiles. Unique mount name, no regedit termination, always unloaded, and the
+# marker is written only after verified success.
+$markerKey = 'HKLM:\SOFTWARE\Autounattend\OneDriveRemoval'
+$markerState = $null
+try { $markerState = Get-RegistryEntryState -Path $markerKey -Name 'DefaultUserConfigured' } catch { $markerState = $null }
+if ($null -eq $markerState) {
+    Write-Log "Default user marker could not be read; step deferred to avoid repeating an unverified configuration"
+    $script:HadErrors = $true
+} elseif ($markerState.ValueExists) {
     Write-Log "Default user already configured on this machine, skipping this step."
 } else {
     Write-Log "Configuring registry to prevent OneDrive auto-install for new users"
-    reg.exe Load HKEY_USERS\Default "C:\Users\Default\NTUSER.DAT" 2>&1 | Out-Null
-    reg.exe delete "HKU\Default\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" /v "OneDriveSetup" /f 2>&1 | Out-Null
-    reg.exe add "HKU\Default\SOFTWARE\Microsoft\OneDrive" /v "EnableTHDFFeatures" /t REG_DWORD /d "0" /f 2>&1 | Out-Null
-    # Close regedit in case it is running so we can unload the hive
-    Stop-Process -Name "regedit" -Force -ErrorAction SilentlyContinue
-    reg.exe Unload HKEY_USERS\Default 2>&1 | Out-Null
+    $defaultHivePath = 'C:\Users\Default\NTUSER.DAT'
+    if (-not (Test-Path -LiteralPath $defaultHivePath)) {
+        Write-Log "Default user hive not found; step skipped"
+    } else {
+        $mountName = 'TMPC_Default_' + [Guid]::NewGuid().ToString('N')
+        $mounted = $false
+        $configured = $false
+        try {
+            reg.exe load ("HKEY_USERS\$mountName") $defaultHivePath 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'READ_DENIED' }
+            $mounted = $true
 
-    # Create marker to indicate this machine has been configured
-    reg.exe add $markerKey /v "DefaultUserConfigured" /t REG_SZ /d "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" /f 2>&1 | Out-Null
-    Write-Log "Default user configuration completed and marked"
+            $runKey = "Registry::HKEY_USERS\$mountName\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+            $runState = Get-RegistryEntryState -Path $runKey -Name 'OneDriveSetup'
+            if ($runState.ValueExists) {
+                $null = Remove-RegistryEntryIfPresent -Path $runKey -Name 'OneDriveSetup'
+                Write-Log "Removed the default user OneDriveSetup Run entry"
+            }
+
+            $thdfKey = "Registry::HKEY_USERS\$mountName\SOFTWARE\Microsoft\OneDrive"
+            $thdfState = Get-RegistryEntryState -Path $thdfKey -Name 'EnableTHDFFeatures'
+            if ($thdfState.ValueExists -and $thdfState.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $thdfState.Value -eq 0) {
+                $configured = $true
+                Write-Log "Default user OneDrive policy already compliant"
+            } else {
+                if (-not $thdfState.PathExists) { New-Item -Path $thdfKey -Force -ErrorAction Stop | Out-Null }
+                Set-ItemProperty -Path $thdfKey -Name 'EnableTHDFFeatures' -Type DWord -Value 0 -Force -ErrorAction Stop
+                $thdfAfter = Get-RegistryEntryState -Path $thdfKey -Name 'EnableTHDFFeatures'
+                if ($thdfAfter.ValueExists -and $thdfAfter.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $thdfAfter.Value -eq 0) {
+                    $configured = $true
+                    Write-Log "Default user OneDrive policy staged and verified"
+                } else {
+                    throw 'VERIFY_FAILED'
+                }
+            }
+        } catch {
+            Write-Log "Default user configuration failed: $(Get-RegistryErrorReason $_)"
+            $script:HadErrors = $true
+        } finally {
+            if ($mounted) {
+                [GC]::Collect()
+                [GC]::WaitForPendingFinalizers()
+                reg.exe unload ("HKEY_USERS\$mountName") 2>&1 | Out-Null
+            }
+        }
+
+        if ($configured) {
+            try {
+                if (-not (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Autounattend')) { New-Item -Path 'HKLM:\SOFTWARE\Autounattend' -Force -ErrorAction Stop | Out-Null }
+                if (-not (Test-Path -LiteralPath $markerKey)) { New-Item -Path $markerKey -Force -ErrorAction Stop | Out-Null }
+                Set-ItemProperty -Path $markerKey -Name 'DefaultUserConfigured' -Type String -Value (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Force -ErrorAction Stop
+                $markerAfter = Get-RegistryEntryState -Path $markerKey -Name 'DefaultUserConfigured'
+                if (-not $markerAfter.ValueExists) { throw 'VERIFY_FAILED' }
+                Write-Log "Default user configuration completed and marked"
+            } catch {
+                Write-Log "Default user configuration completed but the marker could not be written: $(Get-RegistryErrorReason $_)"
+                $script:HadErrors = $true
+            }
+        }
+    }
 }
 
 if ($script:HadErrors) {
@@ -2729,20 +2960,14 @@ namespace Autounattend
             if (-not (Test-Path $wallpaperPath)) {
                 Write-Log "Wallpaper file not found: $wallpaperPath" "WARNING"
             } else {
-                try {
-                    $desktopKey = 'HKCU:\Control Panel\Desktop'
-                    Set-ItemProperty -Path $desktopKey -Name Wallpaper -Value $wallpaperPath -Type String -Force -ErrorAction Stop
-                    Set-ItemProperty -Path $desktopKey -Name WallpaperStyle -Value '10' -Type String -Force -ErrorAction Stop
-                    Set-ItemProperty -Path $desktopKey -Name TileWallpaper -Value '0' -Type String -Force -ErrorAction Stop
-
-                    Remove-ItemProperty -Path $desktopKey -Name 'TranscodedImageCache' -ErrorAction SilentlyContinue
-                    Remove-ItemProperty -Path $desktopKey -Name 'TranscodedImageCache_000' -ErrorAction SilentlyContinue
-
-                    Write-Log "Wallpaper configured: $wallpaperPath" "SUCCESS"
-                } catch {
-                    $script:CustomizationHadErrors = $true
-                    Write-Log "Failed to set wallpaper: $($_.Exception.Message)" "ERROR"
-                }
+                $desktopKey = 'HKCU:\Control Panel\Desktop'
+                # Idempotent: values already matching the baseline are not rewritten,
+                # and removals treat an absent cache value as already compliant.
+                Set-RegistryValue -Path $desktopKey -Name 'Wallpaper' -Type 'String' -Value $wallpaperPath -Description 'Baseline dark wallpaper'
+                Set-RegistryValue -Path $desktopKey -Name 'WallpaperStyle' -Type 'String' -Value '10' -Description 'Fill wallpaper style'
+                Set-RegistryValue -Path $desktopKey -Name 'TileWallpaper' -Type 'String' -Value '0' -Description 'No tiled wallpaper'
+                Remove-RegistryValue -Path $desktopKey -Name 'TranscodedImageCache' -Description 'Clear the wallpaper transcoding cache'
+                Remove-RegistryValue -Path $desktopKey -Name 'TranscodedImageCache_000' -Description 'Clear the wallpaper transcoding cache'
             }
 
 

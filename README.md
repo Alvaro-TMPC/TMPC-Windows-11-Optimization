@@ -60,7 +60,8 @@ Windows features:
   folder is preserved;
 - Paint and Notepad stay installed with their AI features disabled by policy
   (Cocreator, Generative Fill, Image Creator and Notepad AI);
-- Do Not Disturb is configured to OFF;
+- Do Not Disturb is configured to OFF at apply time (Windows can turn it on
+  again through its own automatic rules; see Known limitations);
 - Game Mode is enabled; Game DVR and the Xbox Live companion services are
   disabled;
 - power plan is the standard Windows Balanced plan; hibernation and Fast Startup
@@ -128,19 +129,26 @@ A clean installation can destroy data irreversibly. Before you start:
 
 `autounattend.xml` remains the clean-install method. The self-contained
 [`Apply-TMPCOptimizations.ps1`](Apply-TMPCOptimizations.ps1), standalone version
-0.1.3, provides a post-install method **without formatting**, derived directly
-from the answer file (v0.1.5 plus the unreleased Start pins, cloud optimized
-content and All apps view candidates). It needs no other repository files,
-external dependencies or downloads.
+0.2.0, provides a post-install method **without formatting**, derived directly
+from the answer file (v0.1.5 plus the 26H2 candidate blocks: Start pins policy,
+cloud optimized content and All apps view). It needs no other repository files,
+external dependencies or downloads. Registry work is now idempotent and
+verified: every value is read first, written only when it differs and re-read to
+confirm the result, so an already compliant PC is not rewritten.
 
-**Reference: Windows 11 Pro 26H2 x64 / amd64.** The script accepts only Windows
-11 26H2 (build base 26300; the OS revision is not fixed) in native x64 Windows
-PowerShell 5.1. The published clean-install baseline (v0.1.5) has runtime
-evidence on the historical Windows 11 Pro 25H2 reference; the current standalone
-(including the unreleased Start pins, cloud optimized content and All apps view
-candidates) has only static validation and has **not** yet been tested on
-hardware or in a VM.
-Other versions/builds are untested and are rejected. This is not a claim of
+**Compatibility (TESTED_ON / SUPPORTED_BY_DESIGN / NOT_RUNTIME_TESTED).** The
+tested reference is Windows 11 Pro 26H2 (build base 26300; the OS revision is
+not fixed). By design it accepts Windows 11 client editions (build 22000 or
+later) in native AMD64 Windows PowerShell 5.1, from a real user account; Full
+mode requires an elevated console. Any other Windows 11 build inside that
+envelope is accepted and reported as `NOT_RUNTIME_TESTED`: per-operation guards
+apply, degradations are reported, an accumulated revision (UBR) update never
+forces a rejection and full compatibility is not claimed. Windows Server,
+Windows 10 or older families (`UNSUPPORTED`) and non-AMD64 or 32-bit hosts
+(`INCOMPATIBLE`) are rejected before any change. The published clean-install
+baseline (v0.1.5) has runtime evidence on the historical Windows 11 Pro 25H2
+reference; this standalone has static validation plus an isolated automated test
+suite and has **not** been tested on host hardware. This is not a claim of
 identical end state on an already customized PC.
 
 Before running it, make and verify a backup, **review the script**, save your
@@ -461,7 +469,7 @@ Hashes of the current documented baseline:
 
 ```text
 autounattend.xml
-5B0CBD45C392F379E70336E465926B869F964B439A10420C159AC42D5AF63B09
+D99BF0EC59A8CB322A84E99F36373FEDD6358350A0D053A02FEB24C11A608EA4
 
 ventoy.json
 058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B
@@ -485,7 +493,12 @@ back in, with Category and Grid still available),
 `CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED` and
 `STANDALONE_RUNTIME = NOT_TESTED`. The rest of the profile keeps the runtime
 evidence of the published v0.1.5 baseline, which was validated on the historical
-Windows 11 Pro 25H2 reference.
+Windows 11 Pro 25H2 reference. The current answer file also introduces the
+idempotent verified registry engine (read first, write only when a value
+differs, re-read to verify) and the hardened OneNote/OneDrive blocks (no
+arbitrary uninstall strings, no forced process termination, no ownership or ACL
+changes, no deferred deletions). An isolated test suite (`scripts/tests`)
+exercises the engine and the hardening against in-memory doubles.
 
 Verify them on your copy:
 
@@ -499,16 +512,29 @@ review the files before using them.
 ## Known limitations
 
 - The published v0.1.5 baseline was validated specifically on Windows 11 Pro
-  25H2 (historical reference). The current reference is Windows 11 Pro 26H2
-  (build base 26300): the integrated answer file still lacks a clean-install
-  revalidation of the latest changes and the standalone has no runtime test.
-  Compatibility with other versions, editions or builds is not tested; future
-  builds may require revalidation.
+  25H2 (historical reference); the current reference is Windows 11 Pro 26H2
+  (build base 26300). The integrated answer file still lacks a clean-install
+  revalidation of the latest changes and the standalone has no host runtime
+  test (static validation plus the isolated test suite only). Other Windows 11
+  client builds inside the supported envelope are accepted as
+  `NOT_RUNTIME_TESTED` and may require revalidation.
 - No hardware-specific drivers are included. Prepare chipset, network, audio
   and GPU drivers yourself.
 - No third-party software is installed by the profile.
 - `IQuietHoursSettings`, used to switch Do Not Disturb off, is an internal,
   undocumented COM interface; it may change in future Windows builds.
+- Do Not Disturb is left OFF as a checked state at apply time, not as a
+  permanent guarantee. Windows 11 can turn Do Not Disturb on again through
+  automatic activation (rules available in Settings > System > Notifications:
+  during certain times of the day, when duplicating the display, when playing
+  a game, when using an app in full-screen mode and for the first hour after a
+  Windows feature update; a Focus session also turns it on automatically).
+  TMPC does not modify, disable or override those Windows rules, so a
+  reactivation of Do Not Disturb does not by itself indicate a TMPC failure.
+  The exact cause observed on a real PC is not demonstrated. For the current
+  conditions and defaults, see Microsoft Support: "Notifications and Do Not
+  Disturb in Windows"
+  (https://support.microsoft.com/en-us/windows/experience/notifications-and-do-not-disturb-in-windows).
 - The per-user override for the Downloads folder view depends on the current
   Windows behavior and is not a public API; a major update may remove it and
   the one-time task does not re-apply it automatically. Before copying the
@@ -573,6 +599,9 @@ docs/
   post-installation-checks.md
 scripts/
   validate-baseline.ps1
+  tests/
+    TMPC.Tests.Helpers.ps1
+    Invoke-TMPCTests.ps1
 ```
 
 Main files:
@@ -585,6 +614,8 @@ Main files:
 - `THIRD_PARTY_NOTICES.md`: copyright and license notices for third-party
   portions.
 - `scripts/validate-baseline.ps1`: local, read-only static validator.
+- `scripts/tests/`: isolated automated tests driven by in-memory doubles; they
+  never touch the host registry, filesystem or processes.
 
 ## Local static validation
 
@@ -597,8 +628,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\validate-basel
 It checks the repository structure, the XML well-formedness and architecture,
 the syntax of the embedded PowerShell, `ventoy.json`, documented hashes, line
 endings and documentation links. It also parses the standalone and checks its
-source binding, profile inventories and critical static guards. It never
-executes either optimizer and does not replace a controlled runtime test.
+source binding, profile inventories, idempotent registry engine, layered
+compatibility preflight and critical static guards. It never executes either
+optimizer and does not replace a controlled runtime test.
+
+The isolated automated tests run the same logic against in-memory doubles and
+never touch the host registry, filesystem or processes:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\tests\Invoke-TMPCTests.ps1
+```
 
 ## Technical documentation
 
@@ -624,9 +663,9 @@ README is self-sufficient.
   in [memstechtips/UnattendedWinstall](https://github.com/memstechtips/UnattendedWinstall)
   (reference revision `cca752363772a845eb0fed9d3a5b89b5d0a10d20`, MIT License,
   Copyright (c) 2025 Marco du Plessis). This includes `BloatRemoval.ps1`
-  (version 2.3), `OneDriveRemoval.ps1` (version 1.2) and related
-  helper/automation logic. The local profile has been modified and extended for
-  this project.
+  (version 2.3), `OneDriveRemoval.ps1` (version 1.2, locally hardened on the
+  TMPC profile) and related helper/automation logic. The local profile has been
+  modified and extended for this project.
 - The answer file keeps the historical attribution
   <https://github.com/memstechtips/Autounattend> present in those scripts; the
   canonical upstream reference used for licensing and traceability of this

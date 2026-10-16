@@ -138,9 +138,43 @@ On the real repository files:
 SHA-256 hashes of the current baseline:
 
 - `autounattend.xml`:
-  `5B0CBD45C392F379E70336E465926B869F964B439A10420C159AC42D5AF63B09`.
+  `D99BF0EC59A8CB322A84E99F36373FEDD6358350A0D053A02FEB24C11A608EA4`.
 - `ventoy.json`:
   `058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B`.
+
+Current baseline: idempotent, verified registry engine in both the XML and the
+standalone (read -> compare type and value exactly -> write only when it
+differs -> re-read and verify), with distinguishable states
+(`ALREADY_COMPLIANT`, `APPLIED`, `READ_DENIED`, `WRITE_DENIED`,
+`VERIFY_FAILED`, `SKIPPED_NOT_APPLICABLE`) and separate counters for applied,
+already compliant and skipped operations. Removals treat an absent key or value
+as already compliant and verify the result; a denied read is never interpreted
+as absence. The embedded OneNote and OneDrive blocks are hardened (no arbitrary
+uninstall string execution, no forced process termination, no
+`takeown`/`icacls`, no deletion-on-reboot entries, strict allowlist and
+reparse-point rejection for OneDrive remnants). The isolated suite
+`scripts/tests` (in-memory doubles; it never touches the host registry,
+filesystem or processes) covers the engine, the preflight, the exit codes and
+the safety rejections.
+
+### Supported compatibility and classification
+
+Documentary categories of the compatibility contract:
+
+- `TESTED_ON`: Windows 11 Pro 26H2, build base 26300, x64 (the UBR revision is
+  not fixed).
+- `SUPPORTED_BY_DESIGN`: Windows 11 client (build >= 22000), native AMD64,
+  Windows PowerShell 5.1 Desktop, 64-bit process, real user account; Full
+  requires an elevated console and UserOnly keeps its no-elevation contract.
+- `NOT_RUNTIME_TESTED`: any other Windows 11 build inside that envelope; it is
+  accepted, per-operation guards apply, degradations are reported and full
+  compatibility is not claimed; a UBR update never forces a rejection.
+- `UNSUPPORTED`: Windows 10 or older families and Server editions.
+- `INCOMPATIBLE`: non-AMD64 hosts, 32-bit or non-Desktop PowerShell.
+
+The admitted system is kept separate from what has actually been verified: the
+only runtime reference tested for the standalone is 26H2; the historical
+published v0.1.5 baseline corresponds to Windows 11 Pro 25H2.
 
 ### Error handling in the SYSTEM phase (specialize)
 
@@ -424,6 +458,16 @@ guarantee compatibility with other Windows versions, editions or builds.
   revalidation on the current Windows 11 26H2 reference is pending. The main
   path uses the internal, undocumented `IQuietHoursSettings` interface, which
   may change in future builds and must be revalidated.
+- Do Not Disturb is switched off only at apply time; it is not a permanent
+  guarantee. Windows 11 can turn it on again through automatic activation
+  (Settings > System > Notifications: during certain times of the day, when
+  duplicating the display, when playing a game, when using an app in
+  full-screen mode and for the first hour after a Windows feature update; a
+  Focus session also turns it on automatically). TMPC neither configures nor
+  disables those user or system rules, so a later reactivation does not by
+  itself indicate a TMPC failure. The exact cause observed on a real PC remains
+  unconfirmed. Current conditions and defaults: Microsoft Support,
+  https://support.microsoft.com/en-us/windows/experience/notifications-and-do-not-disturb-in-windows.
 - The per-user override of the Downloads FolderType is not a public Microsoft
   API; a major update may remove `HKCU\...\FolderTypes` and revert the default
   grouping. Before copying the folder type, the profile verifies the installed

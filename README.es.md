@@ -65,7 +65,9 @@ Funciones de Windows:
 - Paint y Notepad se mantienen instalados con sus funciones de IA desactivadas
   por política (Cocreator, Generative Fill, Image Creator y funciones de IA de
   Notepad);
-- "No molestar" se configura desactivado;
+- "No molestar" se configura desactivado en el momento de aplicar el perfil
+  (Windows puede volver a activarlo con sus propias reglas automáticas;
+  consulta Limitaciones conocidas);
 - Game Mode se activa; Game DVR y los servicios complementarios de Xbox Live
   se desactivan;
 - el plan de energía es el plan Balanced estándar de Windows; hibernación y
@@ -142,21 +144,29 @@ empezar:
 
 `autounattend.xml` sigue siendo la vía para instalación limpia. El archivo
 autocontenido [`Apply-TMPCOptimizations.ps1`](Apply-TMPCOptimizations.ps1),
-versión standalone 0.1.3, ofrece una vía post-install **sin formatear**, derivada
-directamente del archivo de respuestas (v0.1.5 más los candidatos no publicados
-de la política de pins de Inicio, el contenido optimizado en la nube y la vista
-de Todas las aplicaciones). No necesita otros archivos del repositorio,
-dependencias externas ni descargas.
+versión standalone 0.2.0, ofrece una vía post-install **sin formatear**, derivada
+directamente del archivo de respuestas (v0.1.5 más los bloques candidatos 26H2:
+política de pins de Inicio, contenido optimizado en la nube y vista de Todas las
+aplicaciones). No necesita otros archivos del repositorio, dependencias externas
+ni descargas. El trabajo de Registro es ahora idempotente y verificado: cada
+valor se lee primero, solo se escribe si difiere y se vuelve a leer para
+confirmar el resultado, de modo que un PC ya conforme no se reescribe.
 
-**Referencia: Windows 11 Pro 26H2 x64 / amd64.** El script solo acepta Windows
-11 26H2 (build base 26300; la revisión del sistema no está fijada) en Windows
-PowerShell 5.1 x64 nativo. El baseline publicado de instalación limpia (v0.1.5)
-tiene evidencia runtime en la referencia histórica Windows 11 Pro 25H2; el
-standalone actual (incluidos los candidatos no publicados de la política de pins
-de Inicio, el contenido optimizado en la nube y la vista de Todas las
-aplicaciones) solo tiene validación estática y **no** se ha probado todavía en
-hardware ni en una VM. Otras versiones/builds no están probadas y se rechazan.
-No se afirma un estado final idéntico en un PC que ya tiene personalizaciones.
+**Compatibilidad (TESTED_ON / SUPPORTED_BY_DESIGN / NOT_RUNTIME_TESTED).** La
+referencia probada es Windows 11 Pro 26H2 (build base 26300; la revisión del
+sistema no está fijada). Por diseño acepta ediciones cliente de Windows 11
+(build 22000 o posterior) en Windows PowerShell 5.1 AMD64 nativo, desde una
+cuenta de usuario real; el modo completo requiere consola elevada. Cualquier
+otra build de Windows 11 dentro de ese marco se acepta y se registra como
+`NOT_RUNTIME_TESTED`: aplican las guardas por operación, las degradaciones se
+informan, una actualización acumulativa (UBR) nunca fuerza un rechazo y no se
+afirma compatibilidad completa. Windows Server, Windows 10 o familias anteriores
+(`UNSUPPORTED`) y hosts no AMD64 o de 32 bits (`INCOMPATIBLE`) se rechazan antes
+de cualquier cambio. El baseline publicado de instalación limpia (v0.1.5) tiene
+evidencia runtime en la referencia histórica Windows 11 Pro 25H2; este
+standalone tiene validación estática más una suite de pruebas automatizadas
+aislada y **no** se ha probado en hardware anfitrión. No se afirma un estado
+final idéntico en un PC que ya tiene personalizaciones.
 
 Antes de ejecutarlo, haz y verifica un backup, **revisa el script**, guarda tu
 trabajo y cierra las aplicaciones afectadas por el debloat. Sal de OneDrive
@@ -505,7 +515,7 @@ Hashes del baseline documentado actual:
 
 ```text
 autounattend.xml
-5B0CBD45C392F379E70336E465926B869F964B439A10420C159AC42D5AF63B09
+D99BF0EC59A8CB322A84E99F36373FEDD6358350A0D053A02FEB24C11A608EA4
 
 ventoy.json
 058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B
@@ -532,7 +542,13 @@ Categoría y Cuadrícula todavía disponibles),
 `CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED` y
 `STANDALONE_RUNTIME = NOT_TESTED`. El resto del perfil conserva la evidencia
 runtime del baseline publicado v0.1.5, que se validó en la referencia histórica
-Windows 11 Pro 25H2.
+Windows 11 Pro 25H2. El archivo de respuestas actual incorpora además el motor
+de Registro idempotente y verificado (leer primero, escribir solo si un valor
+difiere, releer para verificar) y los bloques endurecidos de OneNote/OneDrive
+(sin cadenas de desinstalación arbitrarias, sin terminación forzada de procesos,
+sin cambios de propiedad o ACL y sin borrados diferidos). Una suite de pruebas
+aislada (`scripts/tests`) ejercita el motor y el endurecimiento con dobles en
+memoria.
 
 Verifícalos en tu copia:
 
@@ -546,16 +562,30 @@ revisa los archivos antes de usarlos.
 ## Limitaciones conocidas
 
 - El baseline publicado v0.1.5 se validó específicamente en Windows 11 Pro 25H2
-  (referencia histórica). La referencia actual es Windows 11 Pro 26H2 (build
-  base 26300): el archivo de respuestas integrado todavía no tiene una
+  (referencia histórica); la referencia actual es Windows 11 Pro 26H2 (build
+  base 26300). El archivo de respuestas integrado todavía no tiene una
   revalidación en instalación limpia de los últimos cambios y el standalone no
-  tiene prueba runtime. La compatibilidad con otras versiones, ediciones o
-  builds no está probada; builds futuras pueden requerir revalidación.
+  tiene prueba runtime en anfitrión (solo validación estática más la suite de
+  pruebas aislada). Otras builds de Windows 11 cliente dentro del marco admitido
+  se aceptan como `NOT_RUNTIME_TESTED` y pueden requerir revalidación.
 - No se incluyen drivers específicos del hardware. Prepara tú mismo los
   drivers de chipset, red, audio y GPU.
 - El perfil no instala software de terceros.
 - `IQuietHoursSettings`, usada para desactivar "No molestar", es una interfaz
   COM interna no documentada; puede cambiar en futuras builds de Windows.
+- "No molestar" queda desactivado como estado comprobado en el momento de
+  aplicar el perfil, no como garantía permanente. Windows 11 puede volver a
+  activarlo mediante su activación automática (reglas disponibles en
+  Configuración > Sistema > Notificaciones: determinados horarios, duplicación
+  de pantalla, durante juegos, aplicaciones a pantalla completa y la primera
+  hora posterior a una actualización de características de Windows; una sesión
+  de concentración también lo activa automáticamente). TMPC no modifica,
+  desactiva ni sobrescribe esas reglas de Windows, por lo que una reactivación
+  de "No molestar" no demuestra por sí sola un fallo de TMPC. La causa concreta
+  observada en un PC real no está demostrada. Para las condiciones y valores
+  actuales, consulta el soporte oficial de Microsoft: "Notifications and Do Not
+  Disturb in Windows"
+  (https://support.microsoft.com/en-us/windows/experience/notifications-and-do-not-disturb-in-windows).
 - El override por usuario de la vista de la carpeta Downloads depende del
   comportamiento actual de Windows y no es una API pública; una actualización
   mayor puede eliminarlo y la tarea de un solo uso no lo reaplica
@@ -624,6 +654,9 @@ docs/
   post-installation-checks.md
 scripts/
   validate-baseline.ps1
+  tests/
+    TMPC.Tests.Helpers.ps1
+    Invoke-TMPCTests.ps1
 ```
 
 Archivos principales:
@@ -638,6 +671,8 @@ Archivos principales:
 - `THIRD_PARTY_NOTICES.md`: avisos de copyright y licencia de los componentes
   de terceros.
 - `scripts/validate-baseline.ps1`: validador estático local de solo lectura.
+- `scripts/tests/`: pruebas automatizadas aisladas con dobles en memoria; nunca
+  tocan el Registro, el sistema de archivos ni los procesos del anfitrión.
 
 ## Validación estática local
 
@@ -650,9 +685,18 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\validate-basel
 Comprueba la estructura del repositorio, que el XML esté bien formado y su
 arquitectura, la sintaxis del PowerShell embebido, `ventoy.json`, los hashes
 documentados, los finales de línea y los enlaces de la documentación. También
-parsea el standalone y comprueba su vínculo fuente, inventarios del perfil y
+parsea el standalone y comprueba su vínculo fuente, inventarios del perfil,
+motor de Registro idempotente, preflight de compatibilidad por capas y
 protecciones estáticas críticas. Nunca ejecuta ninguno de los optimizadores ni
 sustituye una prueba runtime controlada.
+
+Las pruebas automatizadas aisladas ejecutan la misma lógica con dobles en
+memoria y nunca tocan el Registro, el sistema de archivos ni los procesos del
+anfitrión:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\tests\Invoke-TMPCTests.ps1
+```
 
 ## Documentación técnica
 
@@ -678,9 +722,9 @@ documentos; este README es autosuficiente.
   [memstechtips/UnattendedWinstall](https://github.com/memstechtips/UnattendedWinstall)
   (revisión de referencia `cca752363772a845eb0fed9d3a5b89b5d0a10d20`, licencia
   MIT, Copyright (c) 2025 Marco du Plessis). Esto incluye `BloatRemoval.ps1`
-  (versión 2.3), `OneDriveRemoval.ps1` (versión 1.2) y lógica
-  auxiliar/automatización relacionada. El perfil local ha sido modificado y
-  ampliado para este proyecto.
+  (versión 2.3), `OneDriveRemoval.ps1` (versión 1.2, endurecido localmente en el
+  perfil TMPC) y lógica auxiliar/automatización relacionada. El perfil local ha
+  sido modificado y ampliado para este proyecto.
 - El archivo de respuestas conserva la atribución histórica
   <https://github.com/memstechtips/Autounattend> presente en esos scripts; la
   referencia canónica usada para licencias y trazabilidad de esta release es

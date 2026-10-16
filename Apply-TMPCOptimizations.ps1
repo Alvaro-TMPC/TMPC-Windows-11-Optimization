@@ -16,14 +16,27 @@
 .PARAMETER NetFx3Source
     Optional local sources\sxs directory from matching Windows media. No download.
 .NOTES
-    Standalone version: 0.1.3. Source profile: v0.1.5 plus the unreleased Start pins, cloud content policy and All apps view candidates.
-    Supported reference: Windows 11 Pro 26H2 (build base 26300), x64. The OS revision (UBR)
-    is not fixed. The published v0.1.5 clean-install baseline was validated on Windows 11
-    Pro 25H2 x64 (historical reference).
-    This standalone has STATIC validation only; NO_RUNTIME_VALIDATION.
-    Restricted to Windows 11 26H2 (build base 26300), native AMD64 PowerShell 5.1.
+    Standalone version: 0.2.0. Source profile: v0.1.5 plus the 26H2 candidate blocks
+    (Start pins policy, cloud content policy and All apps view), now with an idempotent,
+    verified registry engine: every inventory entry is read first, written only when it
+    differs and re-read to verify the result. Per-operation states: ALREADY_COMPLIANT,
+    APPLIED, READ_DENIED, WRITE_DENIED, WRITE_FAILED, VERIFY_FAILED,
+    CONFLICTING_STATE and SKIPPED_NOT_APPLICABLE.
+    Compatibility classification (documented in README and docs EN/ES):
+      TESTED_ON: Windows 11 Pro 26H2, build base 26300, x64 (UBR not fixed).
+      SUPPORTED_BY_DESIGN: Windows 11 client (build >= 22000), native AMD64, Windows
+      PowerShell 5.1 Desktop, 64-bit process, real user account; Full mode also requires
+      an elevated console. UserOnly keeps its no-elevation contract.
+      NOT_RUNTIME_TESTED: any other Windows 11 build inside that envelope. It is
+      accepted; per-operation guards apply, degradations are reported and full
+      compatibility is not claimed. An accumulated UBR update never forces a rejection.
+      UNSUPPORTED: Windows 10 or older families and Windows Server editions.
+      INCOMPATIBLE: non-AMD64 hosts, 32-bit or non-Desktop PowerShell.
+    The published v0.1.5 clean-install baseline was validated on Windows 11 Pro 25H2 x64
+    (historical reference). This standalone has static validation plus an isolated,
+    registry-free automated test suite (scripts/tests); it has no host runtime validation.
     Project: https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization
-    SOURCE_AUTOUNATTEND_SHA256 = 5B0CBD45C392F379E70336E465926B869F964B439A10420C159AC42D5AF63B09
+    SOURCE_AUTOUNATTEND_SHA256 = D99BF0EC59A8CB322A84E99F36373FEDD6358350A0D053A02FEB24C11A608EA4
     validate-baseline.ps1 checks this binding AND the registry/removal inventories.
     Derived from autounattend.xml, including material based on
     memstechtips/UnattendedWinstall, revision cca752363772a845eb0fed9d3a5b89b5d0a10d20.
@@ -96,6 +109,15 @@
     Exit codes: 0 completed (warnings may describe limitations); 1 operation/log
     failure; 2 preflight failure; 3 system phase finished but UserOnly still needed.
     Restart required/recommended is reported separately, not encoded as success.
+    Operations already compliant are counted separately and are never failures or
+    completed writes; skipped operations are reported as not applicable.
+    TEST SEAM: the functions that probe the OS (Get-TMPCSystemInfo), the registry
+    (Get-TMPCRegistryEntryState, Write-TMPCRegistryEntry, Remove-TMPCRegistryEntry),
+    the filesystem (Get-TMPCPathItem), Authenticode (Get-TMPCSignature) and the final
+    verified uninstaller execution (Start-TMPCVerifiedUninstaller) are the only
+    system I/O entry points for the corresponding operations. The automated test
+    suite replaces them with in-memory doubles so no host registry key, file or
+    process is touched. Keep these signatures stable.
 #>
 [CmdletBinding()]
 param(
@@ -106,6 +128,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $script:Completed = 0
+$script:Compliant = 0
+$script:Skipped = 0
 $script:Warnings = 0
 $script:Errors = 0
 $script:RestartNeeded = $false
@@ -114,9 +138,11 @@ $script:LogPath = $null
 $script:Mode = if ($UserOnly) { 'UserOnly' } else { 'Full' }
 
 function Write-Log {
-    param([string]$Message, [ValidateSet('INFO','SUCCESS','WARNING','ERROR')][string]$Level = 'INFO')
+    param([string]$Message, [ValidateSet('INFO','SUCCESS','COMPLIANT','SKIPPED','WARNING','ERROR')][string]$Level = 'INFO')
     switch ($Level) {
         'SUCCESS' { $script:Completed++ }
+        'COMPLIANT' { $script:Compliant++ }
+        'SKIPPED' { $script:Skipped++ }
         'WARNING' { $script:Warnings++ }
         'ERROR' { $script:Errors++ }
     }
@@ -130,13 +156,32 @@ function Write-Log {
 }
 
 function Invoke-Operation {
-    param([string]$Name, [scriptblock]$Action)
+    # Result protocol (data returned by the action, never free text):
+    #   $null or 'APPLIED'       -> SUCCESS (counts as an applied operation)
+    #   'ALREADY_COMPLIANT'      -> COMPLIANT (no write was needed)
+    #   'SKIPPED_NOT_APPLICABLE' -> SKIPPED (intentionally omitted in this context)
+    # Throwing maps to ERROR. The state-name exceptions ('READ_DENIED',
+    # 'WRITE_DENIED', 'WRITE_FAILED', 'VERIFY_FAILED', 'CONFLICTING_STATE') are
+    # logged as-is; any other exception is reduced to its type and HRESULT so no
+    # raw user-controlled path/registry text is written to the log.
+    # The parameter is deliberately NOT named $Name: scriptblocks invoked here
+    # resolve their free variables through this function's scope, and an inner
+    # $name (registry value names) must not collide with it.
+    param([string]$Operation, [scriptblock]$Action)
     try {
-        & $Action | Out-Null
-        Write-Log $Name 'SUCCESS'
+        $state = & $Action
+        switch ([string]$state) {
+            'ALREADY_COMPLIANT' { Write-Log ("{0}: ALREADY_COMPLIANT; no write performed." -f $Operation) 'COMPLIANT' }
+            'SKIPPED_NOT_APPLICABLE' { Write-Log ("{0}: SKIPPED_NOT_APPLICABLE." -f $Operation) 'SKIPPED' }
+            default { Write-Log ("{0}: APPLIED." -f $Operation) 'SUCCESS' }
+        }
     } catch {
-        # Avoid logging raw exception messages from user-controlled paths/registry.
-        Write-Log ("{0} failed ({1}, HRESULT 0x{2:X8}); inspect this operation locally." -f $Name, $_.Exception.GetType().Name, $_.Exception.HResult) 'ERROR'
+        $reason = $_.Exception.Message
+        if ($reason -notin @('READ_DENIED','WRITE_DENIED','WRITE_FAILED','VERIFY_FAILED','CONFLICTING_STATE')) {
+            # Avoid logging raw exception messages from user-controlled paths/registry.
+            $reason = '{0}, HRESULT 0x{1:X8}' -f $_.Exception.GetType().Name, $_.Exception.HResult
+        }
+        Write-Log ("{0} failed ({1}); inspect this operation locally." -f $Operation, $reason) 'ERROR'
     }
 }
 
@@ -162,6 +207,182 @@ function Test-CurrentDesktopIdentity {
         }
         return $true
     } catch { return $false }
+}
+
+# ---------------------------------------------------------------------------
+# Registry I/O TEST SEAM and state comparison.
+#
+# Get-TMPCRegistryEntryState, Write-TMPCRegistryEntry and Remove-TMPCRegistryEntry
+# are the ONLY registry I/O primitives used by Invoke-RegistryProfile and the
+# user binary preferences. The isolated test suite replaces them with an
+# in-memory double; production behavior lives here and nowhere else. A failed
+# read throws and is classified as READ_DENIED by the callers: absence is never
+# assumed after a read error and nothing is written blindly. A missing key is
+# detected through ItemNotFoundException only.
+# ---------------------------------------------------------------------------
+function Get-TMPCRegistryEntryState {
+    # Returns PathExists, ValueExists, Kind and Value for an exact probe.
+    param([string]$Path, [string]$Name)
+    $pathExists = $false
+    $valueExists = $false
+    $kind = $null
+    $value = $null
+    try {
+        $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        $key = $null
+    } catch [System.Management.Automation.DriveNotFoundException] {
+        $key = $null
+    }
+    if ($key) {
+        $pathExists = $true
+        try {
+            if ($Name) {
+                $valueExists = @($key.GetValueNames()) -contains $Name
+                if ($valueExists) {
+                    $kind = $key.GetValueKind($Name)
+                    $value = $key.GetValue($Name)
+                }
+            }
+        } finally { $key.Close() }
+    }
+    [pscustomobject]@{ PathExists = $pathExists; ValueExists = $valueExists; Kind = $kind; Value = $value }
+}
+
+function Write-TMPCRegistryEntry {
+    param([string]$Path, [string]$Name, [string]$Type, $Value, [bool]$PathExists)
+    if (-not $PathExists) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
+    Set-ItemProperty -LiteralPath $Path -Name $Name -Type $Type -Value $Value -Force -ErrorAction Stop
+}
+
+function Remove-TMPCRegistryEntry {
+    # Empty Name removes the key subtree; otherwise only the named value.
+    param([string]$Path, [string]$Name)
+    if ($Name) { Remove-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop }
+    else { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop }
+}
+
+function Test-TMPCRegistryStateEqual {
+    # Exact comparison between a live registry state and an expected inventory
+    # entry: value kind first, then DWord/values, ordinal strings and byte-exact
+    # binaries. No implicit conversion or case folding.
+    param([string]$Type, $Expected, $Kind, $Value)
+    $expectedKind = switch ($Type) {
+        'DWord' { [Microsoft.Win32.RegistryValueKind]::DWord }
+        'String' { [Microsoft.Win32.RegistryValueKind]::String }
+        'ExpandString' { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+        'Binary' { [Microsoft.Win32.RegistryValueKind]::Binary }
+        default { throw 'Unsupported registry type.' }
+    }
+    if ($Kind -ne $expectedKind) { return $false }
+    if ($Type -eq 'Binary') {
+        if ($null -eq $Value -or $Value -isnot [byte[]]) { return $false }
+        if ($Value.Length -ne $Expected.Length) { return $false }
+        for ($i = 0; $i -lt $Expected.Length; $i++) { if ($Value[$i] -ne $Expected[$i]) { return $false } }
+        return $true
+    }
+    if ($Type -eq 'DWord') { return ([int]$Value -eq [int]$Expected) }
+    return [string]::Equals([string]$Value, [string]$Expected, [StringComparison]::Ordinal)
+}
+
+# ---------------------------------------------------------------------------
+# Compatibility preflight: layered acceptance with explicit classification.
+# It reads OS/registry state only, never writes and never uses test writes.
+# TEST SEAM: Get-TMPCSystemInfo is the single environment probe; the isolated
+# test suite replaces it with in-memory descriptors.
+# ---------------------------------------------------------------------------
+function Get-TMPCSystemInfo {
+    $os = Get-CimInstance Win32_OperatingSystem
+    $version = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    $machineEnvironment = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name 'PROCESSOR_ARCHITECTURE'
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    [pscustomobject]@{
+        PSEdition       = [string]$PSVersionTable.PSEdition
+        PSVersionMajor  = [int]$PSVersionTable.PSVersion.Major
+        PSVersion       = '{0} ({1})' -f $PSVersionTable.PSVersion.ToString(), $PSVersionTable.PSEdition
+        Is64BitProcess  = [bool][Environment]::Is64BitProcess
+        ProcessArch     = [string]$env:PROCESSOR_ARCHITECTURE
+        MachineArch     = [string]$machineEnvironment.PROCESSOR_ARCHITECTURE
+        ProductType     = [int]$os.ProductType
+        Build           = [int]$os.BuildNumber
+        Ubr             = [int]$version.UBR
+        DisplayVersion  = [string]$version.DisplayVersion
+        EditionId       = [string]$version.EditionID
+        ProductName     = [string]$version.ProductName
+        IsAdministrator = [bool]([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        IdentitySid     = [string]$identity.User.Value
+        DesktopVerified = [bool](Test-CurrentDesktopIdentity)
+    }
+}
+
+function Get-TMPCPreflightResult {
+    # Hard boundaries fail closed (UNSUPPORTED / INCOMPATIBLE). Inside the
+    # supported envelope, untested builds are accepted and reported as
+    # NOT_RUNTIME_TESTED; per-operation guards keep the risky work safe.
+    param([switch]$UserOnly, [switch]$Restart, [string]$NetFx3Source)
+    $info = Get-TMPCSystemInfo
+    $result = [pscustomobject]@{
+        Ok              = $false
+        Message         = ''
+        CanApplyUser    = $false
+        TestedReference = $false
+        Summary         = ''
+        UntestedNote    = ''
+    }
+    if ($info.PSEdition -ne 'Desktop' -or $info.PSVersionMajor -ne 5) {
+        $result.Message = 'Use native Windows PowerShell 5.1 (Desktop edition); PowerShell 7 and other editions are not supported.'
+        return $result
+    }
+    if (-not $info.Is64BitProcess -or $info.ProcessArch -ne 'AMD64' -or $info.MachineArch -ne 'AMD64') {
+        $result.Message = 'Use 64-bit Windows PowerShell on native AMD64 Windows; 32-bit and non-AMD64 hosts are not supported.'
+        return $result
+    }
+    if ($info.ProductType -ne 1) {
+        $result.Message = 'Windows client editions are supported; Windows Server is not.'
+        return $result
+    }
+    if ($info.Build -lt 22000) {
+        $result.Message = 'Windows 11 is required; older Windows families are not supported.'
+        return $result
+    }
+    if ($info.IdentitySid -in @('S-1-5-18','S-1-5-19','S-1-5-20')) {
+        $result.Message = 'Run from a real user account, not a service account.'
+        return $result
+    }
+    if ($UserOnly -and ($Restart -or $NetFx3Source)) {
+        $result.Message = 'UserOnly does not accept Restart or NetFx3Source.'
+        return $result
+    }
+    if (-not $UserOnly -and -not $info.IsAdministrator) {
+        $result.Message = 'Full mode requires Windows PowerShell opened with Run as administrator. UserOnly needs no elevation.'
+        return $result
+    }
+    $result.Ok = $true
+    $result.CanApplyUser = ($UserOnly.IsPresent -or $info.DesktopVerified)
+    $result.TestedReference = ($info.DisplayVersion -eq '26H2' -and $info.Build -ge 26300 -and $info.Build -lt 26400)
+    $compatibility = if ($result.TestedReference) {
+        'TESTED_ON (Windows 11 26H2, build base 26300)'
+    } else {
+        'NOT_RUNTIME_TESTED; per-operation guards apply and full compatibility is not claimed'
+    }
+    $result.Summary = 'Platform: {0} | edition {1} | DisplayVersion {2} | build {3}.{4} | arch {5} (process {6}) | PowerShell {7} | mode {8} | elevated {9} | compatibility: {10}' -f `
+        $info.ProductName, $info.EditionId, $info.DisplayVersion, $info.Build, $info.Ubr, $info.MachineArch, $info.ProcessArch, $info.PSVersion, $script:Mode, $info.IsAdministrator, $compatibility
+    if (-not $result.TestedReference) {
+        $result.UntestedNote = 'COMPATIBILITY: this Windows build is NOT_RUNTIME_TESTED for this profile; degradations are reported per operation and full compatibility is not claimed.'
+    }
+    return $result
+}
+
+function Get-TMPCExitCode {
+    param([int]$Errors, [bool]$UserDeferred)
+    if ($Errors -gt 0) { return 1 }
+    if ($UserDeferred) { return 3 }
+    return 0
+}
+
+function Test-TMPCRestartRequested {
+    param([bool]$RestartRequested, [int]$ExitCode)
+    return ($RestartRequested -and $ExitCode -eq 0)
 }
 
 # Registry inventory format: [absolute provider path], then Name|Type|Value.
@@ -557,6 +778,13 @@ EnableTransparency|DWord|0
 }
 
 function Invoke-RegistryProfile {
+    # Idempotent, verified contract per inventory entry:
+    #   1. read the live state through the registry seam (READ_DENIED stops it);
+    #   2. compare kind and value exactly; a compliant entry is not written;
+    #   3. write only when needed, through the seam;
+    #   4. re-read and verify the final state (VERIFY_FAILED otherwise).
+    # Removals treat an absent key or an absent value as ALREADY_COMPLIANT and
+    # verify the result after any deletion. A refused write is a real ERROR.
     param([string]$Text, [ValidateSet('HKLM:','HKCU:')][string]$Hive)
     $path = $null
     foreach ($line in ($Text -split '\r?\n')) {
@@ -567,35 +795,83 @@ function Invoke-RegistryProfile {
             continue
         }
         if (-not $path) { throw 'Missing inventory path.' }
-        Invoke-Operation "$path | $line" {
-            if ($line -eq '!KEY') {
-                if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
-            } elseif ($line.StartsWith('!')) {
-                $name = $line.Substring(1)
-                if (Test-Path -LiteralPath $path) {
-                    $key = Get-Item -LiteralPath $path
-                    try { $present = $key.GetValueNames() -contains $name } finally { $key.Close() }
-                    if ($present) { Remove-ItemProperty -LiteralPath $path -Name $name }
-                }
-            } else {
-                $parts = $line -split '\|', 3
-                if ($parts.Count -ne 3) { throw 'Invalid registry inventory.' }
-                $value = $parts[2]
-                switch ($parts[1]) {
-                    'DWord' { $value = [int]$value }
-                    'Binary' { $value = [byte[]]@($value.Split(',') | ForEach-Object { [Convert]::ToByte($_,16) }) }
-                    'String' { }
-                    default { throw 'Unsupported registry type.' }
-                }
-                if (-not (Test-Path -LiteralPath $path)) { New-Item -Path $path -Force | Out-Null }
-                Set-ItemProperty -LiteralPath $path -Name $parts[0] -Type $parts[1] -Value $value -Force
+        if ($line -eq '!KEY') {
+            Invoke-Operation "$path | !KEY" {
+                $state = $null
+                try { $state = Get-TMPCRegistryEntryState -Path $path -Name $null }
+                catch { throw 'READ_DENIED' }
+                if (-not $state.PathExists) { return 'ALREADY_COMPLIANT' }
+                try { Remove-TMPCRegistryEntry -Path $path -Name '' }
+                catch { throw 'WRITE_DENIED' }
+                try { $after = Get-TMPCRegistryEntryState -Path $path -Name $null }
+                catch { throw 'VERIFY_FAILED' }
+                if ($after.PathExists) { throw 'VERIFY_FAILED' }
+                return 'APPLIED'
             }
+            continue
+        }
+        if ($line.StartsWith('!')) {
+            $name = $line.Substring(1)
+            Invoke-Operation "$path | $line" {
+                $state = $null
+                try { $state = Get-TMPCRegistryEntryState -Path $path -Name $name }
+                catch { throw 'READ_DENIED' }
+                if (-not $state.ValueExists) { return 'ALREADY_COMPLIANT' }
+                try { Remove-TMPCRegistryEntry -Path $path -Name $name }
+                catch { throw 'WRITE_DENIED' }
+                try { $after = Get-TMPCRegistryEntryState -Path $path -Name $name }
+                catch { throw 'VERIFY_FAILED' }
+                if ($after.ValueExists) { throw 'VERIFY_FAILED' }
+                return 'APPLIED'
+            }
+            continue
+        }
+        $parts = $line -split '\|', 3
+        if ($parts.Count -ne 3) { throw 'Invalid registry inventory.' }
+        $name = $parts[0]
+        $typeName = $parts[1]
+        $expected = switch ($typeName) {
+            'DWord' { [int]$parts[2] }
+            'Binary' { [byte[]]@($parts[2].Split(',') | ForEach-Object { [Convert]::ToByte($_.Trim(),16) }) }
+            'String' { [string]$parts[2] }
+            'ExpandString' { [string]$parts[2] }
+            default { throw 'Unsupported registry type.' }
+        }
+        Invoke-Operation "$path | $line" {
+            $state = $null
+            try { $state = Get-TMPCRegistryEntryState -Path $path -Name $name }
+            catch { throw 'READ_DENIED' }
+            if ($state.ValueExists -and (Test-TMPCRegistryStateEqual -Type $typeName -Expected $expected -Kind $state.Kind -Value $state.Value)) {
+                return 'ALREADY_COMPLIANT'
+            }
+            try { Write-TMPCRegistryEntry -Path $path -Name $name -Type $typeName -Value $expected -PathExists ([bool]$state.PathExists) }
+            catch {
+                $denied = ($_.Exception -is [System.UnauthorizedAccessException]) -or ($_.Exception -is [System.Security.SecurityException])
+                # Honest post-failure classification: if the refused write left the
+                # expected state in place, record the observation but keep the
+                # refused write as a real error.
+                try {
+                    $probe = Get-TMPCRegistryEntryState -Path $path -Name $name
+                    if ($probe.ValueExists -and (Test-TMPCRegistryStateEqual -Type $typeName -Expected $expected -Kind $probe.Kind -Value $probe.Value)) {
+                        Write-Log ("{0}\{1}: post-failure verification found the expected state; the write was still refused and is reported as an error." -f $path, $name) 'INFO'
+                    }
+                } catch { }
+                if ($denied) { throw 'WRITE_DENIED' } else { throw 'WRITE_FAILED' }
+            }
+            try { $after = Get-TMPCRegistryEntryState -Path $path -Name $name }
+            catch { throw 'VERIFY_FAILED' }
+            if (-not ($after.ValueExists -and (Test-TMPCRegistryStateEqual -Type $typeName -Expected $expected -Kind $after.Kind -Value $after.Value))) {
+                throw 'VERIFY_FAILED'
+            }
+            return 'APPLIED'
         }
     }
 }
 
 function Invoke-UserBinaryPreferences {
     # Exact baseline bit inventory: Path suffix|Name|ByteIndex|BitMask|SetBit.
+    # Idempotent and verified: unrelated bits and bytes are preserved, an
+    # already-compliant byte produces no write, and every write is re-read.
     $binaryPreferences = @'
 Control Panel\Desktop|UserPreferencesMask|4|02|0
 Control Panel\Desktop|UserPreferencesMask|0|02|0
@@ -614,19 +890,45 @@ Software\Microsoft\Windows\CurrentVersion\Explorer|ShellState|4|20|1
             $path = 'HKCU:\' + $p[0]
             $index = [int]$p[2]
             $mask = [Convert]::ToByte($p[3],16)
-            if (-not (Test-Path -LiteralPath $path)) { New-Item -Path $path -Force | Out-Null }
-            $key = Get-Item -LiteralPath $path
-            try { $bytes = $key.GetValue($p[1], $null) } finally { $key.Close() }
-            if ($null -eq $bytes) { $bytes = New-Object byte[] ([Math]::Max(12,$index+1)) }
-            if ($bytes -isnot [byte[]]) { throw 'Existing binary preference is not binary.' }
-            if ($bytes.Length -le $index) {
-                $expanded = New-Object byte[] ($index+1)
-                [Array]::Copy($bytes,$expanded,$bytes.Length)
-                $bytes = $expanded
+            $state = $null
+            try { $state = Get-TMPCRegistryEntryState -Path $path -Name $p[1] }
+            catch { throw 'READ_DENIED' }
+            if ($null -ne $state.Value -and $state.ValueExists -and $state.Kind -ne [Microsoft.Win32.RegistryValueKind]::Binary) {
+                throw 'CONFLICTING_STATE'
             }
-            if ($p[4] -eq '1') { $bytes[$index] = $bytes[$index] -bor $mask }
-            else { $bytes[$index] = $bytes[$index] -band (-bnot $mask) }
-            Set-ItemProperty -LiteralPath $path -Name $p[1] -Type Binary -Value $bytes -Force
+            $bytes = $null
+            if (-not $state.ValueExists -or $null -eq $state.Value) {
+                $bytes = New-Object byte[] ([Math]::Max(12,$index+1))
+            } else {
+                $bytes = $state.Value
+                if ($bytes -isnot [byte[]]) { throw 'CONFLICTING_STATE' }
+                if ($bytes.Length -le $index) {
+                    $expanded = New-Object byte[] ($index+1)
+                    [Array]::Copy($bytes,$expanded,$bytes.Length)
+                    $bytes = $expanded
+                }
+            }
+            $updated = New-Object byte[] $bytes.Length
+            [Array]::Copy($bytes,$updated,$bytes.Length)
+            if ($p[4] -eq '1') { $updated[$index] = $updated[$index] -bor $mask }
+            else { $updated[$index] = $updated[$index] -band (-bnot $mask) }
+            $unchanged = $true
+            for ($i=0; $i -lt $bytes.Length; $i++) { if ($updated[$i] -ne $bytes[$i]) { $unchanged = $false; break } }
+            if ($unchanged) { return 'ALREADY_COMPLIANT' }
+            try { Write-TMPCRegistryEntry -Path $path -Name $p[1] -Type 'Binary' -Value $updated -PathExists ([bool]$state.PathExists) }
+            catch {
+                $denied = ($_.Exception -is [System.UnauthorizedAccessException]) -or ($_.Exception -is [System.Security.SecurityException])
+                if ($denied) { throw 'WRITE_DENIED' } else { throw 'WRITE_FAILED' }
+            }
+            try { $after = Get-TMPCRegistryEntryState -Path $path -Name $p[1] }
+            catch { throw 'VERIFY_FAILED' }
+            if (-not ($after.ValueExists -and $after.Kind -eq [Microsoft.Win32.RegistryValueKind]::Binary -and $after.Value -is [byte[]])) {
+                throw 'VERIFY_FAILED'
+            }
+            $final = $after.Value
+            if ($final.Length -ne $updated.Length) { throw 'VERIFY_FAILED' }
+            for ($i=0; $i -lt $updated.Length; $i++) { if ($final[$i] -ne $updated[$i]) { throw 'VERIFY_FAILED' } }
+            return 'APPLIED'
         }
     }
 }
@@ -685,6 +987,7 @@ namespace TMPC {
         if ($data -isnot [byte[]]) { throw 'Unrecognized Quiet Hours data; preserved.' }
         $priority = [Text.Encoding]::Unicode.GetBytes('Microsoft.QuietHoursProfile.PriorityOnly')
         $unrestricted = [Text.Encoding]::Unicode.GetBytes('Microsoft.QuietHoursProfile.Unrestricted')
+        $replaced = $false
         for ($i=0; $i -le $data.Length-$priority.Length; $i++) {
             $match = $true
             for ($j=0; $j -lt $priority.Length; $j++) {
@@ -694,12 +997,14 @@ namespace TMPC {
                 [Array]::Copy($unrestricted,0,$data,$i,$unrestricted.Length)
                 Set-ItemProperty -LiteralPath $path -Name Data -Type Binary -Value $data -Force
                 $data = (Get-ItemProperty -LiteralPath $path -Name Data).Data
+                $replaced = $true
                 break
             }
         }
         if (-not [Text.Encoding]::Unicode.GetString($data).Contains('Microsoft.QuietHoursProfile.Unrestricted')) {
             throw 'OFF not proven; compact/unknown data preserved.'
         }
+        if (-not $replaced) { return 'ALREADY_COMPLIANT' }
     }
 }
 
@@ -709,6 +1014,18 @@ function Invoke-DownloadsPreference {
         $top = 'TopViews\{00000000-0000-0000-0000-000000000000}'
         $source = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes\$id"
         $target = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes\$id"
+        # If the per-user override already matches the required state, skip the
+        # copy; avoid rewriting an already compliant preference on every run.
+        $targetState = $null
+        try { $targetState = Get-TMPCRegistryEntryState -Path "$target\$top" -Name 'GroupBy' }
+        catch { throw 'READ_DENIED' }
+        if ($targetState.ValueExists -and
+            $targetState.Kind -eq [Microsoft.Win32.RegistryValueKind]::String -and
+            [string]::Equals([string]$targetState.Value, '', [StringComparison]::Ordinal)) {
+            return 'ALREADY_COMPLIANT'
+        }
+        # Fail closed: the installed default must match before the override is
+        # created, so a changed Windows default is never silently replaced.
         $key = Get-Item -LiteralPath "$source\$top"
         try {
             if ($key.GetValueKind('GroupBy') -ne [Microsoft.Win32.RegistryValueKind]::String -or
@@ -722,6 +1039,7 @@ function Invoke-DownloadsPreference {
             if ($key.GetValueKind('GroupBy') -ne [Microsoft.Win32.RegistryValueKind]::String -or
                 $key.GetValue('GroupBy') -ne '') { throw 'Downloads override not verified.' }
         } finally { $key.Close() }
+        return 'APPLIED'
     }
 }
 
@@ -733,24 +1051,29 @@ function Invoke-AllAppsViewPreference {
     Invoke-Operation 'HKCU All apps view mode initially List (existing preference preserved)' {
         if ([System.Environment]::OSVersion.Version.Build -lt 22000) {
             Write-Log 'All apps view modes are not supported on this build; preference left unchanged.' 'WARNING'
-            return
+            return 'SKIPPED_NOT_APPLICABLE'
         }
         $path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Start'
-        if (-not (Test-Path -LiteralPath $path)) { New-Item -Path $path -Force | Out-Null }
-        $key = Get-Item -LiteralPath $path
-        try { $present = $key.GetValueNames() -contains 'AllAppsViewMode' } finally { $key.Close() }
-        if ($present) {
+        $state = $null
+        try { $state = Get-TMPCRegistryEntryState -Path $path -Name 'AllAppsViewMode' }
+        catch { throw 'READ_DENIED' }
+        if ($state.ValueExists) {
             Write-Log 'AllAppsViewMode already present; user preference preserved.' 'INFO'
-            return
+            return 'ALREADY_COMPLIANT'
         }
-        Set-ItemProperty -LiteralPath $path -Name 'AllAppsViewMode' -Type DWord -Value 2 -Force
-        $key = Get-Item -LiteralPath $path
-        try {
-            if ($key.GetValueKind('AllAppsViewMode') -ne [Microsoft.Win32.RegistryValueKind]::DWord -or $key.GetValue('AllAppsViewMode') -ne 2) {
-                throw 'AllAppsViewMode was not verified as REG_DWORD 2.'
-            }
-        } finally { $key.Close() }
+        try { Write-TMPCRegistryEntry -Path $path -Name 'AllAppsViewMode' -Type 'DWord' -Value 2 -PathExists ([bool]$state.PathExists) }
+        catch {
+            $denied = ($_.Exception -is [System.UnauthorizedAccessException]) -or ($_.Exception -is [System.Security.SecurityException])
+            if ($denied) { throw 'WRITE_DENIED' } else { throw 'WRITE_FAILED' }
+        }
+        $after = $null
+        try { $after = Get-TMPCRegistryEntryState -Path $path -Name 'AllAppsViewMode' }
+        catch { throw 'VERIFY_FAILED' }
+        if (-not ($after.ValueExists -and $after.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $after.Value -eq 2)) {
+            throw 'VERIFY_FAILED'
+        }
         Write-Log 'AllAppsViewMode initialized to List (REG_DWORD 2) as an initial preference; user changes persist.' 'SUCCESS'
+        return 'APPLIED'
     }
 }
 
@@ -766,14 +1089,43 @@ function Invoke-UserPhase {
     } else {
         Invoke-Operation 'HKCU baseline dark wallpaper and fit' {
             $path = 'HKCU:\Control Panel\Desktop'
-            Set-ItemProperty -LiteralPath $path -Name Wallpaper -Type String -Value $wallpaper -Force
-            Set-ItemProperty -LiteralPath $path -Name WallpaperStyle -Type String -Value '10' -Force
-            Set-ItemProperty -LiteralPath $path -Name TileWallpaper -Type String -Value '0' -Force
-            foreach ($name in @('TranscodedImageCache','TranscodedImageCache_000')) {
-                $key = Get-Item -LiteralPath $path
-                try { $exists = $key.GetValueNames() -contains $name } finally { $key.Close() }
-                if ($exists) { Remove-ItemProperty -LiteralPath $path -Name $name }
+            $plan = @(
+                @{ Name = 'Wallpaper'; Value = $wallpaper },
+                @{ Name = 'WallpaperStyle'; Value = '10' },
+                @{ Name = 'TileWallpaper'; Value = '0' }
+            )
+            $wrote = $false
+            foreach ($entry in $plan) {
+                $state = $null
+                try { $state = Get-TMPCRegistryEntryState -Path $path -Name $entry.Name }
+                catch { throw 'READ_DENIED' }
+                if ($state.ValueExists -and $state.Kind -eq [Microsoft.Win32.RegistryValueKind]::String -and
+                    [string]::Equals([string]$state.Value, [string]$entry.Value, [StringComparison]::Ordinal)) { continue }
+                try { Write-TMPCRegistryEntry -Path $path -Name $entry.Name -Type 'String' -Value $entry.Value -PathExists ([bool]$state.PathExists) }
+                catch { throw 'WRITE_FAILED' }
+                $after = $null
+                try { $after = Get-TMPCRegistryEntryState -Path $path -Name $entry.Name }
+                catch { throw 'VERIFY_FAILED' }
+                if (-not ($after.ValueExists -and $after.Kind -eq [Microsoft.Win32.RegistryValueKind]::String -and
+                    [string]::Equals([string]$after.Value, [string]$entry.Value, [StringComparison]::Ordinal))) { throw 'VERIFY_FAILED' }
+                $wrote = $true
             }
+            foreach ($name in @('TranscodedImageCache','TranscodedImageCache_000')) {
+                $cacheState = $null
+                try { $cacheState = Get-TMPCRegistryEntryState -Path $path -Name $name }
+                catch { throw 'READ_DENIED' }
+                if ($cacheState.ValueExists) {
+                    try { Remove-TMPCRegistryEntry -Path $path -Name $name }
+                    catch { throw 'WRITE_DENIED' }
+                    $cacheAfter = $null
+                    try { $cacheAfter = Get-TMPCRegistryEntryState -Path $path -Name $name }
+                    catch { throw 'VERIFY_FAILED' }
+                    if ($cacheAfter.ValueExists) { throw 'VERIFY_FAILED' }
+                    $wrote = $true
+                }
+            }
+            if (-not $wrote) { return 'ALREADY_COMPLIANT' }
+            return 'APPLIED'
         }
     }
     Write-Log 'User preferences written; sign out and back in for shell refresh. Existing saved folder views may override Downloads defaults.'
@@ -835,14 +1187,22 @@ function Invoke-BloatRemoval {
     }
 }
 
+# TEST SEAM: filesystem item probe used by the OneDrive path guards (reparse
+# point and existence checks). The isolated test suite replaces it with an
+# in-memory descriptor so no real path is touched.
+function Get-TMPCPathItem {
+    param([string]$Path)
+    Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+}
+
 function Assert-NoReparsePath {
     param([string]$Path)
-    $item = Get-Item -LiteralPath $Path -Force
+    $item = Get-TMPCPathItem -Path $Path
     while ($item) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Linked path preserved.' }
         $parent = Split-Path -Parent $item.FullName
         if (-not $parent -or $parent -eq $item.FullName) { break }
-        $item = Get-Item -LiteralPath $parent -Force
+        $item = Get-TMPCPathItem -Path $parent
     }
 }
 
@@ -871,14 +1231,18 @@ function Remove-OneDriveRemnant {
         $protected.StartsWith($full+'\',[StringComparison]::OrdinalIgnoreCase) -or $allowed -notcontains $full) {
         throw 'Deletion target rejected; OneDrive user data is protected.'
     }
-    if (-not (Test-Path -LiteralPath $full)) { return }
+    $leaf = $null
+    try { $leaf = Get-TMPCPathItem -Path $full }
+    catch [System.Management.Automation.ItemNotFoundException] { $leaf = $null }
+    if ($null -eq $leaf) { return }
+    if (($leaf.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Linked remnant preserved.' }
     Assert-NoReparsePath $full
     # Inspect one level at a time, BEFORE descending: never traverse a junction.
     $pending = New-Object 'System.Collections.Generic.Stack[string]'
     $pending.Push($full)
     while ($pending.Count -gt 0) {
         $current = $pending.Pop()
-        $item = Get-Item -LiteralPath $current -Force
+        $item = Get-TMPCPathItem -Path $current
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Linked remnant preserved.' }
         if ($item.PSIsContainer) {
             foreach ($child in @(Get-ChildItem -LiteralPath $current -Force)) { $pending.Push($child.FullName) }
@@ -888,10 +1252,30 @@ function Remove-OneDriveRemnant {
     if (Test-Path -LiteralPath $full) { throw 'Software remnant still present.' }
 }
 
+# TEST SEAM: Authenticode probe and final execution of an already verified,
+# bounded uninstaller. The isolated test suite replaces both so no signature is
+# computed and no process is ever started during tests.
+function Get-TMPCSignature {
+    param([string]$Path)
+    Get-AuthenticodeSignature -LiteralPath $Path
+}
+
+function Start-TMPCVerifiedUninstaller {
+    param([string]$FilePath, [string]$Arguments)
+    Start-Process -FilePath $FilePath -ArgumentList $Arguments -Wait -PassThru
+}
+
 function Invoke-OneDriveUninstaller {
     param([string]$RegistryPath, [switch]$Machine)
-    if (-not (Test-Path -LiteralPath $RegistryPath)) { return $false }
-    $command = (Get-ItemProperty -LiteralPath $RegistryPath -Name UninstallString).UninstallString
+    $state = $null
+    try { $state = Get-TMPCRegistryEntryState -Path $RegistryPath -Name 'UninstallString' }
+    catch { throw 'READ_DENIED' }
+    if (-not $state.PathExists -or -not $state.ValueExists) { return $false }
+    if ($state.Kind -ne [Microsoft.Win32.RegistryValueKind]::String) {
+        Write-Log 'OneDrive uninstall entry is not a string value; preserved for manual review.' 'WARNING'
+        return $false
+    }
+    $command = [string]$state.Value
     # No cmd.exe, arbitrary registry command or shell expansion. Only the
     # installed OneDriveSetup.exe with baseline uninstall switches is accepted.
     if ($command -notmatch '^"?(.+?OneDriveSetup\.exe)"?\s+(/uninstall(?:\s+/allusers)?)\s*$') {
@@ -912,17 +1296,19 @@ function Invoke-OneDriveUninstaller {
     }
     if (-not $trusted) { throw 'Uninstaller outside known software locations.' }
     Assert-NoReparsePath $exe
-    $signature = Get-AuthenticodeSignature -LiteralPath $exe
+    $signature = Get-TMPCSignature -Path $exe
     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
         throw 'OneDrive uninstaller signature not verified.'
     }
-    $process = Start-Process -FilePath $exe -ArgumentList $arguments -Wait -PassThru
-    if ($process.ExitCode -ne 0) { throw 'OneDrive uninstaller failed.' }
+    $process = Start-TMPCVerifiedUninstaller -FilePath $exe -Arguments $arguments
+    if ($null -eq $process -or $process.ExitCode -ne 0) { throw 'OneDrive uninstaller failed.' }
     return $true
 }
 
 function Invoke-DefaultOneDrivePolicy {
     # Unique temporary mount, no marker, no regedit termination; always unload.
+    # Idempotent: the Run entry is removed only when present and the THDF value
+    # is written only when it does not already equal 0; both are verified.
     $profileRoot = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList').Default
     $hive = Join-Path ([Environment]::ExpandEnvironmentVariables($profileRoot)) 'NTUSER.DAT'
     Assert-NoReparsePath $hive
@@ -930,12 +1316,33 @@ function Invoke-DefaultOneDrivePolicy {
     Invoke-Native 'reg.exe' @('load',"HKU\$mount",$hive)
     try {
         $run = "Registry::HKEY_USERS\$mount\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
-        if (Test-Path -LiteralPath $run) {
-            $key = Get-Item -LiteralPath $run
-            try { $present = $key.GetValueNames() -contains 'OneDriveSetup' } finally { $key.Close() }
-            if ($present) { Remove-ItemProperty -LiteralPath $run -Name OneDriveSetup }
+        $runState = $null
+        try { $runState = Get-TMPCRegistryEntryState -Path $run -Name 'OneDriveSetup' }
+        catch { throw 'READ_DENIED' }
+        if ($runState.ValueExists) {
+            try { Remove-TMPCRegistryEntry -Path $run -Name 'OneDriveSetup' }
+            catch { throw 'WRITE_DENIED' }
+            $runAfter = $null
+            try { $runAfter = Get-TMPCRegistryEntryState -Path $run -Name 'OneDriveSetup' }
+            catch { throw 'VERIFY_FAILED' }
+            if ($runAfter.ValueExists) { throw 'VERIFY_FAILED' }
         }
-        Invoke-Native 'reg.exe' @('add',"HKU\$mount\SOFTWARE\Microsoft\OneDrive",'/v','EnableTHDFFeatures','/t','REG_DWORD','/d','0','/f')
+        $software = "Registry::HKEY_USERS\$mount\SOFTWARE\Microsoft\OneDrive"
+        $thdfState = $null
+        try { $thdfState = Get-TMPCRegistryEntryState -Path $software -Name 'EnableTHDFFeatures' }
+        catch { throw 'READ_DENIED' }
+        if ($thdfState.ValueExists -and $thdfState.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $thdfState.Value -eq 0) {
+            return 'ALREADY_COMPLIANT'
+        }
+        try { Write-TMPCRegistryEntry -Path $software -Name 'EnableTHDFFeatures' -Type 'DWord' -Value 0 -PathExists ([bool]$thdfState.PathExists) }
+        catch { throw 'WRITE_DENIED' }
+        $thdfAfter = $null
+        try { $thdfAfter = Get-TMPCRegistryEntryState -Path $software -Name 'EnableTHDFFeatures' }
+        catch { throw 'VERIFY_FAILED' }
+        if (-not ($thdfAfter.ValueExists -and $thdfAfter.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $thdfAfter.Value -eq 0)) {
+            throw 'VERIFY_FAILED'
+        }
+        return 'APPLIED'
     } finally {
         [GC]::Collect()
         [GC]::WaitForPendingFinalizers()
@@ -990,7 +1397,17 @@ function Invoke-OneDriveRemoval {
         foreach ($entry in @(@{Path=$machine;Done=$script:OneDriveMachineUninstalled},@{Path=$user;Done=$script:OneDriveUserUninstalled})) {
             if ($entry.Done) {
                 Invoke-Operation 'OneDrive confirmed uninstall entry cleanup' {
-                    if (Test-Path -LiteralPath $entry.Path) { Remove-Item -LiteralPath $entry.Path -Recurse -Force }
+                    $state = $null
+                    try { $state = Get-TMPCRegistryEntryState -Path $entry.Path -Name $null }
+                    catch { throw 'READ_DENIED' }
+                    if (-not $state.PathExists) { return 'ALREADY_COMPLIANT' }
+                    try { Remove-TMPCRegistryEntry -Path $entry.Path -Name '' }
+                    catch { throw 'WRITE_DENIED' }
+                    $after = $null
+                    try { $after = Get-TMPCRegistryEntryState -Path $entry.Path -Name $null }
+                    catch { throw 'VERIFY_FAILED' }
+                    if ($after.PathExists) { throw 'VERIFY_FAILED' }
+                    return 'APPLIED'
                 }
             }
         }
@@ -1003,7 +1420,17 @@ function Invoke-OneDriveRemoval {
             if ($script:CanApplyUser) { $paths += @('HKCU:\SOFTWARE\Microsoft\OneDrive','HKCU:\SOFTWARE\WOW6432Node\Microsoft\OneDrive') }
             foreach ($path in $paths) {
                 Invoke-Operation 'OneDrive configuration key removal' {
-                    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+                    $state = $null
+                    try { $state = Get-TMPCRegistryEntryState -Path $path -Name $null }
+                    catch { throw 'READ_DENIED' }
+                    if (-not $state.PathExists) { return 'ALREADY_COMPLIANT' }
+                    try { Remove-TMPCRegistryEntry -Path $path -Name '' }
+                    catch { throw 'WRITE_DENIED' }
+                    $after = $null
+                    try { $after = Get-TMPCRegistryEntryState -Path $path -Name $null }
+                    catch { throw 'VERIFY_FAILED' }
+                    if ($after.PathExists) { throw 'VERIFY_FAILED' }
+                    return 'APPLIED'
                 }
             }
             $remnants = @(
@@ -1023,13 +1450,27 @@ function Invoke-OneDriveRemoval {
     foreach ($path in @('HKLM:\SOFTWARE\Classes\CLSID','HKLM:\SOFTWARE\Classes\WOW6432Node\CLSID')) {
         Invoke-Operation 'OneDrive Explorer namespace unpin' {
             $key = "$path\{018D5C66-4533-4307-9B53-224DE2ED1FE6}"
-            if (Test-Path -LiteralPath $key) { Set-ItemProperty -LiteralPath $key -Name System.IsPinnedToNameSpaceTree -Type DWord -Value 0 -Force }
+            $state = $null
+            try { $state = Get-TMPCRegistryEntryState -Path $key -Name 'System.IsPinnedToNameSpaceTree' }
+            catch { throw 'READ_DENIED' }
+            if (-not $state.PathExists) { return 'ALREADY_COMPLIANT' }
+            if ($state.ValueExists -and $state.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $state.Value -eq 0) { return 'ALREADY_COMPLIANT' }
+            try { Write-TMPCRegistryEntry -Path $key -Name 'System.IsPinnedToNameSpaceTree' -Type 'DWord' -Value 0 -PathExists ([bool]$state.PathExists) }
+            catch { throw 'WRITE_DENIED' }
+            $after = $null
+            try { $after = Get-TMPCRegistryEntryState -Path $key -Name 'System.IsPinnedToNameSpaceTree' }
+            catch { throw 'VERIFY_FAILED' }
+            if (-not ($after.ValueExists -and $after.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $after.Value -eq 0)) { throw 'VERIFY_FAILED' }
+            return 'APPLIED'
         }
     }
     $tasks = @(Get-ScheduledTask | Where-Object TaskName -like '*OneDrive*')
     foreach ($task in $tasks) {
         Invoke-Operation 'OneDrive scheduled task removal' {
-            Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false
+            Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false -ErrorAction Stop
+            $remaining = @(Get-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue)
+            if ($remaining.Count -gt 0) { throw 'VERIFY_FAILED' }
+            return 'APPLIED'
         }
     }
     Invoke-Operation 'Default-profile OneDrive auto-install prevention' { Invoke-DefaultOneDrivePolicy }
@@ -1047,14 +1488,36 @@ function Invoke-SystemPhase {
     Invoke-RegistryProfile (Get-SystemRegistryProfile) 'HKLM:'
     Invoke-Operation 'Cloud optimized content policy verified (DWord 1)' {
         $cloudContentKey = Get-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'
-        if ($cloudContentKey.GetValueKind('DisableCloudOptimizedContent') -ne [Microsoft.Win32.RegistryValueKind]::DWord) { throw 'DisableCloudOptimizedContent is not REG_DWORD.' }
-        $cloudContentValue = (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' -Name 'DisableCloudOptimizedContent').DisableCloudOptimizedContent
-        if ($cloudContentValue -ne 1) { throw 'DisableCloudOptimizedContent is not 1.' }
+        try {
+            if ($cloudContentKey.GetValueKind('DisableCloudOptimizedContent') -ne [Microsoft.Win32.RegistryValueKind]::DWord) { throw 'DisableCloudOptimizedContent is not REG_DWORD.' }
+            $cloudContentValue = $cloudContentKey.GetValue('DisableCloudOptimizedContent')
+            if ($cloudContentValue -ne 1) { throw 'DisableCloudOptimizedContent is not 1.' }
+        } finally { $cloudContentKey.Close() }
     }
     Invoke-Operation 'Start pins machine policy staged and verified (ADMX pair + persistent JSON)' {
         $startPinsDir = 'C:\ProgramData\TMPC-Windows-11-Optimization'
         $startPinsJsonPath = 'C:\ProgramData\TMPC-Windows-11-Optimization\LayoutModification.json'
         $startPinsJsonContent = '{"applyOnce":true,"pinnedList":[]}'
+        # Fast path: when the persistent JSON and the ADMX pair already match,
+        # do not rewrite the file or the two values.
+        $jsonCompliant = $false
+        try {
+            if (Test-Path -LiteralPath $startPinsJsonPath -PathType Leaf) {
+                $existingJson = [System.IO.File]::ReadAllText($startPinsJsonPath, [System.Text.UTF8Encoding]::new($false))
+                if ($existingJson -eq $startPinsJsonContent) { $jsonCompliant = $true }
+            }
+        } catch { $jsonCompliant = $false }
+        if ($jsonCompliant) {
+            $pinState = $null
+            $jsonState = $null
+            try { $pinState = Get-TMPCRegistryEntryState -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'ConfigureStartPins' } catch { $pinState = $null }
+            try { $jsonState = Get-TMPCRegistryEntryState -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name 'ConfigureStartPinsJSON' } catch { $jsonState = $null }
+            if ($null -ne $pinState -and $pinState.ValueExists -and $pinState.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $pinState.Value -eq 1 -and
+                $null -ne $jsonState -and $jsonState.ValueExists -and $jsonState.Kind -eq [Microsoft.Win32.RegistryValueKind]::ExpandString -and
+                [string]::Equals([string]$jsonState.Value, $startPinsJsonPath, [StringComparison]::Ordinal)) {
+                return 'ALREADY_COMPLIANT'
+            }
+        }
         if (Test-Path -LiteralPath $startPinsDir -PathType Leaf) { throw 'Start pins directory path is a file.' }
         if (Test-Path -LiteralPath $startPinsDir) { Assert-NoReparsePath $startPinsDir }
         else {
@@ -1077,6 +1540,7 @@ function Invoke-SystemPhase {
         if ($startPinsPolicy.ConfigureStartPins -ne 1 -or $startPinsPolicy.ConfigureStartPinsJSON -ne $startPinsJsonPath -or -not (Test-Path -LiteralPath $startPinsPolicy.ConfigureStartPinsJSON -PathType Leaf)) { throw 'ConfigureStartPins policy pair does not match the persistent JSON.' }
         $startPinsFinal = [System.IO.File]::ReadAllText($startPinsPolicy.ConfigureStartPinsJSON, [System.Text.UTF8Encoding]::new($false))
         if ($startPinsFinal -ne $startPinsJsonContent) { throw 'Start pins JSON changed after policy staging.' }
+        return 'APPLIED'
     }
     Invoke-Operation 'Standard Balanced power plan' { Invoke-Native 'powercfg.exe' @('/setactive','381b4222-f694-41f0-9685-ff5bb260df2e') }
     Invoke-Operation 'Hibernation off' { Invoke-Native 'powercfg.exe' @('/hibernate','off') }
@@ -1086,7 +1550,17 @@ function Invoke-SystemPhase {
         'AllFilesystemObjects\shell\Windows.ShowFileExtensions','Directory\Background\shell\Windows.ShowFileExtensions')) {
         Invoke-Operation 'Machine Explorer context-menu baseline deletion' {
             $path = 'HKLM:\SOFTWARE\Classes\' + $suffix
-            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+            $state = $null
+            try { $state = Get-TMPCRegistryEntryState -Path $path -Name $null }
+            catch { throw 'READ_DENIED' }
+            if (-not $state.PathExists) { return 'ALREADY_COMPLIANT' }
+            try { Remove-TMPCRegistryEntry -Path $path -Name '' }
+            catch { throw 'WRITE_DENIED' }
+            $after = $null
+            try { $after = Get-TMPCRegistryEntryState -Path $path -Name $null }
+            catch { throw 'VERIFY_FAILED' }
+            if ($after.PathExists) { throw 'VERIFY_FAILED' }
+            return 'APPLIED'
         }
     }
     $scheduledTasks = @(
@@ -1105,16 +1579,26 @@ function Invoke-SystemPhase {
     foreach ($name in $scheduledTasks) {
         $task = @($allTasks | Where-Object { ($_.TaskPath+$_.TaskName) -eq $name })
         if ($task.Count -eq 0) { Write-Log "Baseline task not present: $name"; continue }
+        $pending = @($task | Where-Object { $_.State -ne 'Disabled' })
+        if ($pending.Count -eq 0) {
+            Write-Log ("Disable baseline task: {0}: ALREADY_COMPLIANT; already disabled." -f $name) 'COMPLIANT'
+            continue
+        }
         Invoke-Operation "Disable baseline task: $name" {
-            foreach ($item in $task) { Disable-ScheduledTask -InputObject $item | Out-Null }
+            foreach ($item in $pending) { Disable-ScheduledTask -InputObject $item -ErrorAction Stop | Out-Null }
+            $leaf = Split-Path -Leaf $name
+            $parent = Split-Path -Parent $name
+            $after = @(Get-ScheduledTask -TaskName $leaf -TaskPath ($parent + '\') -ErrorAction Stop | Where-Object { $_.State -ne 'Disabled' })
+            if ($after.Count -gt 0) { throw 'VERIFY_FAILED' }
+            return 'APPLIED'
         }
     }
     Invoke-Operation '.NET Framework 3.5 local-source check' {
         $feature = Get-WindowsOptionalFeature -Online -FeatureName NetFx3
-        if ($feature.State -eq 'Enabled') { return }
+        if ($feature.State -eq 'Enabled') { return 'ALREADY_COMPLIANT' }
         if (-not $NetFx3Source) {
             Write-Log 'NetFx3 is not enabled; supply -NetFx3Source with matching local sources\sxs media. No download attempted.' 'WARNING'
-            return
+            return 'SKIPPED_NOT_APPLICABLE'
         }
         if ($NetFx3Source -match '^\\\\' -or -not (Test-Path -LiteralPath $NetFx3Source -PathType Container)) { throw 'A local NetFx3 source is required.' }
         $sourcePath = (Resolve-Path -LiteralPath $NetFx3Source).ProviderPath
@@ -1123,6 +1607,13 @@ function Invoke-SystemPhase {
         Assert-NoReparsePath $NetFx3Source
         $result = Enable-WindowsOptionalFeature -Online -FeatureName NetFx3 -All -LimitAccess -Source $NetFx3Source -NoRestart
         if ($result.RestartNeeded) { $script:RestartNeeded=$true }
+        $after = Get-WindowsOptionalFeature -Online -FeatureName NetFx3
+        if ($after.State -eq 'Enabled') { return 'APPLIED' }
+        if ($result.RestartNeeded) {
+            Write-Log 'NetFx3 was staged; it completes after the next restart.' 'WARNING'
+            return 'APPLIED'
+        }
+        throw 'VERIFY_FAILED'
     }
     $script:RestartNeeded = $true
     Write-Log 'CONFIGURATION_STAGED = PASS for the ADMX Start pins pair; START_PINS_CLEAN_INSTALL_RUNTIME = PENDING. It takes effect at the next sign-in; the Start result is not claimed without runtime validation. Existing encryption is not undone.' 'WARNING'
@@ -1131,36 +1622,24 @@ function Invoke-SystemPhase {
 function Complete-Run {
     param([int]$ExitCode)
     Write-Host ''
-    Write-Host "Mode: $script:Mode; completed operations: $script:Completed; warnings: $script:Warnings; errors: $script:Errors"
+    Write-Host "Mode: $script:Mode; completed operations: $script:Completed; already compliant: $script:Compliant; skipped: $script:Skipped; warnings: $script:Warnings; errors: $script:Errors"
     Write-Host "Restart required/recommended: $script:RestartNeeded; sign-out recommended after user preferences."
     Write-Host "Log: $script:LogPath; exit code: $ExitCode"
 }
 
 # Preflight BEFORE any configuration mutation (logging starts only after gates).
+# Layered acceptance with explicit classification: fail-closed on the hard
+# boundaries and NOT_RUNTIME_TESTED for untested Windows 11 builds.
 try {
-    if ($PSVersionTable.PSEdition -ne 'Desktop' -or $PSVersionTable.PSVersion.Major -ne 5 -or
-        -not [Environment]::Is64BitProcess -or $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
-        throw 'Use native x64 Windows PowerShell 5.1.'
-    }
-    $os = Get-CimInstance Win32_OperatingSystem
-    $version = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-    $build = [int]$os.BuildNumber
-    $displayVersion = [string]$version.DisplayVersion
-    if ($os.ProductType -ne 1 -or $build -lt 26300 -or $build -ge 26400 -or $displayVersion -ne '26H2') {
-        throw 'Only Windows 11 26H2 x64 (build base 26300) is accepted; other versions/builds are untested.'
-    }
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    if ($sid -in @('S-1-5-18','S-1-5-19','S-1-5-20')) { throw 'Run from a real user account, not a service account.' }
-    if ($UserOnly -and ($Restart -or $NetFx3Source)) { throw 'UserOnly does not accept Restart or NetFx3Source.' }
-    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if (-not $UserOnly -and -not $admin) { throw 'Full mode requires Windows PowerShell opened with Run as administrator. UserOnly needs no elevation.' }
-    $script:CanApplyUser = $UserOnly -or (Test-CurrentDesktopIdentity)
+    $preflight = Get-TMPCPreflightResult -UserOnly:$UserOnly -Restart:$Restart -NetFx3Source $NetFx3Source
+    if (-not $preflight.Ok) { throw $preflight.Message }
 } catch {
     Write-Host $_.Exception.Message
     $script:Errors++
     Complete-Run 2
     exit 2
 }
+$script:CanApplyUser = [bool]$preflight.CanApplyUser
 
 try {
     $base = if ($UserOnly) { $env:LOCALAPPDATA } else { $env:ProgramData }
@@ -1171,15 +1650,16 @@ try {
     New-Item -Path $logs -ItemType Directory -Force | Out-Null
     Assert-NoReparsePath $logs
     $script:LogPath = Join-Path $logs ('Apply-{0}-{1}-{2}.log' -f $script:Mode,(Get-Date -Format 'yyyyMMdd-HHmmss'),[Guid]::NewGuid().ToString('N'))
-    Write-Log "Standalone 0.1.3; mode $script:Mode; supported reference Windows 11 Pro 26H2 x64 (build base 26300; UBR not fixed). Static review only; standalone runtime not yet validated."
+    Write-Log "Standalone 0.2.0; mode $script:Mode; $($preflight.Summary)"
+    if (-not $preflight.TestedReference) { Write-Log $preflight.UntestedNote 'WARNING' }
     if (-not $UserOnly) { Invoke-SystemPhase }
     if ($script:CanApplyUser) { Invoke-UserPhase }
     else {
         $script:UserDeferred = $true
         Write-Log 'HKCU skipped: elevated identity does not match a verified desktop. Run .\Apply-TMPCOptimizations.ps1 -UserOnly from the target account without elevation.' 'WARNING'
     }
-    $exitCode = if ($script:Errors -gt 0) { 1 } elseif ($script:UserDeferred) { 3 } else { 0 }
-    if ($Restart -and $exitCode -eq 0) {
+    $exitCode = Get-TMPCExitCode -Errors $script:Errors -UserDeferred $script:UserDeferred
+    if (Test-TMPCRestartRequested -RestartRequested $Restart.IsPresent -ExitCode $exitCode) {
         Write-Log 'Explicit Restart requested: save work now; restart in 60 seconds, cancellable with shutdown.exe /a.'
         Invoke-Operation 'Explicit restart request' { Invoke-Native 'shutdown.exe' @('/r','/t','60') }
         if ($script:Errors -gt 0) { $exitCode=1 }

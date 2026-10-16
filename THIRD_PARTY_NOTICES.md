@@ -18,7 +18,8 @@ Portions of `autounattend.xml` are derived from or based on code distributed
 in that upstream repository, including at least:
 
 - `BloatRemoval.ps1` version 2.3;
-- `OneDriveRemoval.ps1` version 1.2;
+- `OneDriveRemoval.ps1` version 1.2 (locally hardened on the TMPC profile; the
+  upstream structure is preserved as the basis);
 - related helper and automation logic where applicable.
 
 `Apply-TMPCOptimizations.ps1` derives its post-install registry profile,
