@@ -133,12 +133,14 @@ function Write-Log {
 }
 
 function Get-TMPCRegistryEntryState {
-    param([string]$Path, [string]$Name)
+    # Same empty-string default-name model as RegistryKey.GetValueNames().
+    param([string]$Path, $Name)
+    if ($null -ne $Name -and [string]::Equals([string]$Name, '(Default)', [StringComparison]::OrdinalIgnoreCase)) { $Name = '' }
     if ($script:TestFailRead) { throw ([System.UnauthorizedAccessException]::new('read denied by test double')) }
     if (-not $script:TestRegistry.ContainsKey($Path)) {
         return [pscustomobject]@{ PathExists = $false; ValueExists = $false; Kind = $null; Value = $null }
     }
-    if (-not $Name) {
+    if ($null -eq $Name) {
         return [pscustomobject]@{ PathExists = $true; ValueExists = $false; Kind = $null; Value = $null }
     }
     $entry = Get-TestRegistryValue -Path $Path -Name $Name
@@ -168,6 +170,7 @@ function Remove-RegistryEntryIfPresent {
 
 function Write-TMPCRegistryEntry {
     param([string]$Path, [string]$Name, [string]$Type, $Value, [bool]$PathExists)
+    if ([string]::Equals($Name, '(Default)', [StringComparison]::OrdinalIgnoreCase)) { $Name = '' }
     $null = $script:TestWriteAttempts.Add(('SET|{0}|{1}|{2}' -f $Path, $Name, $Type))
     if ($script:TestFailWrite -and -not $script:TestWriteDeniedButApplied) {
         throw ([System.UnauthorizedAccessException]::new('write denied by test double'))
@@ -181,6 +184,38 @@ function Write-TMPCRegistryEntry {
     }
     if ($Type -eq 'DWord') { $stored = [int]$Value }
     elseif ($Type -eq 'Binary') { $stored = [byte[]]$Value }
+    else { $stored = [string]$Value }
+    if ($script:TestCorruptAfterWrite -and -not $script:TestFailWrite) {
+        if ($Type -eq 'Binary') { $stored = [byte[]](1,2,3) }
+        elseif ($Type -eq 'DWord') { $stored = 999 }
+        else { $stored = 'corrupted-by-test' }
+    }
+    Set-TestRegistryValue -Path $Path -Name $Name -Kind $kind -Value $stored
+    if ($script:TestFailWrite) {
+        throw ([System.UnauthorizedAccessException]::new('write denied by test double'))
+    }
+}
+
+function Write-RegistryValue {
+    # Doubles the embedded-XML write primitive. It rejects a non-byte[] binary
+    # payload so a regression to raw Object[] fails the isolated suite.
+    param([string]$Path, [string]$Name, [string]$Type, $Value, [bool]$PathExists)
+    if ($null -ne $Name -and [string]::Equals($Name, '(Default)', [StringComparison]::OrdinalIgnoreCase)) { $Name = '' }
+    $null = $script:TestWriteAttempts.Add(('SET|{0}|{1}|{2}' -f $Path, $Name, $Type))
+    if ($script:TestFailWrite -and -not $script:TestWriteDeniedButApplied) {
+        throw ([System.UnauthorizedAccessException]::new('write denied by test double'))
+    }
+    $kind = switch ($Type) {
+        'DWord' { [Microsoft.Win32.RegistryValueKind]::DWord }
+        'String' { [Microsoft.Win32.RegistryValueKind]::String }
+        'ExpandString' { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+        'Binary' { [Microsoft.Win32.RegistryValueKind]::Binary }
+        default { throw 'Unsupported registry type.' }
+    }
+    if ($Type -eq 'Binary') {
+        if ($Value -isnot [byte[]]) { throw 'binary write did not receive byte[]' }
+        $stored = [byte[]]$Value
+    } elseif ($Type -eq 'DWord') { $stored = [int]$Value }
     else { $stored = [string]$Value }
     if ($script:TestCorruptAfterWrite -and -not $script:TestFailWrite) {
         if ($Type -eq 'Binary') { $stored = [byte[]](1,2,3) }

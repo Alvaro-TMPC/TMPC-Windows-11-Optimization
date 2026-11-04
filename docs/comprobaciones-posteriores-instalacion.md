@@ -12,7 +12,7 @@ los periféricos principales.
 Se da por supuesto que la instalación ya ha terminado: has llegado al
 escritorio final, ha ocurrido el reinicio automático programado por el perfil
 y ha finalizado el cleanup normal. La instalación del perfil se documenta en
-el [README en español](../README.es.md).
+el [README en español](../README.md).
 
 Ten en cuenta:
 
@@ -380,7 +380,7 @@ forman parte de la checklist normal posterior a la instalación.
 
 ## Véase también
 
-- [README en español](../README.es.md): visión general del proyecto,
+- [README en español](../README.md): visión general del proyecto,
   instalación y resumen del baseline.
 - [Preparación previa a la
   instalación](preparacion-previa-instalacion.md): backups, drivers y medio

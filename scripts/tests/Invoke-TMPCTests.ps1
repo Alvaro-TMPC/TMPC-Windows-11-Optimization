@@ -66,19 +66,26 @@ $bloatText = Get-TMPCHereStringBody -Text $sysText -VariableName 'bloatRemovalCo
 $oneDriveText = Get-TMPCHereStringBody -Text $sysText -VariableName 'oneDriveRemovalContent'
 
 $registryFunctions = @(
-    'Write-Log','Invoke-Operation','Get-TMPCRegistryEntryState','Write-TMPCRegistryEntry',
+    'Write-Log','Invoke-Operation','ConvertTo-TMPCRegistryValueName','Test-TMPCRegistryValueName',
+    'Get-TMPCRegistryEntryState','Write-TMPCRegistryEntry',
     'Remove-TMPCRegistryEntry','Test-TMPCRegistryStateEqual','Invoke-RegistryProfile',
     'Invoke-UserBinaryPreferences','Get-TMPCSystemInfo','Get-TMPCPreflightResult',
     'Get-TMPCExitCode','Test-TMPCRestartRequested'
 )
 $standaloneOneDriveFunctions = @(
     'Write-Log','Get-TMPCPathItem','Assert-NoReparsePath','Remove-OneDriveRemnant',
-    'Get-TMPCSignature','Start-TMPCVerifiedUninstaller','Invoke-OneDriveUninstaller'
+    'Get-TMPCSignature','Start-TMPCVerifiedUninstaller','Invoke-OneDriveUninstaller',
+    'Get-TMPCOneDriveRegistrationState','Get-TMPCOneDriveCleanupPlan'
 )
 $xmlOneDriveFunctions = @(
     'Write-Log','Get-RegistryEntryState','Get-RegistryErrorReason','Remove-RegistryEntryIfPresent',
     'Get-TMPCPathItem','Assert-NoReparsePath','Remove-OneDriveRemnant','Get-TMPCSignature',
     'Start-TMPCVerifiedUninstaller','Invoke-OneDriveUninstaller'
+)
+$xmlRegistryFunctions = @(
+    'Write-Log','ConvertTo-RegistryValueName','Test-RegistryValueName',
+    'Get-RegistryEntryState','Test-RegistryStateEqual','Get-RegistryErrorReason',
+    'Write-RegistryValue','Set-RegistryValue'
 )
 
 # ---------------------------------------------------------------------------
@@ -293,6 +300,43 @@ Invoke-TMPCTestCase 'D27' 'Operation protocol: skipped, compliant and applied st
     Assert-TestEqual 0 $script:Errors 'no errors expected'
 }
 
+Invoke-TMPCTestCase 'D28' 'Default registry value: "(Default)" addresses the unnamed value' {
+    Set-TestRegistryValue -Path 'HKCU:\TMPC-Default' -Name '' -Kind String -Value 'legacy'
+    $inventory = @'
+[HKCU:\TMPC-Default]
+(Default)|String|
+'@
+    Invoke-RegistryProfile -Text $inventory -Hive 'HKCU:'
+    Assert-TestEqual 1 $script:TestWriteAttempts.Count 'one default-value write expected'
+    Assert-TestTrue ($script:TestWriteAttempts[0].EndsWith('Default||String')) 'write must use the empty default value name'
+    $entry = Get-TestRegistryValue -Path 'HKCU:\TMPC-Default' -Name ''
+    Assert-TestTrue ($null -ne $entry) 'the unnamed default value must exist'
+    Assert-TestEqual ([Microsoft.Win32.RegistryValueKind]::String) $entry.Kind 'default value kind must be String'
+    Assert-TestEqual '' $entry.Value 'default value must be set to the expected content'
+    Assert-TestTrue ($null -eq (Get-TestRegistryValue -Path 'HKCU:\TMPC-Default' -Name '(Default)')) 'no literal (Default) value may be created'
+
+    Invoke-RegistryProfile -Text $inventory -Hive 'HKCU:'
+    Assert-TestEqual 1 $script:TestWriteAttempts.Count 'second run must not rewrite the compliant default value'
+    Assert-TestEqual 1 $script:Compliant 'default value must be recognized as compliant'
+    Assert-TestEqual 0 $script:Errors 'no errors expected'
+
+    $state = Get-TMPCRegistryEntryState -Path 'HKCU:\TMPC-Default' -Name '(Default)'
+    Assert-TestTrue $state.ValueExists 'the alias must read the default value'
+    Assert-TestEqual '' $state.Value 'the alias must return the default value'
+    $keyOnly = Get-TMPCRegistryEntryState -Path 'HKCU:\TMPC-Default' -Name $null
+    Assert-TestTrue $keyOnly.PathExists 'key probe must still work'
+    Assert-TestTrue (-not $keyOnly.ValueExists) 'key probe must not report a value'
+}
+
+Invoke-TMPCTestCase 'D28b' 'GetValueNames model: empty string is the default; other names are unchanged' {
+    Assert-TestTrue (Test-TMPCRegistryValueName -ValueNames @('', 'Alpha') -Name '(Default)') 'the alias must map to the empty default name'
+    Assert-TestTrue (Test-TMPCRegistryValueName -ValueNames @('', 'Alpha') -Name '') 'the empty name must map to the default value'
+    Assert-TestTrue (Test-TMPCRegistryValueName -ValueNames @('', 'Alpha') -Name 'Alpha') 'normal names must be preserved'
+    Assert-TestTrue (-not (Test-TMPCRegistryValueName -ValueNames @('(Default)') -Name '(Default)')) 'a literal "(Default)" value must not be mistaken for the default'
+    Assert-TestTrue (-not (Test-TMPCRegistryValueName -ValueNames @('') -Name $null)) 'a null probe must not be treated as a value'
+    Assert-TestTrue (-not (Test-TMPCRegistryValueName -ValueNames @('') -Name '(Default)Value')) 'similar names must not be rewritten'
+}
+
 # ---------------------------------------------------------------------------
 # Phase 2: layered compatibility preflight
 # ---------------------------------------------------------------------------
@@ -479,13 +523,104 @@ Invoke-TMPCTestCase 'D24e' 'Standalone OneDrive: reparse points and protected ro
     Assert-TestThrows { Remove-OneDriveRemnant -Path (Join-Path $env:USERPROFILE 'OneDrive') } 'Deletion target rejected' 'user OneDrive folder'
 }
 
+Invoke-TMPCTestCase 'D30a' 'OneDrive scope: presence alone authorizes no cleanup' {
+    foreach ($canUser in @($true, $false)) {
+        $plan = Get-TMPCOneDriveCleanupPlan -MachineUninstalled $false -UserUninstalled $false -MachineAbsentVerified $false -UserAbsentVerified $false -CanApplyUser $canUser
+        Assert-TestTrue (-not $plan.MachineEvidence) 'machine presence is not evidence for cleanup'
+        Assert-TestTrue (-not $plan.UserEvidence) 'user presence is not evidence for cleanup'
+        Assert-TestTrue (-not $plan.RemoveMachineConfiguration) 'machine configuration must be preserved'
+        Assert-TestTrue (-not $plan.RemoveMachineRemnants) 'machine remnants must be preserved'
+        Assert-TestTrue (-not $plan.RemoveUserConfiguration) 'user configuration must be preserved'
+        Assert-TestTrue (-not $plan.RemoveUserRemnants) 'user remnants must be preserved'
+    }
+}
+
+Invoke-TMPCTestCase 'D30b' 'OneDrive scope: machine evidence authorizes only machine cleanup' {
+    foreach ($machineAbsent in @($false, $true)) {
+        $plan = Get-TMPCOneDriveCleanupPlan -MachineUninstalled (-not $machineAbsent) -UserUninstalled $false -MachineAbsentVerified $machineAbsent -UserAbsentVerified $false -CanApplyUser $true
+        Assert-TestTrue $plan.RemoveMachineConfiguration 'machine configuration cleanup expected'
+        Assert-TestTrue $plan.RemoveMachineRemnants 'machine remnant cleanup expected'
+        Assert-TestTrue (-not $plan.RemoveUserConfiguration) 'machine evidence must not authorize user configuration cleanup'
+        Assert-TestTrue (-not $plan.RemoveUserRemnants) 'machine evidence must not authorize user remnant cleanup'
+    }
+}
+
+Invoke-TMPCTestCase 'D30c' 'OneDrive scope: user success never authorizes machine cleanup' {
+    $userUninstalled = Get-TMPCOneDriveCleanupPlan -MachineUninstalled $false -UserUninstalled $true -MachineAbsentVerified $false -UserAbsentVerified $false -CanApplyUser $true
+    Assert-TestTrue $userUninstalled.RemoveUserConfiguration 'user-success configuration cleanup expected'
+    Assert-TestTrue $userUninstalled.RemoveUserRemnants 'user-success remnant cleanup expected'
+    Assert-TestTrue (-not $userUninstalled.RemoveMachineConfiguration) 'user success must never authorize machine configuration cleanup'
+    Assert-TestTrue (-not $userUninstalled.RemoveMachineRemnants) 'user success must never authorize machine remnant cleanup'
+
+    $userAbsent = Get-TMPCOneDriveCleanupPlan -MachineUninstalled $false -UserUninstalled $false -MachineAbsentVerified $false -UserAbsentVerified $true -CanApplyUser $true
+    Assert-TestTrue $userAbsent.RemoveUserConfiguration 'verified user absence must authorize user cleanup'
+    Assert-TestTrue (-not $userAbsent.RemoveMachineConfiguration) 'verified user absence must not authorize machine cleanup'
+
+    $deferred = Get-TMPCOneDriveCleanupPlan -MachineUninstalled $false -UserUninstalled $true -MachineAbsentVerified $false -UserAbsentVerified $false -CanApplyUser $false
+    Assert-TestTrue (-not $deferred.UserEvidence) 'an unauthorized target account cannot authorize user cleanup'
+    Assert-TestTrue (-not $deferred.RemoveMachineConfiguration) 'an unauthorized user success must not authorize machine cleanup'
+    Assert-TestTrue (-not $deferred.RemoveMachineRemnants) 'an unauthorized user success must not authorize machine remnants'
+}
+
+Invoke-TMPCTestCase 'D30d' 'OneDrive scope: denied read is unknown, not verified absence' {
+    Add-TestRegistryKey -Path 'HKLM:\TMPC-OD-Machine'
+    $present = Get-TMPCOneDriveRegistrationState -Path 'HKLM:\TMPC-OD-Machine'
+    Assert-TestEqual 'PRESENT' $present 'a readable key must be reported as present'
+
+    $absent = Get-TMPCOneDriveRegistrationState -Path 'HKLM:\TMPC-OD-Missing'
+    Assert-TestEqual 'ABSENT_VERIFIED' $absent 'a successful read with no key is verified absence'
+
+    $script:TestFailRead = $true
+    $unknown = Get-TMPCOneDriveRegistrationState -Path 'HKLM:\TMPC-OD-Machine'
+    Assert-TestEqual 'UNKNOWN' $unknown 'a denied read must never be inferred as absence'
+    $plan = Get-TMPCOneDriveCleanupPlan -MachineUninstalled $false -UserUninstalled $true -MachineAbsentVerified ($unknown -eq 'ABSENT_VERIFIED') -UserAbsentVerified $false -CanApplyUser $true
+    Assert-TestTrue (-not $plan.RemoveMachineConfiguration) 'unknown machine state must defer machine cleanup'
+    Assert-TestTrue (-not $plan.RemoveMachineRemnants) 'unknown machine state must preserve machine remnants'
+}
+
+Invoke-TMPCTestCase 'D30e' 'OneDrive scope: cleanup loops use the independent scope plan' {
+    $removal = Get-TMPCFunctionText -Text $standaloneText -Names @('Invoke-OneDriveRemoval')
+    foreach ($fragment in @('$plan.RemoveMachineConfiguration', '$plan.RemoveMachineRemnants', '$plan.RemoveUserConfiguration', '$plan.RemoveUserRemnants')) {
+        Assert-TestTrue $removal.Contains($fragment) ('missing scope gate: {0}' -f $fragment)
+    }
+    Assert-TestTrue (-not $removal.Contains('$script:OneDriveUninstalled -or')) 'the combined uninstall flag must not gate machine cleanup'
+    Assert-TestTrue (-not $removal.Contains('Test-Path -LiteralPath $machine')) 'machine absence must not be inferred with Test-Path'
+    Assert-TestTrue (-not $removal.Contains('Test-Path -LiteralPath $user')) 'user absence must not be inferred with Test-Path'
+}
+
+Invoke-TMPCTestCase 'D30f' 'OneDrive scope: A-J scenario matrix' {
+    $scenarios = @(
+        @{ Name='A machine-only install'; M=$false; U=$false; MA=$false; UA=$true; Can=$true; Machine=$false; User=$true },
+        @{ Name='B user-only install'; M=$false; U=$false; MA=$true; UA=$false; Can=$true; Machine=$true; User=$false },
+        @{ Name='C both installs present'; M=$false; U=$false; MA=$false; UA=$false; Can=$true; Machine=$false; User=$false },
+        @{ Name='D machine uninstalled'; M=$true; U=$false; MA=$false; UA=$false; Can=$true; Machine=$true; User=$false },
+        @{ Name='E user uninstalled'; M=$false; U=$true; MA=$false; UA=$false; Can=$true; Machine=$false; User=$true },
+        @{ Name='F HKLM read denied'; M=$false; U=$true; MA=$false; UA=$false; Can=$true; Machine=$false; User=$true },
+        @{ Name='G machine state unknown'; M=$false; U=$false; MA=$false; UA=$false; Can=$true; Machine=$false; User=$false },
+        @{ Name='H uninstaller failed'; M=$false; U=$false; MA=$false; UA=$false; Can=$true; Machine=$false; User=$false },
+        @{ Name='I machine absent verified'; M=$false; U=$false; MA=$true; UA=$false; Can=$true; Machine=$true; User=$false },
+        @{ Name='J multiple users, target not authorized'; M=$false; U=$true; MA=$false; UA=$false; Can=$false; Machine=$false; User=$false }
+    )
+    foreach ($scenario in $scenarios) {
+        $plan = Get-TMPCOneDriveCleanupPlan -MachineUninstalled $scenario.M -UserUninstalled $scenario.U -MachineAbsentVerified $scenario.MA -UserAbsentVerified $scenario.UA -CanApplyUser $scenario.Can
+        Assert-TestEqual $scenario.Machine $plan.RemoveMachineConfiguration ('machine configuration gate: {0}' -f $scenario.Name)
+        Assert-TestEqual $scenario.Machine $plan.RemoveMachineRemnants ('machine remnant gate: {0}' -f $scenario.Name)
+        Assert-TestEqual $scenario.User $plan.RemoveUserConfiguration ('user configuration gate: {0}' -f $scenario.Name)
+        Assert-TestEqual $scenario.User $plan.RemoveUserRemnants ('user remnant gate: {0}' -f $scenario.Name)
+        if ($scenario.U -and -not $scenario.M -and -not $scenario.MA) {
+            Assert-TestTrue (-not $plan.RemoveMachineConfiguration) ('user success enabled machine cleanup: {0}' -f $scenario.Name)
+            Assert-TestTrue (-not $plan.RemoveMachineRemnants) ('user success enabled machine remnants: {0}' -f $scenario.Name)
+        }
+    }
+}
+
 $productionFunctions = New-TMPCFunctionsScriptBlock -Text $oneDriveText -Names $xmlOneDriveFunctions
 . $productionFunctions
 . (Join-Path $script:TestsRoot 'TMPC.Tests.Helpers.ps1')
 
-Invoke-TMPCTestCase 'D24f' 'XML OneDrive: strict parse and verified signature before execution' {
+Invoke-TMPCTestCase 'D24f' 'XML OneDrive: strict command, machine /allusers and verified signature' {
     Set-TestRegistryValue -Path 'HKLM:\TMPC-OD' -Name 'UninstallString' -Kind String -Value 'cmd.exe /c something-arbitrary'
-    $result = Invoke-OneDriveUninstaller -RegistryPath 'HKLM:\TMPC-OD'
+    $result = Invoke-OneDriveUninstaller -RegistryPath 'HKLM:\TMPC-OD' -Machine
     Assert-TestTrue (-not $result) 'a shell command must never run'
     Assert-TestEqual 0 $script:TestUninstallerCalls.Count 'nothing may be executed'
     Assert-TestLogContains 'not a recognized safe form'
@@ -493,16 +628,28 @@ Invoke-TMPCTestCase 'D24f' 'XML OneDrive: strict parse and verified signature be
     $exe = Join-Path $env:SystemRoot 'System32\OneDriveSetup.exe'
     Add-TestPathChain -Path $exe
     Set-TestRegistryValue -Path 'HKLM:\TMPC-OD' -Name 'UninstallString' -Kind String -Value ('"' + $exe + '" /uninstall')
+    $result = Invoke-OneDriveUninstaller -RegistryPath 'HKLM:\TMPC-OD' -Machine
+    Assert-TestTrue (-not $result) 'a machine entry without /allusers must be deferred'
+    Assert-TestEqual 0 $script:TestUninstallerCalls.Count 'wrong-scope machine uninstall must not run'
+    Assert-TestLogContains 'lacks allusers scope'
 
+    Set-TestRegistryValue -Path 'HKLM:\TMPC-OD' -Name 'UninstallString' -Kind String -Value ('"' + $exe + '" /uninstall /allusers /extra')
+    $result = Invoke-OneDriveUninstaller -RegistryPath 'HKLM:\TMPC-OD' -Machine
+    Assert-TestTrue (-not $result) 'unknown extra arguments must be rejected'
+    Assert-TestEqual 0 $script:TestUninstallerCalls.Count 'unknown arguments must not run'
+    Assert-TestLogContains 'not a recognized safe form'
+
+    Set-TestRegistryValue -Path 'HKLM:\TMPC-OD' -Name 'UninstallString' -Kind String -Value ('"' + $exe + '" /uninstall /allusers')
     $script:TestSignature = [pscustomobject]@{ Status = 'UnknownError'; SignerCertificate = $null }
-    Assert-TestThrows { Invoke-OneDriveUninstaller -RegistryPath 'HKLM:\TMPC-OD' } 'signature not verified' 'invalid signature'
+    Assert-TestThrows { Invoke-OneDriveUninstaller -RegistryPath 'HKLM:\TMPC-OD' -Machine } 'signature not verified' 'invalid signature'
     Assert-TestEqual 0 $script:TestUninstallerCalls.Count 'no execution with an unverified signature'
 
     $script:TestSignature = [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation' } }
-    $result = Invoke-OneDriveUninstaller -RegistryPath 'HKLM:\TMPC-OD'
+    $result = Invoke-OneDriveUninstaller -RegistryPath 'HKLM:\TMPC-OD' -Machine
     Assert-TestTrue $result 'a fully verified inbox uninstaller runs'
     Assert-TestEqual 1 $script:TestUninstallerCalls.Count 'executed exactly once'
-    Assert-TestTrue ($script:TestUninstallerCalls[0].EndsWith('/uninstall')) 'bounded arguments preserved'
+    Assert-TestTrue ($script:TestUninstallerCalls[0].EndsWith('/uninstall /allusers')) 'the machine scope is preserved exactly'
+    Assert-TestTrue ($oneDriveText.Contains('Invoke-OneDriveUninstaller -RegistryPath $machineUninstallKey -Machine')) 'the XML machine caller must request machine scope'
 }
 
 Invoke-TMPCTestCase 'D24g' 'XML OneDrive: reparse point, sync root and allowlist guards' {
@@ -512,6 +659,65 @@ Invoke-TMPCTestCase 'D24g' 'XML OneDrive: reparse point, sync root and allowlist
 
     Assert-TestThrows { Remove-OneDriveRemnant -Path 'C:\Users\TMPC-Test\OneDrive\junk' -AllowedRoots @('C:\Users\TMPC-Test\OneDrive\junk') -ProtectedRoots @('C:\Users\TMPC-Test\OneDrive') } 'Sync-root overlap' 'custom sync root'
     Assert-TestThrows { Remove-OneDriveRemnant -Path 'C:\Users\TMPC-Test\Documents' -AllowedRoots @() -ProtectedRoots @() } 'Deletion target rejected' 'path outside the allowlist'
+}
+
+$productionFunctions = New-TMPCFunctionsScriptBlock -Text $sysText -Names $xmlRegistryFunctions
+. $productionFunctions
+. (Join-Path $script:TestsRoot 'TMPC.Tests.Helpers.ps1')
+
+Invoke-TMPCTestCase 'D29' 'XML registry: default value and REG_BINARY use exact bytes' {
+    $script:CustomizationHadErrors = $false
+    Set-TestRegistryValue -Path 'HKCU:\TMPC-XML' -Name '' -Kind String -Value 'legacy'
+    Set-RegistryValue -Path 'HKCU:\TMPC-XML' -Name '(Default)' -Type 'String' -Value '' -Description 'default value probe'
+    Assert-TestEqual 1 $script:TestWriteAttempts.Count 'one default-value write expected'
+    Assert-TestTrue ($script:TestWriteAttempts[0].EndsWith('||String')) 'the default write must use the empty value name'
+    $defaultEntry = Get-TestRegistryValue -Path 'HKCU:\TMPC-XML' -Name ''
+    Assert-TestTrue ($null -ne $defaultEntry) 'the unnamed default value must exist'
+    Assert-TestEqual '' $defaultEntry.Value 'the default value must be applied'
+    Assert-TestTrue ($null -eq (Get-TestRegistryValue -Path 'HKCU:\TMPC-XML' -Name '(Default)')) 'no literal (Default) value may be created'
+
+    Set-RegistryValue -Path 'HKCU:\TMPC-XML' -Name '(Default)' -Type 'String' -Value '' -Description 'default value probe'
+    Assert-TestEqual 1 $script:TestWriteAttempts.Count 'the default value must be idempotent'
+
+    Set-TestRegistryValue -Path 'HKCU:\TMPC-XML' -Name 'link' -Kind Binary -Value ([byte[]](0x00,0x01))
+    Set-RegistryValue -Path 'HKCU:\TMPC-XML' -Name 'link' -Type 'Binary' -Value @(0x15,0x00,0x00,0x00) -Description 'binary probe'
+    Assert-TestEqual 2 $script:TestWriteAttempts.Count 'one binary write expected'
+    $binaryEntry = Get-TestRegistryValue -Path 'HKCU:\TMPC-XML' -Name 'link'
+    Assert-TestTrue ($null -ne $binaryEntry) 'the binary value must exist'
+    Assert-TestEqual ([Microsoft.Win32.RegistryValueKind]::Binary) $binaryEntry.Kind 'the binary kind must be preserved'
+    Assert-TestTrue ($binaryEntry.Value -is [byte[]]) 'the stored binary value must be a byte[]'
+    Assert-TestEqual 4 $binaryEntry.Value.Length 'the exact binary length must be stored'
+    Assert-TestEqual 0x15 $binaryEntry.Value[0] 'byte 0 must match'
+    Assert-TestEqual 0x00 $binaryEntry.Value[1] 'byte 1 must match'
+    Assert-TestEqual 0x00 $binaryEntry.Value[2] 'byte 2 must match'
+    Assert-TestEqual 0x00 $binaryEntry.Value[3] 'byte 3 must match'
+
+    Set-RegistryValue -Path 'HKCU:\TMPC-XML' -Name 'link' -Type 'Binary' -Value @(0x15,0x00,0x00,0x00) -Description 'binary probe'
+    Assert-TestEqual 2 $script:TestWriteAttempts.Count 'the binary value must be idempotent'
+
+    Set-TestRegistryValue -Path 'HKCU:\TMPC-XML' -Name 'Word' -Kind String -Value '1'
+    Set-RegistryValue -Path 'HKCU:\TMPC-XML' -Name 'Word' -Type 'DWord' -Value 1 -Description 'non-binary probe'
+    $wordEntry = Get-TestRegistryValue -Path 'HKCU:\TMPC-XML' -Name 'Word'
+    Assert-TestEqual ([Microsoft.Win32.RegistryValueKind]::DWord) $wordEntry.Kind 'non-binary types must keep their kind'
+    Assert-TestEqual 1 $wordEntry.Value 'non-binary values must keep their value'
+    Assert-TestEqual $false $script:CustomizationHadErrors 'no registry error expected'
+}
+
+Invoke-TMPCTestCase 'D29b' 'XML registry: binary post-write verification failure is a real error' {
+    $script:CustomizationHadErrors = $false
+    $script:TestCorruptAfterWrite = $true
+    Set-RegistryValue -Path 'HKCU:\TMPC-XML' -Name 'link' -Type 'Binary' -Value @(0x15,0x00,0x00,0x00) -Description 'corrupted binary probe'
+    Assert-TestTrue $script:CustomizationHadErrors 'a corrupted binary write must set the error flag'
+    Assert-TestLogContains 'VERIFY_FAILED'
+}
+
+Invoke-TMPCTestCase 'D29c' 'XML GetValueNames model: empty string is the default; other names unchanged' {
+    Assert-TestTrue (Test-RegistryValueName -ValueNames @('', 'Alpha') -Name '(Default)') 'the alias must map to the empty default name'
+    Assert-TestTrue (Test-RegistryValueName -ValueNames @('', 'Alpha') -Name '') 'the empty name must map to the default value'
+    Assert-TestTrue (Test-RegistryValueName -ValueNames @('', 'Alpha') -Name 'Alpha') 'normal names must be preserved'
+    Assert-TestTrue (-not (Test-RegistryValueName -ValueNames @('(Default)') -Name '(Default)')) 'a literal "(Default)" value must not be mistaken for the default'
+    Assert-TestTrue (-not (Test-RegistryValueName -ValueNames @('') -Name $null)) 'a null probe must not be treated as a value'
+    Assert-TestTrue (-not (Test-RegistryValueName -ValueNames @('') -Name '(Default)Value')) 'similar names must not be rewritten'
 }
 
 # ---------------------------------------------------------------------------

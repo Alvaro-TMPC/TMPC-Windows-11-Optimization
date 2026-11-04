@@ -12,7 +12,7 @@ behavior promised by the TMPC baseline and the main peripherals.
 It assumes that the installation is complete: you have reached the final
 desktop, the automatic restart scheduled by the profile has happened and the
 normal cleanup has finished. Installing the profile itself is documented in
-the [README](../README.md).
+the [README in English](../README.en.md).
 
 Keep in mind:
 
@@ -365,7 +365,7 @@ not part of the normal post-installation checklist.
 
 ## See also
 
-- [README](../README.md): project overview, installation and baseline
+- [README in English](../README.en.md): project overview, installation and baseline
   summary.
 - [Pre-installation preparation](pre-installation-preparation.md):
   backups, drivers and installation media before formatting.

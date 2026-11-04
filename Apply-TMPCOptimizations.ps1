@@ -16,12 +16,17 @@
 .PARAMETER NetFx3Source
     Optional local sources\sxs directory from matching Windows media. No download.
 .NOTES
-    Standalone version: 0.2.0. Source profile: v0.1.5 plus the 26H2 candidate blocks
+    Standalone version: 0.2.1. Source profile: v0.1.5 plus the 26H2 candidate blocks
     (Start pins policy, cloud content policy and All apps view), now with an idempotent,
     verified registry engine: every inventory entry is read first, written only when it
     differs and re-read to verify the result. Per-operation states: ALREADY_COMPLIANT,
     APPLIED, READ_DENIED, WRITE_DENIED, WRITE_FAILED, VERIFY_FAILED,
-    CONFLICTING_STATE and SKIPPED_NOT_APPLICABLE.
+    CONFLICTING_STATE and SKIPPED_NOT_APPLICABLE. The unnamed default registry value
+    is addressed with the empty string returned by RegistryKey.GetValueNames(); binary
+    writes use byte[] with exact byte verification. OneDrive machine-scope and
+    user-scope cleanup require independent evidence, so a user-scope uninstall never
+    authorizes HKLM or shared-component cleanup, and a denied read is never treated
+    as absence.
     Compatibility classification (documented in README and docs EN/ES):
       TESTED_ON: Windows 11 Pro 26H2, build base 26300, x64 (UBR not fixed).
       SUPPORTED_BY_DESIGN: Windows 11 client (build >= 22000), native AMD64, Windows
@@ -36,7 +41,7 @@
     (historical reference). This standalone has static validation plus an isolated,
     registry-free automated test suite (scripts/tests); it has no host runtime validation.
     Project: https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization
-    SOURCE_AUTOUNATTEND_SHA256 = D99BF0EC59A8CB322A84E99F36373FEDD6358350A0D053A02FEB24C11A608EA4
+    SOURCE_AUTOUNATTEND_SHA256 = 2E85E8DD733434364AEFF17BFBB27A5869F771CB1C3DE1942722F8439D470B36
     validate-baseline.ps1 checks this binding AND the registry/removal inventories.
     Derived from autounattend.xml, including material based on
     memstechtips/UnattendedWinstall, revision cca752363772a845eb0fed9d3a5b89b5d0a10d20.
@@ -219,10 +224,35 @@ function Test-CurrentDesktopIdentity {
 # read throws and is classified as READ_DENIED by the callers: absence is never
 # assumed after a read error and nothing is written blindly. A missing key is
 # detected through ItemNotFoundException only.
+#
+# The unnamed default value of a key is represented by the empty string in
+# RegistryKey.GetValueNames(); PowerShell cmdlets also accept the "(Default)"
+# alias. The inventory keeps the readable alias, but the primitives normalize it
+# to the empty name so reads, writes and verification always address the real
+# default value. No other value name is rewritten.
 # ---------------------------------------------------------------------------
+function ConvertTo-TMPCRegistryValueName {
+    param($Name)
+    if ($null -ne $Name -and [string]::Equals([string]$Name, '(Default)', [StringComparison]::OrdinalIgnoreCase)) {
+        return ''
+    }
+    return $Name
+}
+
+function Test-TMPCRegistryValueName {
+    # Models RegistryKey.GetValueNames(): the default value is named "".
+    param([string[]]$ValueNames, $Name)
+    $normalizedName = ConvertTo-TMPCRegistryValueName -Name $Name
+    if ($null -eq $normalizedName) { return $false }
+    return @($ValueNames) -contains $normalizedName
+}
+
 function Get-TMPCRegistryEntryState {
     # Returns PathExists, ValueExists, Kind and Value for an exact probe.
-    param([string]$Path, [string]$Name)
+    # $Name is deliberately untyped: $null means "probe the key only", while an
+    # empty string means the unnamed default value.
+    param([string]$Path, $Name)
+    $normalizedName = ConvertTo-TMPCRegistryValueName -Name $Name
     $pathExists = $false
     $valueExists = $false
     $kind = $null
@@ -237,11 +267,11 @@ function Get-TMPCRegistryEntryState {
     if ($key) {
         $pathExists = $true
         try {
-            if ($Name) {
-                $valueExists = @($key.GetValueNames()) -contains $Name
+            if ($null -ne $normalizedName) {
+                $valueExists = Test-TMPCRegistryValueName -ValueNames @($key.GetValueNames()) -Name $normalizedName
                 if ($valueExists) {
-                    $kind = $key.GetValueKind($Name)
-                    $value = $key.GetValue($Name)
+                    $kind = $key.GetValueKind($normalizedName)
+                    $value = $key.GetValue($normalizedName)
                 }
             }
         } finally { $key.Close() }
@@ -251,8 +281,12 @@ function Get-TMPCRegistryEntryState {
 
 function Write-TMPCRegistryEntry {
     param([string]$Path, [string]$Name, [string]$Type, $Value, [bool]$PathExists)
+    $normalizedName = ConvertTo-TMPCRegistryValueName -Name $Name
     if (-not $PathExists) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
-    Set-ItemProperty -LiteralPath $Path -Name $Name -Type $Type -Value $Value -Force -ErrorAction Stop
+    # The provider maps "(Default)" to the unnamed value; an empty -Name does
+    # not bind in Windows PowerShell 5.1, so the alias is used only here.
+    $providerName = if ($normalizedName -eq '') { '(Default)' } else { $normalizedName }
+    Set-ItemProperty -LiteralPath $Path -Name $providerName -Type $Type -Value $Value -Force -ErrorAction Stop
 }
 
 function Remove-TMPCRegistryEntry {
@@ -828,7 +862,8 @@ function Invoke-RegistryProfile {
         }
         $parts = $line -split '\|', 3
         if ($parts.Count -ne 3) { throw 'Invalid registry inventory.' }
-        $name = $parts[0]
+        # Readable inventory alias -> the real unnamed default value.
+        $name = ConvertTo-TMPCRegistryValueName -Name $parts[0]
         $typeName = $parts[1]
         $expected = switch ($typeName) {
             'DWord' { [int]$parts[2] }
@@ -1350,6 +1385,45 @@ function Invoke-DefaultOneDrivePolicy {
     }
 }
 
+function Get-TMPCOneDriveRegistrationState {
+    # A successful read that reports no key is the only accepted proof of
+    # absence. A denied or failed read is UNKNOWN and never authorizes cleanup.
+    param([string]$Path)
+    if (-not $Path) { return 'NOT_APPLICABLE' }
+    $state = $null
+    try { $state = Get-TMPCRegistryEntryState -Path $Path -Name $null }
+    catch { return 'UNKNOWN' }
+    if ($state.PathExists) { return 'PRESENT' }
+    return 'ABSENT_VERIFIED'
+}
+
+function Get-TMPCOneDriveCleanupPlan {
+    # Scope separation: a user-scope uninstall or verified user absence never
+    # authorizes machine-scope cleanup. Machine and user evidence are evaluated
+    # independently and only the matching scope is cleaned.
+    param(
+        [bool]$MachineUninstalled,
+        [bool]$UserUninstalled,
+        [bool]$MachineAbsentVerified,
+        [bool]$UserAbsentVerified,
+        [bool]$CanApplyUser
+    )
+    $machineEvidence = [bool]($MachineUninstalled -or $MachineAbsentVerified)
+    $userEvidence = [bool]($CanApplyUser -and ($UserUninstalled -or $UserAbsentVerified))
+    [pscustomobject]@{
+        MachineUninstalled       = [bool]$MachineUninstalled
+        UserUninstalled          = [bool]$UserUninstalled
+        MachineAbsentVerified    = [bool]$MachineAbsentVerified
+        UserAbsentVerified       = [bool]$UserAbsentVerified
+        MachineEvidence          = $machineEvidence
+        UserEvidence             = $userEvidence
+        RemoveMachineConfiguration = $machineEvidence
+        RemoveMachineRemnants      = $machineEvidence
+        RemoveUserConfiguration    = $userEvidence
+        RemoveUserRemnants         = $userEvidence
+    }
+}
+
 function Invoke-OneDriveRemoval {
     Write-Log 'OneDrive user content is preserved: %USERPROFILE%\OneDrive is excluded from deletion.'
     # Capture custom sync roots BEFORE uninstall/configuration cleanup changes
@@ -1412,14 +1486,27 @@ function Invoke-OneDriveRemoval {
             }
         }
         # Never erase uninstall/configuration evidence after a failed or
-        # unrecognized uninstall. An already absent installation is idempotent.
-        $machineAbsent = -not (Test-Path -LiteralPath $machine)
-        $userAbsent = -not $script:CanApplyUser -or -not (Test-Path -LiteralPath $user)
-        if ($script:OneDriveUninstalled -or ($machineAbsent -and $userAbsent)) {
-            $paths = @('HKLM:\SOFTWARE\Microsoft\OneDrive','HKLM:\SOFTWARE\WOW6432Node\Microsoft\OneDrive')
-            if ($script:CanApplyUser) { $paths += @('HKCU:\SOFTWARE\Microsoft\OneDrive','HKCU:\SOFTWARE\WOW6432Node\Microsoft\OneDrive') }
-            foreach ($path in $paths) {
-                Invoke-Operation 'OneDrive configuration key removal' {
+        # unrecognized uninstall. Absence requires a successful read that says
+        # the key does not exist; a denied read is UNKNOWN and defers cleanup.
+        $machineState = Get-TMPCOneDriveRegistrationState -Path $machine
+        $userState = if ($script:CanApplyUser) { Get-TMPCOneDriveRegistrationState -Path $user } else { 'NOT_APPLICABLE' }
+        if ($machineState -eq 'UNKNOWN') {
+            Write-Log 'Machine OneDrive registration state could not be read; machine cleanup deferred.' 'WARNING'
+        }
+        if ($userState -eq 'UNKNOWN') {
+            Write-Log 'User OneDrive registration state could not be read; user cleanup deferred.' 'WARNING'
+        }
+        $plan = Get-TMPCOneDriveCleanupPlan `
+            -MachineUninstalled ([bool]$script:OneDriveMachineUninstalled) `
+            -UserUninstalled ([bool]$script:OneDriveUserUninstalled) `
+            -MachineAbsentVerified ($machineState -eq 'ABSENT_VERIFIED') `
+            -UserAbsentVerified ($userState -eq 'ABSENT_VERIFIED') `
+            -CanApplyUser ([bool]$script:CanApplyUser)
+        $script:OneDriveUninstalled = $plan.MachineUninstalled -or $plan.UserUninstalled
+
+        if ($plan.RemoveMachineConfiguration) {
+            foreach ($path in @('HKLM:\SOFTWARE\Microsoft\OneDrive','HKLM:\SOFTWARE\WOW6432Node\Microsoft\OneDrive')) {
+                Invoke-Operation 'OneDrive machine configuration key removal' {
                     $state = $null
                     try { $state = Get-TMPCRegistryEntryState -Path $path -Name $null }
                     catch { throw 'READ_DENIED' }
@@ -1433,17 +1520,54 @@ function Invoke-OneDriveRemoval {
                     return 'APPLIED'
                 }
             }
-            $remnants = @(
+        } else {
+            Write-Log 'Machine OneDrive configuration preserved: no positive machine uninstall or verified machine absence.' 'WARNING'
+        }
+
+        if ($plan.RemoveUserConfiguration) {
+            foreach ($path in @('HKCU:\SOFTWARE\Microsoft\OneDrive','HKCU:\SOFTWARE\WOW6432Node\Microsoft\OneDrive')) {
+                Invoke-Operation 'OneDrive user configuration key removal' {
+                    $state = $null
+                    try { $state = Get-TMPCRegistryEntryState -Path $path -Name $null }
+                    catch { throw 'READ_DENIED' }
+                    if (-not $state.PathExists) { return 'ALREADY_COMPLIANT' }
+                    try { Remove-TMPCRegistryEntry -Path $path -Name '' }
+                    catch { throw 'WRITE_DENIED' }
+                    $after = $null
+                    try { $after = Get-TMPCRegistryEntryState -Path $path -Name $null }
+                    catch { throw 'VERIFY_FAILED' }
+                    if ($after.PathExists) { throw 'VERIFY_FAILED' }
+                    return 'APPLIED'
+                }
+            }
+        } else {
+            Write-Log 'User OneDrive configuration preserved: no positive user uninstall or verified user absence for the authorized target account.' 'WARNING'
+        }
+
+        if ($plan.RemoveMachineRemnants) {
+            foreach ($path in @(
                 (Join-Path $env:ProgramFiles 'Microsoft OneDrive'),
                 (Join-Path $env:ProgramData 'Microsoft OneDrive'),
                 (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\OneDrive.lnk')
-            )
-            if ($script:CanApplyUser) {
-                $remnants += Join-Path $env:USERPROFILE 'AppData\Local\Microsoft\OneDrive'
-                $remnants += Join-Path $env:USERPROFILE 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk'
+            )) {
+                Invoke-Operation 'OneDrive allowlisted machine software remnant removal' { Remove-OneDriveRemnant $path }
             }
-            foreach ($path in $remnants) { Invoke-Operation 'OneDrive allowlisted software remnant removal' { Remove-OneDriveRemnant $path } }
         } else {
+            Write-Log 'Machine OneDrive remnants preserved: no positive machine uninstall or verified machine absence.' 'WARNING'
+        }
+
+        if ($plan.RemoveUserRemnants) {
+            foreach ($path in @(
+                (Join-Path $env:USERPROFILE 'AppData\Local\Microsoft\OneDrive'),
+                (Join-Path $env:USERPROFILE 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk')
+            )) {
+                Invoke-Operation 'OneDrive allowlisted user software remnant removal' { Remove-OneDriveRemnant $path }
+            }
+        } else {
+            Write-Log 'User OneDrive remnants preserved: no positive user uninstall or verified user absence for the authorized target account.' 'WARNING'
+        }
+
+        if (-not $plan.MachineEvidence -and -not $plan.UserEvidence) {
             Write-Log 'OneDrive uninstall not confirmed; configuration/remnants preserved. Manual review needed.' 'WARNING'
         }
     }
@@ -1650,7 +1774,7 @@ try {
     New-Item -Path $logs -ItemType Directory -Force | Out-Null
     Assert-NoReparsePath $logs
     $script:LogPath = Join-Path $logs ('Apply-{0}-{1}-{2}.log' -f $script:Mode,(Get-Date -Format 'yyyyMMdd-HHmmss'),[Guid]::NewGuid().ToString('N'))
-    Write-Log "Standalone 0.2.0; mode $script:Mode; $($preflight.Summary)"
+    Write-Log "Standalone 0.2.1; mode $script:Mode; $($preflight.Summary)"
     if (-not $preflight.TestedReference) { Write-Log $preflight.UntestedNote 'WARNING' }
     if (-not $UserOnly) { Invoke-SystemPhase }
     if ($script:CanApplyUser) { Invoke-UserPhase }

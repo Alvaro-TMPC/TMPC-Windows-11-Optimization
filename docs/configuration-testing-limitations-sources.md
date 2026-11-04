@@ -19,7 +19,7 @@ derives the relevant post-install profile from that XML, with Full and UserOnly
 modes. It has static validation only, not a runtime/hardware result. Its error
 exit codes, persistent logs, identity checks, optional restart and limitations
 (local source for NetFx3, existing Start/Downloads state and deferred OneNote
-desktop/unsafe OneDrive cleanup) are described in [README](../README.md).
+desktop/unsafe OneDrive cleanup) are described in [README in English](../README.en.md).
 Setup/OOBE bypasses, network toggling and one-shot cleanup are not reproduced.
 The source hash and exact registry/removal inventories are checked by the static
 validator; the clean-install evidence is not standalone equivalence evidence.
@@ -138,7 +138,7 @@ On the real repository files:
 SHA-256 hashes of the current baseline:
 
 - `autounattend.xml`:
-  `D99BF0EC59A8CB322A84E99F36373FEDD6358350A0D053A02FEB24C11A608EA4`.
+  `2E85E8DD733434364AEFF17BFBB27A5869F771CB1C3DE1942722F8439D470B36`.
 - `ventoy.json`:
   `058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B`.
 
@@ -155,7 +155,12 @@ uninstall string execution, no forced process termination, no
 reparse-point rejection for OneDrive remnants). The isolated suite
 `scripts/tests` (in-memory doubles; it never touches the host registry,
 filesystem or processes) covers the engine, the preflight, the exit codes and
-the safety rejections.
+the safety rejections. The R1 corrections cover the unnamed default registry
+value (empty value name from `GetValueNames()`), exact `byte[]` writes for
+`REG_BINARY`, the `/allusers` requirement for XML machine-scope OneDrive
+uninstall entries, and independent machine/user evidence for standalone
+OneDrive cleanup. They are statically validated and covered by isolated tests;
+no clean-install runtime or hash-equivalence test has been performed.
 
 ### Supported compatibility and classification
 

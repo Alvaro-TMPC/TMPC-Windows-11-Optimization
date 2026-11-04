@@ -20,7 +20,7 @@ Solo tiene validación estática, sin resultado runtime/hardware. Sus códigos d
 error, logs persistentes, comprobación de identidad, reinicio opcional y
 limitaciones (origen local para NetFx3, estado existente de Start/Downloads y
 OneNote de escritorio/limpieza insegura de OneDrive diferidos) se describen en
-[README](../README.es.md). No reproduce los bypass de Setup/OOBE, los cambios
+[README](../README.md). No reproduce los bypass de Setup/OOBE, los cambios
 temporales de red ni el cleanup one-shot. El validador estático comprueba el hash
 fuente y los inventarios exactos de Registro/eliminación; la evidencia de
 instalación limpia no demuestra equivalencia del standalone.
@@ -146,7 +146,7 @@ Sobre los archivos reales del repositorio:
 Hashes SHA-256 del baseline actual:
 
 - `autounattend.xml`:
-  `D99BF0EC59A8CB322A84E99F36373FEDD6358350A0D053A02FEB24C11A608EA4`.
+  `2E85E8DD733434364AEFF17BFBB27A5869F771CB1C3DE1942722F8439D470B36`.
 - `ventoy.json`:
   `058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B`.
 
@@ -163,7 +163,14 @@ forzada de procesos, sin `takeown`/`icacls`, sin borrados diferidos al
 reinicio y con allowlist estricta y rechazo de reparse points para restos de
 OneDrive). La suite aislada `scripts/tests` (dobles en memoria; nunca toca el
 Registro, el sistema de archivos ni procesos del anfitrión) cubre el motor,
-el preflight, los códigos de salida y los rechazos de seguridad.
+el preflight, los códigos de salida y los rechazos de seguridad. Las
+correcciones R1 cubren el valor predeterminado sin nombre del Registro (nombre
+vacío de `GetValueNames()`), escrituras `byte[]` exactas para `REG_BINARY`, la
+exigencia de `/allusers` en las entradas XML de desinstalación OneDrive de
+ámbito máquina y la evidencia independiente de máquina/usuario en la limpieza
+OneDrive del standalone. Están validadas estáticamente y cubiertas por pruebas
+aisladas; no se ha realizado prueba runtime en instalación limpia ni prueba de
+equivalencia por hash.
 
 ### Compatibilidad admitida y clasificación
 

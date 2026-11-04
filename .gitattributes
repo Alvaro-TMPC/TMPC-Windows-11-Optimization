@@ -1,6 +1,7 @@
 autounattend.xml text eol=lf
 ventoy.json text eol=crlf
 README.md text eol=lf
+README.en.md text eol=lf
 README.es.md text eol=lf
 LICENSE text eol=lf
 THIRD_PARTY_NOTICES.md text eol=lf

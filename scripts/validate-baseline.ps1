@@ -331,19 +331,56 @@ function Test-XmlHardening {
         if ($OneDriveText.Contains($check.Fragment)) { Add-Ok $check.Description }
         else { Add-Fail ("{0}: fragmento no encontrado" -f $check.Description) }
     }
+    # F04: the XML variant only runs the machine entry and must require the
+    # explicit /allusers scope. The caller must request machine scope too.
+    if ($OneDriveText.Contains('[switch]$Machine') -and
+        $OneDriveText.Contains('$Machine -and $arguments -ne') -and
+        $OneDriveText.Contains("'/uninstall /allusers'") -and
+        $OneDriveText.Contains('lacks allusers scope')) {
+        Add-Ok 'OneDrive XML: desinstalador de maquina exige /allusers y aplaza el resto'
+    } else { Add-Fail 'OneDrive XML: falta la exigencia /allusers del desinstalador de maquina' }
+    if (@($odErrors).Count -eq 0) {
+        $uninstallerCalls=@($odAst.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-OneDriveUninstaller'},$true))
+        $missingMachine=@($uninstallerCalls | Where-Object {
+            $hasMachine=$false
+            for ($i=1; $i -lt $_.CommandElements.Count; $i++) {
+                $element=$_.CommandElements[$i]
+                if ($element -is [System.Management.Automation.Language.CommandParameterAst] -and $element.ParameterName -eq 'Machine') { $hasMachine=$true }
+            }
+            -not $hasMachine
+        })
+        if ($uninstallerCalls.Count -gt 0 -and $missingMachine.Count -eq 0) {
+            Add-Ok 'OneDrive XML: toda llamada al desinstalador declara el ambito de maquina'
+        } else { Add-Fail 'OneDrive XML: hay llamadas al desinstalador sin ambito de maquina' }
+    }
 
     # Embedded registry engine (mirror of the standalone idempotent contract).
     if (@($sysErrors).Count -eq 0) {
         try {
             $embeddedSet=(Get-StaticFunction $sysAst 'Set-RegistryValue').Extent.Text
+            $embeddedGet=(Get-StaticFunction $sysAst 'Get-RegistryEntryState').Extent.Text
+            $embeddedWrite=(Get-StaticFunction $sysAst 'Write-RegistryValue').Extent.Text
+            $embeddedDefault=(Get-StaticFunction $sysAst 'ConvertTo-RegistryValueName').Extent.Text
+            $embeddedNameTest=(Get-StaticFunction $sysAst 'Test-RegistryValueName').Extent.Text
             $embeddedRead=$embeddedSet.IndexOf('Get-RegistryEntryState -Path $Path -Name $Name')
-            $embeddedWrite=$embeddedSet.IndexOf('Set-ItemProperty -Path $Path -Name $Name')
+            $embeddedWriteCall=$embeddedSet.IndexOf('Write-RegistryValue -Path $Path -Name $Name')
             $embeddedLastRead=$embeddedSet.LastIndexOf('Get-RegistryEntryState -Path $Path -Name $Name')
-            if ($embeddedRead -ge 0 -and $embeddedWrite -gt $embeddedRead -and $embeddedLastRead -gt $embeddedWrite -and
+            if ($embeddedRead -ge 0 -and $embeddedWriteCall -gt $embeddedRead -and $embeddedLastRead -gt $embeddedWriteCall -and
                 $embeddedSet.Contains('ALREADY_COMPLIANT') -and $embeddedSet.Contains('READ_DENIED') -and
                 $embeddedSet.Contains('WRITE_DENIED') -and $embeddedSet.Contains('VERIFY_FAILED')) {
                 Add-Ok 'XML: Set-RegistryValue lee el estado, escribe solo si difiere y verifica; estados diferenciables'
             } else { Add-Fail 'XML: Set-RegistryValue no cumple el contrato idempotente verificado' }
+            if ($embeddedDefault.Contains("'(Default)'") -and $embeddedDefault.Contains("return ''") -and
+                $embeddedGet.Contains('ConvertTo-RegistryValueName') -and $embeddedGet.Contains('$key.GetValueNames()') -and
+                $embeddedGet.Contains('$null -ne $normalizedName') -and $embeddedNameTest.Contains('-contains $normalizedName') -and
+                $embeddedWrite.Contains("'(Default)'") -and $embeddedWrite.Contains("Name -eq ''")) {
+                Add-Ok 'XML: el valor predeterminado se normaliza a la cadena vacia en lectura y escritura'
+            } else { Add-Fail 'XML: el valor predeterminado no se direcciona con la cadena vacia' }
+            if ($embeddedSet.Contains('$expected = [byte[]]$Value') -and $embeddedSet.Contains('-Value $expected') -and
+                -not ($embeddedSet -match 'Write-RegistryValue[^\r\n]*-Value \$Value\b') -and
+                $embeddedWrite.Contains('Set-ItemProperty')) {
+                Add-Ok 'XML: las escrituras binarias usan byte[] y verifican los bytes exactos'
+            } else { Add-Fail 'XML: la escritura binaria no usa la conversion byte[]' }
             foreach ($removalName in @('Remove-RegistryValue','Remove-RegistryKey')) {
                 $removal=(Get-StaticFunction $sysAst $removalName).Extent.Text
                 if ($removal.Contains('ALREADY_COMPLIANT') -and $removal.Contains('VERIFY_FAILED') -and $removal.Contains('READ_DENIED')) {
@@ -352,7 +389,7 @@ function Test-XmlHardening {
             }
             if ((Get-StaticFunction $sysAst 'Set-BinaryBit').Extent.Text.Contains('ALREADY_COMPLIANT') -and
                 (Get-StaticFunction $sysAst 'Set-BinaryBit').Extent.Text.Contains('VERIFY_FAILED') -and
-                (Get-StaticFunction $sysAst 'Get-RegistryEntryState').Extent.Text.Contains('ItemNotFoundException')) {
+                $embeddedGet.Contains('ItemNotFoundException')) {
                 Add-Ok 'XML: preferencias binarias idempotentes y verificadas; lectura denegada no se confunde con ausencia'
             } else { Add-Fail 'XML: preferencias binarias o discriminacion de lectura incompletas' }
         } catch { Add-Fail ("XML hardening AST: {0}" -f $_.Exception.Message) }
@@ -372,7 +409,7 @@ function Test-TestsSuite {
     if (-not $helpersRecord.Exists) { Add-Fail 'scripts/tests/TMPC.Tests.Helpers.ps1: no existe' }
     if (-not $runnerRecord.Exists -or -not $helpersRecord.Exists) { return }
     if (-not $helpersRecord.DecodeOk -or -not $runnerRecord.DecodeOk) { Add-Fail 'Suite de tests: no es UTF-8 valido'; return }
-    $doubleMarkers=@('Get-TMPCRegistryEntryState','Write-TMPCRegistryEntry','Remove-TMPCRegistryEntry','Get-TMPCPathItem','Get-TMPCSignature','Start-TMPCVerifiedUninstaller','Get-TMPCSystemInfo','Get-RegistryEntryState')
+    $doubleMarkers=@('Get-TMPCRegistryEntryState','Write-TMPCRegistryEntry','Remove-TMPCRegistryEntry','Get-TMPCPathItem','Get-TMPCSignature','Start-TMPCVerifiedUninstaller','Get-TMPCSystemInfo','Get-RegistryEntryState','Write-RegistryValue')
     $missingDoubles=@($doubleMarkers | Where-Object { -not $helpersRecord.Text.Contains($_) })
     if ($missingDoubles.Count -eq 0) { Add-Ok 'Suite de tests: dobles en memoria para Registro, sistema de archivos, firma, ejecucion y preflight' }
     else { Add-Fail ("Suite de tests: faltan dobles: {0}" -f ($missingDoubles -join ', ')) }
@@ -464,7 +501,7 @@ function Test-PostInstallStandalone {
         Add-Ok 'Standalone: SOURCE_AUTOUNATTEND_SHA256 coincide; deriva futura bloqueada'
     } else { Add-Fail 'Standalone: hash fuente ausente/ambiguo/desincronizado' }
     $fixedHashes=@{
-        'autounattend.xml'='D99BF0EC59A8CB322A84E99F36373FEDD6358350A0D053A02FEB24C11A608EA4'
+        'autounattend.xml'='2E85E8DD733434364AEFF17BFBB27A5869F771CB1C3DE1942722F8439D470B36'
         'ventoy.json'='058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B'
     }
     foreach ($file in $fixedHashes.Keys) {
@@ -765,6 +802,30 @@ function Test-PostInstallStandalone {
         if ($registryEngine.Contains('Test-TMPCRegistryStateEqual')) {
             Add-Ok 'Motor idempotente: comparacion exacta de tipo y valor (incluidas cadenas ordinales y binarios byte a byte)'
         } else { Add-Fail 'Motor idempotente: falta la comparacion exacta de tipo/valor' }
+        $standaloneDefault=(Get-StaticFunction $ast 'ConvertTo-TMPCRegistryValueName').Extent.Text
+        $standaloneNameTest=(Get-StaticFunction $ast 'Test-TMPCRegistryValueName').Extent.Text
+        $standaloneGet=(Get-StaticFunction $ast 'Get-TMPCRegistryEntryState').Extent.Text
+        $standaloneWrite=(Get-StaticFunction $ast 'Write-TMPCRegistryEntry').Extent.Text
+        if ($standaloneDefault.Contains("'(Default)'") -and $standaloneDefault.Contains("return ''") -and
+            $standaloneGet.Contains('$key.GetValueNames()') -and $standaloneGet.Contains('Test-TMPCRegistryValueName') -and
+            $standaloneNameTest.Contains('-contains $normalizedName') -and
+            $standaloneWrite.Contains("'(Default)'") -and $standaloneWrite.Contains("Name -eq ''")) {
+            Add-Ok 'Standalone: el valor predeterminado usa la cadena vacia y no crea un valor literal "(Default)"'
+        } else { Add-Fail 'Standalone: el valor predeterminado no se direcciona con la cadena vacia' }
+        $scopePlan=(Get-StaticFunction $ast 'Get-TMPCOneDriveCleanupPlan').Extent.Text
+        $scopeState=(Get-StaticFunction $ast 'Get-TMPCOneDriveRegistrationState').Extent.Text
+        $removalFunction=(Get-StaticFunction $ast 'Invoke-OneDriveRemoval').Extent.Text
+        if ($scopePlan.Contains('RemoveMachineConfiguration') -and $scopePlan.Contains('RemoveMachineRemnants') -and
+            $scopePlan.Contains('RemoveUserConfiguration') -and $scopePlan.Contains('RemoveUserRemnants') -and
+            $removalFunction.Contains('$plan.RemoveMachineConfiguration') -and $removalFunction.Contains('$plan.RemoveMachineRemnants') -and
+            $removalFunction.Contains('$plan.RemoveUserConfiguration') -and $removalFunction.Contains('$plan.RemoveUserRemnants') -and
+            -not $removalFunction.Contains('$script:OneDriveUninstalled -or') -and
+            -not $removalFunction.Contains('Test-Path -LiteralPath $machine') -and
+            -not $removalFunction.Contains('Test-Path -LiteralPath $user') -and
+            $scopeState.Contains('Get-TMPCRegistryEntryState') -and $scopeState.Contains('UNKNOWN') -and
+            $scopeState.Contains('ABSENT_VERIFIED') -and -not $scopeState.Contains('Test-Path')) {
+            Add-Ok 'Standalone OneDrive: limpieza maquina y usuario separadas; lectura denegada no es ausencia'
+        } else { Add-Fail 'Standalone OneDrive: falta la separacion de ambitos o la ausencia verificada' }
     } catch { Add-Fail ("Standalone AST: {0}" -f $_.Exception.Message) }
 }
 
@@ -820,6 +881,7 @@ function Test-GitAttributesCrossCheck {
         'autounattend.xml',
         'ventoy.json',
         'README.md',
+        'README.en.md',
         'README.es.md',
         'LICENSE',
         'THIRD_PARTY_NOTICES.md',
@@ -852,6 +914,7 @@ function Test-GitAttributesCrossCheck {
         'autounattend.xml'                                   = 'lf'
         'ventoy.json'                                        = 'crlf'
         'README.md'                                          = 'lf'
+        'README.en.md'                                       = 'lf'
         'README.es.md'                                       = 'lf'
         'LICENSE'                                            = 'lf'
         'THIRD_PARTY_NOTICES.md'                             = 'lf'
@@ -911,6 +974,106 @@ function Test-DocumentLinks {
     }
 }
 
+function Get-MarkdownHeadingAnchors {
+    param([string]$Text)
+    $anchors = @()
+    $inFence = $false
+    foreach ($line in [regex]::Split($Text, "\r\n|\n|\r")) {
+        if ($line -match '^\s*(```|~~~)') {
+            $inFence = -not $inFence
+            continue
+        }
+        if ($inFence) { continue }
+        $match = [regex]::Match($line, '^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$')
+        if (-not $match.Success) { continue }
+        $title = $match.Groups[2].Value
+        $title = [regex]::Replace($title, '\[([^\]]+)\]\([^)]+\)', '$1')
+        $title = $title.Replace('`', '')
+        $title = [regex]::Replace($title, '<[^>]+>', '')
+        $slug = $title.ToLowerInvariant()
+        $slug = [regex]::Replace($slug, '[^\p{L}\p{N}\s_-]', '')
+        $slug = [regex]::Replace($slug, '\s+', '-')
+        $slug = $slug.Trim('-')
+        if (-not [string]::IsNullOrWhiteSpace($slug)) { $anchors += $slug }
+    }
+    return $anchors
+}
+
+function Test-ReadmeLanguageStructure {
+    $spanish = Get-FileRecord -RelativePath 'README.md'
+    $english = Get-FileRecord -RelativePath 'README.en.md'
+    $compat = Get-FileRecord -RelativePath 'README.es.md'
+    foreach ($record in @($spanish, $english, $compat)) {
+        if (-not $record.Exists -or -not $record.DecodeOk) {
+            Add-Fail ("{0}: no disponible para la estructura bilingue" -f $record.Relative)
+            return
+        }
+    }
+
+    if ($spanish.Text -match '(?m)^\*\*Espa.ol\*\* \| \[English\]\(README\.en\.md\)[ \t]*$') {
+        Add-Ok 'README.md: navegacion principal ES -> EN presente'
+    } else {
+        Add-Fail 'README.md: falta la navegacion principal ES -> EN'
+    }
+    if ($english.Text -match '(?m)^\[Espa.ol\]\(README\.md\) \| \*\*English\*\*[ \t]*$') {
+        Add-Ok 'README.en.md: navegacion secundaria EN -> ES presente'
+    } else {
+        Add-Fail 'README.en.md: falta la navegacion secundaria EN -> ES'
+    }
+    if ($compat.Text.Contains('](README.md)') -and $compat.Text.Contains('](README.en.md)')) {
+        Add-Ok 'README.es.md: pagina de compatibilidad enlaza a README.md y README.en.md'
+    } else {
+        Add-Fail 'README.es.md: falta algun enlace de compatibilidad'
+    }
+    if ($compat.Text -match 'no redirige autom') {
+        Add-Ok 'README.es.md: ausencia de redireccion automatica documentada'
+    } else {
+        Add-Fail 'README.es.md: no se documenta la ausencia de redireccion automatica'
+    }
+
+    $spanishH2 = @([regex]::Matches($spanish.Text, '(?m)^##[ \t]')).Count
+    $englishH2 = @([regex]::Matches($english.Text, '(?m)^##[ \t]')).Count
+    if ($spanishH2 -eq $englishH2 -and $spanishH2 -gt 0) {
+        Add-Ok ("README.md/README.en.md: {0} secciones H2 en ambos idiomas" -f $spanishH2)
+    } else {
+        Add-Fail ("README.md/README.en.md: secciones H2 desiguales ({0} / {1})" -f $spanishH2, $englishH2)
+    }
+
+    $anchors = @(Get-MarkdownHeadingAnchors -Text $spanish.Text)
+    $deepLinks = 0
+    $missing = 0
+    foreach ($match in [regex]::Matches($compat.Text, '\]\(README\.md#([^)]+)\)')) {
+        $deepLinks++
+        $anchor = $match.Groups[1].Value.Trim()
+        if ($anchors -notcontains $anchor) {
+            $missing++
+            Add-Fail ("README.es.md: ancla no encontrada en README.md: {0}" -f $anchor)
+        }
+    }
+    if ($deepLinks -ge 18 -and $missing -eq 0) {
+        Add-Ok ("README.es.md: {0} enlace(s) profundo(s) verificados contra README.md" -f $deepLinks)
+    } elseif ($deepLinks -lt 18) {
+        Add-Fail ("README.es.md: enlaces profundos insuficientes ({0}; esperado >= 18)" -f $deepLinks)
+    }
+
+    foreach ($doc in @('docs/comprobaciones-posteriores-instalacion.md', 'docs/configuracion-pruebas-limitaciones-fuentes.md')) {
+        $record = Get-FileRecord -RelativePath $doc
+        if ($record.Exists -and $record.DecodeOk -and $record.Text.Contains('](../README.md)') -and -not $record.Text.Contains('](../README.es.md)')) {
+            Add-Ok ("{0}: enlace al README principal ES" -f $doc)
+        } else {
+            Add-Fail ("{0}: enlace al README principal ES ausente o incorrecto" -f $doc)
+        }
+    }
+    foreach ($doc in @('docs/post-installation-checks.md', 'docs/configuration-testing-limitations-sources.md')) {
+        $record = Get-FileRecord -RelativePath $doc
+        if ($record.Exists -and $record.DecodeOk -and $record.Text.Contains('](../README.en.md)') -and -not $record.Text.Contains('](../README.md)')) {
+            Add-Ok ("{0}: enlace al README secundario EN" -f $doc)
+        } else {
+            Add-Fail ("{0}: enlace al README secundario EN ausente o incorrecto" -f $doc)
+        }
+    }
+}
+
 function Test-LicensingFiles {
     $licenseRecord = Get-FileRecord -RelativePath 'LICENSE'
     if ($licenseRecord.Exists -and $licenseRecord.DecodeOk) {
@@ -947,7 +1110,7 @@ function Test-LicensingFiles {
         }
     }
 
-    foreach ($relativePath in @('README.md', 'README.es.md')) {
+    foreach ($relativePath in @('README.md', 'README.en.md', 'README.es.md')) {
         $record = Get-FileRecord -RelativePath $relativePath
         if (-not $record.Exists -or -not $record.DecodeOk) { continue }
         if ($record.Text.Contains('](LICENSE)')) {
@@ -1030,6 +1193,7 @@ $mandatoryFiles = @(
     'ventoy.json',
     '.gitattributes',
     'README.md',
+    'README.en.md',
     'README.es.md',
     'LICENSE',
     'THIRD_PARTY_NOTICES.md',
@@ -1366,8 +1530,8 @@ if ($platformXml.Exists -and $platformXml.DecodeOk) {
 }
 
 $platformPresence = @(
-    @{ Path = 'README.md'; Snippet = 'Target platform: Windows 11 Pro 26H2, x64 / amd64'; Description = 'README EN: plataforma objetivo 26H2' },
-    @{ Path = 'README.es.md'; Snippet = 'Plataforma objetivo: Windows 11 Pro 26H2, x64 / amd64'; Description = 'README ES: plataforma objetivo 26H2' },
+    @{ Path = 'README.md'; Snippet = 'Plataforma objetivo: Windows 11 Pro 26H2, x64 / amd64'; Description = 'README ES principal: plataforma objetivo 26H2' },
+    @{ Path = 'README.en.md'; Snippet = 'Target platform: Windows 11 Pro 26H2, x64 / amd64'; Description = 'README EN secundario: plataforma objetivo 26H2' },
     @{ Path = 'docs/configuration-testing-limitations-sources.md'; Snippet = 'Target platform: Windows 11 Pro 26H2, x64 / amd64'; Description = 'Doc EN: plataforma objetivo 26H2' },
     @{ Path = 'docs/configuracion-pruebas-limitaciones-fuentes.md'; Snippet = 'Plataforma objetivo: Windows 11 Pro 26H2, x64 / amd64'; Description = 'Doc ES: plataforma objetivo 26H2' },
     @{ Path = 'docs/pre-installation-preparation.md'; Snippet = '- Windows 11 Pro 26H2 x64 / amd64;'; Description = 'Preparacion EN: plataforma 26H2' },
@@ -1385,8 +1549,8 @@ foreach ($check in $platformPresence) {
 }
 
 $platformObsolete = @(
-    @{ Path = 'README.md'; Snippet = 'Target platform: Windows 11 25H2,'; Description = 'README EN: sin objetivo operativo 25H2' },
-    @{ Path = 'README.es.md'; Snippet = 'Plataforma objetivo: Windows 11 25H2,'; Description = 'README ES: sin objetivo operativo 25H2' },
+    @{ Path = 'README.md'; Snippet = 'Plataforma objetivo: Windows 11 25H2,'; Description = 'README ES principal: sin objetivo operativo 25H2' },
+    @{ Path = 'README.en.md'; Snippet = 'Target platform: Windows 11 25H2,'; Description = 'README EN secundario: sin objetivo operativo 25H2' },
     @{ Path = 'docs/configuration-testing-limitations-sources.md'; Snippet = 'Target platform: Windows 11 25H2,'; Description = 'Doc EN: sin objetivo operativo 25H2' },
     @{ Path = 'docs/configuracion-pruebas-limitaciones-fuentes.md'; Snippet = 'Plataforma objetivo: Windows 11 25H2,'; Description = 'Doc ES: sin objetivo operativo 25H2' },
     @{ Path = 'docs/pre-installation-preparation.md'; Snippet = 'The target platform is Windows 11 25H2'; Description = 'Preparacion EN: sin objetivo operativo 25H2' },
@@ -1437,15 +1601,15 @@ foreach ($relativePath in @('autounattend.xml', 'ventoy.json')) {
 $baselineHashSources = @(
     @{
         Path   = 'README.md'
-        Start  = '(?m)^## File integrity \(SHA-256\)[ \t]*\r?\n'
-        End    = '(?m)^##[ \t]'
-        Marker = '## File integrity (SHA-256)'
-    },
-    @{
-        Path   = 'README.es.md'
         Start  = '(?m)^## Integridad de archivos \(SHA-256\)[ \t]*\r?\n'
         End    = '(?m)^##[ \t]'
         Marker = '## Integridad de archivos (SHA-256)'
+    },
+    @{
+        Path   = 'README.en.md'
+        Start  = '(?m)^## File integrity \(SHA-256\)[ \t]*\r?\n'
+        End    = '(?m)^##[ \t]'
+        Marker = '## File integrity (SHA-256)'
     },
     @{
         Path   = 'docs/configuracion-pruebas-limitaciones-fuentes.md'
@@ -1505,6 +1669,7 @@ Write-Section 'EOL / ENCODING'
 Test-FilePolicy -RelativePath 'autounattend.xml' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'Apply-TMPCOptimizations.ps1' -ExpectedEol 'LF' -ExpectedBom 'UTF8'
 Test-FilePolicy -RelativePath 'README.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
+Test-FilePolicy -RelativePath 'README.en.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'README.es.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'LICENSE' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'THIRD_PARTY_NOTICES.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
@@ -1546,6 +1711,7 @@ if (-not $gitattributesRecord.Exists) {
         'autounattend.xml text eol=lf',
         'ventoy.json text eol=crlf',
         'README.md text eol=lf',
+        'README.en.md text eol=lf',
         'README.es.md text eol=lf',
         'LICENSE text eol=lf',
         'THIRD_PARTY_NOTICES.md text eol=lf',
@@ -1565,7 +1731,9 @@ if (-not $gitattributesRecord.Exists) {
 }
 
 Test-DocumentLinks -RelativePath 'README.md'
+Test-DocumentLinks -RelativePath 'README.en.md'
 Test-DocumentLinks -RelativePath 'README.es.md'
+Test-ReadmeLanguageStructure
 Test-DocumentLinks -RelativePath 'THIRD_PARTY_NOTICES.md'
 $docsDir = Join-Path $script:Root 'docs'
 if (Test-Path -LiteralPath $docsDir) {

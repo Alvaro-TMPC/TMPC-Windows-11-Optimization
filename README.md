@@ -1,303 +1,332 @@
 # TMPC Windows 11 Optimization
 
-**English** | [Español](README.es.md)
+**Español** | [English](README.en.md)
 
-## What this project is
+## Qué es este proyecto
 
-TMPC Windows 11 Optimization is a reproducible profile for a clean Windows 11
-installation. It is aimed at users who want a privacy-oriented system with a
-conservative reduction of built-in apps, while staying suitable for gaming,
-programming and everyday use.
+TMPC Windows 11 Optimization es un perfil reproducible para una instalación
+limpia de Windows 11. Está pensado para usuarios que quieren un sistema
+orientado a la privacidad, con una reducción conservadora de aplicaciones
+integradas, y que siga siendo adecuado para gaming, programación y uso diario.
 
-The profile is delivered as a single answer file (`autounattend.xml`) applied
-during Windows Setup, plus a small Ventoy configuration (`ventoy.json`) used to
-associate the expected Windows ISO with that answer file on the installation
-USB.
+El perfil se entrega como un único archivo de respuestas (`autounattend.xml`)
+aplicado durante la instalación de Windows, más una pequeña configuración de
+Ventoy (`ventoy.json`) que asocia la ISO de Windows esperada con ese archivo de
+respuestas en el USB de instalación.
 
-For an existing installation, the additional self-contained
-[`Apply-TMPCOptimizations.ps1`](Apply-TMPCOptimizations.ps1) applies the relevant
-post-install portion of the same profile; see the section below.
+Para una instalación existente, el archivo autocontenido adicional
+[`Apply-TMPCOptimizations.ps1`](Apply-TMPCOptimizations.ps1) aplica la parte
+post-install relevante del mismo perfil; consulta la sección siguiente.
 
-Target platform: Windows 11 Pro 26H2, x64 / amd64 (build base 26300). The
-published v0.1.5 baseline was validated on Windows 11 Pro 25H2 (historical
-reference); see the tested-environment and limitations sections.
+Plataforma objetivo: Windows 11 Pro 26H2, x64 / amd64 (build base 26300). El
+baseline publicado v0.1.5 se validó en Windows 11 Pro 25H2 (referencia
+histórica); consulta las secciones de entorno probado y limitaciones.
 
-## What it does
+## Qué hace
 
-The current baseline applies the following decisions:
+El baseline actual aplica las siguientes decisiones:
 
-Privacy:
+Privacidad:
 
-- telemetry reduced to the minimum allowed by the OS, advertising ID disabled
-  and tailored experiences disabled;
-- activity feed, cloud activity upload and cross-device clipboard disabled;
-- location access denied, non-essential app permissions force-denied;
-- on-device generative AI models access denied, Recall prevented and Click to
-  Do disabled where supported;
-- Copilot entry points disabled and the Copilot app removed;
-- camera and microphone access is left under user control;
-- automatic device encryption (BitLocker) is prevented during setup.
+- telemetría reducida al mínimo permitido por el sistema, identificador de
+  publicidad desactivado y experiencias personalizadas desactivadas;
+- activity feed, subida de actividad a la nube y portapapeles entre
+  dispositivos desactivados;
+- acceso a ubicación denegado y permisos no esenciales de aplicaciones
+  denegados de forma forzada;
+- acceso a los modelos generativos en el dispositivo denegado, Recall
+  impedido y Click to Do desactivado donde sea compatible;
+- puntos de entrada de Copilot desactivados y aplicación Copilot eliminada;
+- el acceso a cámara y micrófono queda bajo control del usuario;
+- el cifrado automático del dispositivo (BitLocker) se impide durante la
+  instalación.
 
-Debloat (conservative, curated list):
+Debloat (conservador, con lista curada):
 
-- consumer apps removed, such as news, weather, maps, Solitaire, Xbox companion
-  apps, consumer Teams/Skype, Sticky Notes, To Do, Your Phone, OneNote and
-  Copilot;
-- legacy components removed, such as WordPad, PowerShell ISE and Steps
+- se eliminan aplicaciones de consumo como noticias, clima, mapas, Solitaire,
+  aplicaciones complementarias de Xbox, Teams/Skype de consumo, Sticky Notes,
+  To Do, Your Phone, OneNote y Copilot;
+- se eliminan componentes heredados como WordPad, PowerShell ISE y Steps
   Recorder;
-- deliberately kept: Microsoft Defender, Microsoft Store, Edge and WebView2,
-  Microsoft Photos, Paint and Notepad.
+- se conservan deliberadamente: Microsoft Defender, Microsoft Store, Edge y
+  WebView2, Microsoft Photos, Paint y Notepad.
 
-Windows features:
+Funciones de Windows:
 
-- Windows Update stays active for quality and security updates, but drivers
-  distributed through Windows Update are excluded;
-- Microsoft Defender stays enabled; only non-critical Windows Security
-  notifications are reduced;
-- Microsoft Store stays available for app installation, repair and dependency
-  installation;
-- OneDrive is removed and blocked, while existing user data in the OneDrive
-  folder is preserved;
-- Paint and Notepad stay installed with their AI features disabled by policy
-  (Cocreator, Generative Fill, Image Creator and Notepad AI);
-- Do Not Disturb is configured to OFF at apply time (Windows can turn it on
-  again through its own automatic rules; see Known limitations);
-- Game Mode is enabled; Game DVR and the Xbox Live companion services are
-  disabled;
-- power plan is the standard Windows Balanced plan; hibernation and Fast Startup
-  are disabled (Sleep and Hibernate entries are hidden from the Start power
-  menu, Windows locking stays available);
-- transparency effects are disabled and the default theme is dark;
-- File Explorer: compact view enabled, item check boxes disabled, file name
-  extensions visible and hidden files visible (protected operating system files
-  stay hidden), classic context menu, cleaned Quick Access;
-- Downloads opens without "Group by date" grouping (per-user folder view
-  override); normal folders keep the native Windows 11 default;
-- No aggressive CPU, GPU, scheduler or network tweaks are applied.
+- Windows Update se mantiene activo para actualizaciones de calidad y
+  seguridad, pero los drivers distribuidos mediante Windows Update quedan
+  excluidos;
+- Microsoft Defender se mantiene activo; solo se reducen las notificaciones no
+  críticas de Seguridad de Windows;
+- Microsoft Store se mantiene disponible para instalar aplicaciones, reparar y
+  resolver dependencias;
+- OneDrive se elimina y se bloquea, conservando los datos de usuario que ya
+  existan en la carpeta de OneDrive;
+- Paint y Notepad se mantienen instalados con sus funciones de IA desactivadas
+  por política (Cocreator, Generative Fill, Image Creator y funciones de IA de
+  Notepad);
+- "No molestar" se configura desactivado en el momento de aplicar el perfil
+  (Windows puede volver a activarlo con sus propias reglas automáticas;
+  consulta Limitaciones conocidas);
+- Game Mode se activa; Game DVR y los servicios complementarios de Xbox Live
+  se desactivan;
+- el plan de energía es el plan Balanced estándar de Windows; hibernación y
+  Fast Startup se desactivan (las opciones Suspender y Hibernar se ocultan del
+  menú de energía de Inicio, el bloqueo de Windows sigue disponible);
+- los efectos de transparencia se desactivan y el tema por defecto es oscuro;
+- File Explorer: vista compacta activada, casillas de elemento desactivadas,
+  extensiones de nombre de archivo visibles y archivos ocultos visibles (los
+  archivos protegidos del sistema siguen ocultos), menú contextual clásico y
+  Acceso rápido limpio;
+- Downloads abre sin agrupación por fecha (override por usuario de la vista de
+  carpeta); las carpetas normales conservan el comportamiento nativo de
+  Windows 11;
+- no se aplican tweaks agresivos de CPU, GPU, planificador ni red.
 
-Windows AI features that are disabled by the profile: Recall, Click to Do,
-Settings AI agent, Paint Cocreator, Paint Generative Fill, Paint Image Creator,
-Notepad AI features and legacy Windows Copilot entry points.
+Funciones de IA de Windows que el perfil desactiva: Recall, Click to Do, agente
+de IA de Configuración, Paint Cocreator, Paint Generative Fill, Paint Image
+Creator, funciones de IA de Notepad y puntos de entrada heredados de Windows
+Copilot.
 
-This README summarizes the behavior; it is not a full registry dump. The
-answer file remains the authoritative source.
+Este README resume el comportamiento; no es un volcado del Registro. El archivo
+de respuestas sigue siendo la fuente autoritativa.
 
-## Tested environment
+## Entorno probado
 
-Current reference: Windows 11 Pro 26H2 (x64 / amd64, build base 26300; the OS
-revision is not fixed). On a clean 26H2 installation used as test environment:
+Referencia actual: Windows 11 Pro 26H2 (x64 / amd64, build base 26300; la
+revisión del sistema no está fijada). En una instalación limpia 26H2 usada como
+entorno de prueba:
 
-- the Start pins policy pair was applied as the ADMX-exact machine policy and
-  its result was verified at runtime (empty Pinned section, later user pins
-  preserved);
-- the Outlook for Windows promotional taskbar pin was visually absent for a
-  genuinely new local user, with Edge, File Explorer and Microsoft Store kept;
-- `AllAppsViewMode` (DWord 2) was applied programmatically on an existing
-  profile: List visible after signing out and back in, and the value persisted.
+- el par de política de pins de Inicio se aplicó como el par ADMX exacto de
+  política de máquina y su resultado se verificó en runtime (sección Pinned
+  vacía y pins posteriores del usuario conservados);
+- el anclaje promocional de Outlook para Windows estuvo visualmente ausente
+  para un usuario local genuinamente nuevo, con Edge, Explorador de archivos y
+  Microsoft Store conservados;
+- `AllAppsViewMode` (DWord 2) se aplicó de forma programática en un perfil
+  existente: Lista visible tras cerrar y abrir sesión, y el valor persistió.
 
-The integrated answer file with the latest changes has not been retested on
-another clean installation, and the standalone has no runtime test yet.
+El archivo de respuestas integrado con los últimos cambios no se ha vuelto a
+probar en otra instalación limpia, y el standalone no tiene todavía prueba
+runtime.
 
-Historical evidence: the published v0.1.5 baseline completed real clean
-installations on Windows 11 Pro 25H2 (x64 / amd64), including:
+Evidencia histórica: el baseline publicado v0.1.5 completó instalaciones limpias
+reales en Windows 11 Pro 25H2 (x64 / amd64), incluyendo:
 
-- Setup, OOBE and first desktop reached without blocking errors;
-- local account creation with no mandatory network or Microsoft account prompt;
-- user-specific customizations applied with a one-time task;
-- automatic restart executed by the profile and final desktop reached;
-- final cleanup completed with no leftover setup tasks or temporary files;
-- Explorer defaults and the Downloads view override verified.
+- instalación, OOBE y llegada al primer escritorio sin errores bloqueantes;
+- creación de cuenta local sin prompt obligatorio de red ni de cuenta
+  Microsoft;
+- personalizaciones de usuario aplicadas mediante una tarea de un solo uso;
+- reinicio automático ejecutado por el perfil y llegada al escritorio final;
+- cleanup final completado, sin tareas de instalación ni archivos temporales
+  residuales;
+- valores de Explorer y override de la vista de Downloads verificados.
 
-That evidence documents the historical 25H2 baseline; it is not a 26H2
-clean-install claim. Other Windows 11 versions, editions or builds are not
-guaranteed. Future builds may require revalidation.
+Esa evidencia documenta el baseline histórico 25H2; no es una afirmación de
+instalación limpia 26H2. Otras versiones, ediciones o builds de Windows 11 no
+están garantizadas. Builds futuras pueden requerir revalidación.
 
-## Important warning
+## Advertencia importante
 
-A clean installation can destroy data irreversibly. Before you start:
+Una instalación limpia puede destruir datos de forma irreversible. Antes de
+empezar:
 
-- make a full backup of your data and verify that the backup is readable;
-- review the answer file before using it; you are responsible for what it
-  applies to your machine;
-- this profile does NOT select or erase disks: you choose the target disk and
-  partitions manually during Windows Setup, so double-check the disk you are
-  about to modify;
-- if you can, test the whole procedure on a disposable machine or virtual
-  machine first.
+- haz un backup completo de tus datos y comprueba que se puede leer;
+- revisa el archivo de respuestas antes de usarlo; tú eres responsable de lo
+  que aplique en tu equipo;
+- este perfil NO selecciona ni borra discos: el disco y las particiones los
+  eliges tú manualmente en la instalación de Windows, así que verifica con
+  atención qué disco vas a modificar;
+- si puedes, prueba todo el procedimiento primero en una máquina desechable o
+  en una máquina virtual.
 
-## Apply the optimizations to an existing Windows installation
+## Aplicar las optimizaciones a una instalación de Windows existente
 
-`autounattend.xml` remains the clean-install method. The self-contained
-[`Apply-TMPCOptimizations.ps1`](Apply-TMPCOptimizations.ps1), standalone version
-0.2.0, provides a post-install method **without formatting**, derived directly
-from the answer file (v0.1.5 plus the 26H2 candidate blocks: Start pins policy,
-cloud optimized content and All apps view). It needs no other repository files,
-external dependencies or downloads. Registry work is now idempotent and
-verified: every value is read first, written only when it differs and re-read to
-confirm the result, so an already compliant PC is not rewritten.
+`autounattend.xml` sigue siendo la vía para instalación limpia. El archivo
+autocontenido [`Apply-TMPCOptimizations.ps1`](Apply-TMPCOptimizations.ps1),
+versión standalone 0.2.1, ofrece una vía post-install **sin formatear**, derivada
+directamente del archivo de respuestas (v0.1.5 más los bloques candidatos 26H2:
+política de pins de Inicio, contenido optimizado en la nube y vista de Todas las
+aplicaciones). No necesita otros archivos del repositorio, dependencias externas
+ni descargas. El trabajo de Registro es ahora idempotente y verificado: cada
+valor se lee primero, solo se escribe si difiere y se vuelve a leer para
+confirmar el resultado, de modo que un PC ya conforme no se reescribe.
 
-**Compatibility (TESTED_ON / SUPPORTED_BY_DESIGN / NOT_RUNTIME_TESTED).** The
-tested reference is Windows 11 Pro 26H2 (build base 26300; the OS revision is
-not fixed). By design it accepts Windows 11 client editions (build 22000 or
-later) in native AMD64 Windows PowerShell 5.1, from a real user account; Full
-mode requires an elevated console. Any other Windows 11 build inside that
-envelope is accepted and reported as `NOT_RUNTIME_TESTED`: per-operation guards
-apply, degradations are reported, an accumulated revision (UBR) update never
-forces a rejection and full compatibility is not claimed. Windows Server,
-Windows 10 or older families (`UNSUPPORTED`) and non-AMD64 or 32-bit hosts
-(`INCOMPATIBLE`) are rejected before any change. The published clean-install
-baseline (v0.1.5) has runtime evidence on the historical Windows 11 Pro 25H2
-reference; this standalone has static validation plus an isolated automated test
-suite and has **not** been tested on host hardware. This is not a claim of
-identical end state on an already customized PC.
+**Compatibilidad (TESTED_ON / SUPPORTED_BY_DESIGN / NOT_RUNTIME_TESTED).** La
+referencia probada es Windows 11 Pro 26H2 (build base 26300; la revisión del
+sistema no está fijada). Por diseño acepta ediciones cliente de Windows 11
+(build 22000 o posterior) en Windows PowerShell 5.1 AMD64 nativo, desde una
+cuenta de usuario real; el modo completo requiere consola elevada. Cualquier
+otra build de Windows 11 dentro de ese marco se acepta y se registra como
+`NOT_RUNTIME_TESTED`: aplican las guardas por operación, las degradaciones se
+informan, una actualización acumulativa (UBR) nunca fuerza un rechazo y no se
+afirma compatibilidad completa. Windows Server, Windows 10 o familias anteriores
+(`UNSUPPORTED`) y hosts no AMD64 o de 32 bits (`INCOMPATIBLE`) se rechazan antes
+de cualquier cambio. El baseline publicado de instalación limpia (v0.1.5) tiene
+evidencia runtime en la referencia histórica Windows 11 Pro 25H2; este
+standalone tiene validación estática más una suite de pruebas automatizadas
+aislada y **no** se ha probado en hardware anfitrión. No se afirma un estado
+final idéntico en un PC que ya tiene personalizaciones.
 
-Before running it, make and verify a backup, **review the script**, save your
-work and close the applications affected by debloat. Quit OneDrive after
-checking your local/cloud files. Full mode modifies system settings and removes
-the profile's curated built-in apps for all users, including provisioned copies
-for future users. App removal can remove the apps' settings/state. Defender,
-Store, Edge/WebView2, Photos, Paint and Notepad retain the baseline decisions.
-No disks, partitions, accounts or Windows license are changed.
+Antes de ejecutarlo, haz y verifica un backup, **revisa el script**, guarda tu
+trabajo y cierra las aplicaciones afectadas por el debloat. Sal de OneDrive
+tras comprobar tus archivos locales/en la nube. El modo completo modifica
+configuración del sistema y elimina las apps integradas de la lista del perfil
+para todos los usuarios, incluidas las copias provisionadas para cuentas
+futuras. La eliminación de apps puede eliminar sus ajustes/estado. Defender,
+Store, Edge/WebView2, Photos, Paint y Notepad conservan las decisiones del
+baseline. No se cambian discos, particiones, cuentas ni la licencia de Windows.
 
-Full mode removes and blocks OneDrive, but **preserves all existing content in
-`%USERPROFILE%\OneDrive`**. Online-only placeholders are not backed-up local
-copies. Software-remnant deletion is allowlisted and refuses linked/junction
-paths. Running OneDrive, an unrecognized uninstall command or unsafe remnants
-are reported and deferred; verify warnings/errors before considering removal done.
-Windows' own OneDrive setup binaries are preserved.
+El modo completo elimina y bloquea OneDrive, pero **conserva todo el contenido
+existente en `%USERPROFILE%\OneDrive`**. Los marcadores de posición solo en
+línea no son copias locales respaldadas. El borrado de restos de software está
+limitado a una lista explícita y rechaza rutas enlazadas/junctions. Si OneDrive
+está abierto, el comando de desinstalación no se reconoce o los restos no son
+seguros, se informa y se difiere: revisa warnings/errores antes de dar por terminada
+la eliminación. Se conservan los binarios de instalación propios de Windows.
 
-Download/save `Apply-TMPCOptimizations.ps1` from this repository using the file's
-**Raw / Download raw file** action. Open **Windows PowerShell as administrator**
-for Full mode, navigate to the folder where you saved the file, then run:
+Descarga/guarda `Apply-TMPCOptimizations.ps1` desde este repositorio mediante
+**Raw / Download raw file** en la página del archivo. Abre **Windows PowerShell
+como administrador** para el modo completo, sitúate en la carpeta donde lo
+guardaste y ejecuta:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Apply-TMPCOptimizations.ps1
 ```
 
-Full mode does not auto-elevate: elevation is required only for its system phase.
-HKCU preferences are applied afterwards only if the executing SID matches the
-Explorer desktop in the same session. If alternate administrator credentials
-were used or the desktop cannot be verified, HKCU is skipped with exit code 3:
-run `-UserOnly` from the intended account. User-context OneDrive cleanup is also
-deferred in that situation; `-UserOnly` does not perform that uninstall.
+El modo completo no se autoeleva: la elevación solo es necesaria para su fase
+de sistema. Después aplica HKCU únicamente si el SID ejecutor coincide con
+Explorer en la misma sesión. Si se usaron credenciales de otro administrador o
+no puede verificarse el escritorio, omite HKCU con exit code 3: ejecuta
+`-UserOnly` desde la cuenta objetivo. También se difiere la limpieza de OneDrive
+en contexto de usuario; `-UserOnly` no realiza esa desinstalación.
 
-For **a new account created later**, another local user, or to reapply personal
-preferences, sign in to that account and open **ordinary, non-elevated Windows
-PowerShell**:
+Para **una nueva cuenta creada posteriormente**, otro usuario local o volver a
+aplicar las preferencias personales, inicia sesión en esa cuenta y abre
+**Windows PowerShell normal, sin elevación**:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Apply-TMPCOptimizations.ps1 -UserOnly
 ```
 
-`-UserOnly` is the recommended method for later accounts. It applies the entire
-HKCU preference inventory of the answer file's user phase: gaming/Game DVR,
-visual effects and shortcuts, notifications/Do Not Disturb, privacy/AI, sound,
-Update/Store user preferences, Explorer/Downloads, Start/Taskbar and dark theme
-with the baseline wallpaper. It changes only the executing account, reads HKLM
-only for checks/Downloads source, performs no global debloat/OneDrive cleanup
-and does not require elevation. It can be rerun without deleting any marker.
+`-UserOnly` es la vía recomendada para cuentas posteriores. Aplica el inventario
+HKCU completo de la fase de usuario del archivo de respuestas: gaming/Game DVR,
+efectos visuales y shortcuts, notificaciones/No molestar, privacidad/IA, sonido,
+preferencias de Update/Store del usuario, Explorer/Downloads, Start/Taskbar y
+tema oscuro con el wallpaper del baseline. Solo cambia la cuenta ejecutora,
+lee HKLM únicamente para comprobaciones/origen de Downloads, no realiza debloat
+ni limpieza global de OneDrive y no necesita elevación. Puede repetirse sin
+eliminar ningún marker.
 
-There is **no automatic restart by default**. Some changes require signing out
-and back in or restarting. For a conscious restart request in Full mode, save
-all work first, then use:
+Por defecto **no hay reinicio automático**. Algunos cambios requieren cerrar
+y abrir sesión o reiniciar. Para solicitar conscientemente un reinicio en modo
+completo, guarda primero todo el trabajo y usa:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Apply-TMPCOptimizations.ps1 -Restart
 ```
 
-Restart is requested only on exit code 0, with 60 seconds notice (Windows may
-close applications at the deadline); cancel with `shutdown.exe /a` if needed.
-`-UserOnly` does not accept `-Restart`; restart manually from Windows instead.
+Solo solicita reinicio con exit code 0, con 60 segundos de aviso (Windows puede
+cerrar aplicaciones al cumplirse el plazo); cancela con `shutdown.exe /a` si
+hace falta. `-UserOnly` no acepta `-Restart`; reinicia manualmente desde Windows.
 
-### Coverage and post-install differences
+### Cobertura y diferencias post-install
 
-| Baseline block | Post-install behavior |
+| Bloque del baseline | Comportamiento post-install |
 | --- | --- |
-| System registry/policies | Same HKLM names, types and values: privacy, Update/driver exclusion, Defender notifications, gaming, power, AI, Explorer, Start/Taskbar, cloud optimized content suppression and sound. HKCR deletions resolve to machine Classes, matching the original SYSTEM phase. |
-| User registry/personalization | Same complete HKCU inventory and binary masks; Quiet Hours uses the source's native COM ABI and recognized CloudStore fallback. Downloads copies HKLM to HKCU without resetting saved views. |
-| Debloat | Same 40 AppX targets, 4 capability targets and Recall; sequential checked removal. The source's OneNote **desktop** special uninstaller is deferred because arbitrary uninstall strings may affect an existing Office suite; its AppX package remains targeted. |
-| OneDrive | Same removal/blocking intent and default-profile auto-install prevention, adapted to verified identity and guarded software paths. No forced process termination, recursive ACL takeover or deferred file deletions. |
-| .NET Framework 3.5 | If not enabled, requires matching local media; no Windows Update fallback. Supply `-NetFx3Source "D:\sources\sxs"` in Full mode (replace `D:` with your mounted media drive). Without a source it is left unchanged and reported. |
-| Start pins / encryption | ADMX-exact machine policy pair `ConfigureStartPins` (DWord 1) + `ConfigureStartPinsJSON` (REG_EXPAND_SZ path) pointing to a persistent `LayoutModification.json` with `applyOnce`; the pair was validated manually on 26H2, while the integrated clean-install test is pending. `PreventDeviceEncryption` does not decrypt existing BitLocker encryption. |
-| Cloud optimized content | Machine policy `DisableCloudOptimizedContent` (DWord 1) suppresses cloud optimized content to prevent promotional taskbar pins, such as the Outlook for Windows placeholder, for new profiles. It does not remove pins that already exist, affects personalized cloud content globally (Windows Spotlight wallpapers become unavailable), is listed for Enterprise/Education editions in the CSP reference (no documented Pro support) and was only visually checked with a new user on Windows 11 Pro 26H2; integrated clean-install validation is pending. |
-| Start menu All apps view | Initial `AllAppsViewMode` (DWord 2 = List) written once in HKCU only when the value is absent; an existing user choice (List, Grid or Category) is preserved. It is a normal user preference, not a policy: no recurring policy or task is created and the view can be changed later. |
-| Setup/OOBE | Not reproduced: hardware bypasses, ProductKey/EULA, BypassNRO/OOBE screens, network disabling/re-enabling, installation and account creation. |
-| One-shot / cleanup | No Setup tasks, tokens, completion markers or Setup-folder cleanup are created. Logs are retained; restart is optional. |
+| Registro/políticas de sistema | Mismos nombres, tipos y valores HKLM: privacidad, Update/exclusión de drivers, notificaciones de Defender, gaming, energía, IA, Explorer, Start/Taskbar, supresión de contenido optimizado en la nube y sonido. Los borrados HKCR se resuelven a Classes de máquina, como en la fase SYSTEM original. |
+| Registro/personalización de usuario | Mismo inventario HKCU completo y máscaras binarias; Quiet Hours usa la ABI COM nativa del origen y el fallback CloudStore reconocido. Downloads copia HKLM a HKCU sin resetear vistas guardadas. |
+| Debloat | Mismos 40 objetivos AppX, 4 de capabilities y Recall; eliminación secuencial comprobada. Se difiere el desinstalador especial de OneNote **de escritorio**, porque strings arbitrarios pueden afectar una suite Office existente; su paquete AppX sigue incluido. |
+| OneDrive | Misma intención de eliminación/bloqueo y prevención de autoinstalación en el perfil por defecto, adaptada a identidad verificada y rutas de software protegidas. Sin terminar procesos a la fuerza, tomar ACL recursivamente ni diferir borrados al reinicio. |
+| .NET Framework 3.5 | Si no está habilitado, necesita medio local compatible; sin fallback a Windows Update. Añade `-NetFx3Source "D:\sources\sxs"` en modo completo (sustituye `D:` por tu unidad del medio montado). Sin origen se conserva el estado y se informa. |
+| Pins de Inicio / cifrado | Par ADMX exacto de política de máquina `ConfigureStartPins` (DWord 1) + `ConfigureStartPinsJSON` (REG_EXPAND_SZ con ruta) apuntando a un `LayoutModification.json` persistente con `applyOnce`; el par se validó manualmente en 26H2 y la prueba integrada de instalación limpia sigue pendiente. `PreventDeviceEncryption` no descifra un BitLocker existente. |
+| Contenido optimizado en la nube | La política de máquina `DisableCloudOptimizedContent` (DWord 1) desactiva el contenido optimizado en la nube para evitar anclajes promocionales en la barra de tareas, como el marcador de Outlook para Windows, en perfiles nuevos. No elimina anclados que ya existan, afecta globalmente al contenido personalizado de la nube (los fondos de Windows Spotlight dejan de estar disponibles), la referencia CSP la lista para ediciones Enterprise/Education (sin soporte Pro documentado) y solo se comprobó visualmente con un usuario nuevo en Windows 11 Pro 26H2; la validación integrada en instalación limpia sigue pendiente. |
+| Vista de Todas las aplicaciones | `AllAppsViewMode` inicial (DWord 2 = Lista) escrito una sola vez en HKCU y solo si el valor no existe; se preserva cualquier elección previa del usuario (Lista, Cuadrícula o Categoría). Es una preferencia normal del usuario, no una política: no se crea ninguna política ni tarea recurrente y la vista puede cambiarse después. |
+| Setup/OOBE | No se reproducen: bypass de hardware, ProductKey/EULA, BypassNRO/pantallas OOBE, desactivar/reactivar red, instalación y creación de cuentas. |
+| One-shot / cleanup | No se crean tareas de Setup, tokens, markers de finalización ni limpieza de carpetas de Setup. Los logs se conservan; el reinicio es opcional. |
 
-Previously saved Downloads grouping can remain because `Bags`/`BagMRU` are
-preserved. Existing HKCU context-menu entries can also override the machine
-Classes view. Policy effectiveness can depend on Windows edition or management
-policy; the internal Quiet Hours interface and Paint AI UI limitations still
-apply. Review the complete source-line coverage matrix in the script header.
-Setup originally runs the system phase as SYSTEM; this standalone uses an
-administrator. Protected existing registry keys or in-use AppX packages can
-fail and produce exit code 1; no ACL takeover is added to force those changes.
+Puede mantenerse una agrupación de Downloads guardada previamente porque se
+conservan `Bags`/`BagMRU`. Las entradas HKCU existentes del menú contextual
+también pueden prevalecer sobre Classes de máquina. La efectividad de políticas
+puede depender de la edición de Windows o de políticas de administración; siguen
+vigentes las limitaciones de la interfaz interna Quiet Hours y de la UI de IA
+de Paint. Consulta la matriz completa por líneas del origen en la cabecera.
+Setup ejecuta originalmente la fase de sistema como SYSTEM; este standalone
+usa un administrador. Las claves existentes protegidas o paquetes AppX en uso
+pueden fallar y producir exit code 1; no se toman ACL para forzar esos cambios.
 
-Full logs: `%ProgramData%\TMPC-Windows-11-Optimization\Logs\`.
-UserOnly logs: `%LOCALAPPDATA%\TMPC-Windows-11-Optimization\Logs\` (no elevated
-write needed). The final summary shows mode, completed operations, warnings,
-errors, restart advice, log path and exit code: 0 = completed (review warnings
-for limitations), 1 = operation/log failure, 2 = preflight rejection, 3 = system
-phase finished but target-user preferences deferred. There is no automatic
-rollback. The validator checks the source XML SHA-256 binding and exact
-registry/removal inventories, so future baseline changes require explicit review.
+Logs completos: `%ProgramData%\TMPC-Windows-11-Optimization\Logs\`.
+Logs UserOnly: `%LOCALAPPDATA%\TMPC-Windows-11-Optimization\Logs\` (sin escritura
+elevada). El resumen final muestra modo, operaciones completadas, warnings,
+errores, recomendación de reinicio, ruta del log y exit code: 0 = completado
+(revisar warnings de limitaciones), 1 = fallo de operación/log, 2 = rechazo del
+preflight, 3 = fase de sistema terminada pero preferencias del usuario objetivo
+diferidas. No hay rollback automático. El validador comprueba la vinculación
+SHA-256 con el XML fuente y los inventarios exactos de Registro/eliminación,
+obligando a revisar expresamente los cambios futuros del baseline.
 
-## Before you start
+## Antes de empezar
 
-Prepare at least:
+Prepara al menos:
 
-1. Backups and verification.
-   - Back up Desktop, Documents, Downloads, Pictures, Videos, Music, projects
-     and repositories, and any data stored outside the standard folders.
-   - Open a sample of files directly from the backup destination to verify it.
-   - Make sure the backup drive is not one of the drives you are going to
-     format.
-2. Projects and development data.
-   - Review local repositories, uncommitted changes, local branches, SSH/GPG
-     keys and certificates. Publish or back up anything that only exists on
-     this machine. Never store secrets in a repository.
-3. Saved games and non-reproducible content.
-   - Check saved games, mods, launcher profiles and captures game by game;
-     cloud sync is not guaranteed for every title.
-4. Cloud files (OneDrive and similar).
-   - Verify that important files are really available locally or backed up
-     elsewhere; online-only placeholders are not local copies.
-5. BitLocker / encryption.
-   - If any drive is encrypted, make sure the recovery keys are available
-     outside the machine that will be formatted.
+1. Backups y verificación.
+   - Respalda Escritorio, Documentos, Descargas, Imágenes, Vídeos, Música,
+     proyectos y repositorios, y cualquier dato guardado fuera de las carpetas
+     estándar.
+   - Abre una muestra de archivos directamente desde el destino del backup
+     para verificarlo.
+   - Asegúrate de que la unidad de backup no es una de las unidades que vas a
+     formatear.
+2. Proyectos y datos de desarrollo.
+   - Revisa repositorios locales, cambios sin commit, ramas locales, claves
+     SSH/GPG y certificados. Publica o respalda lo que solo exista en este
+     equipo. No guardes secretos en un repositorio.
+3. Partidas guardadas y contenido no reproducible.
+   - Comprueba partidas, mods, perfiles de launchers y capturas juego por
+     juego; la sincronización en la nube no está garantizada en todos los
+     títulos.
+4. Archivos en la nube (OneDrive y similares).
+   - Verifica que los archivos importantes están realmente disponibles en local
+     o respaldados en otro medio; los marcadores de posición en línea no son
+     copias locales.
+5. BitLocker / cifrado.
+   - Si alguna unidad está cifrada, asegúrate de que las claves de recuperación
+     están disponibles fuera del equipo que se va a formatear.
 6. Drivers.
-   - This profile excludes drivers delivered through Windows Update. Download
-     in advance, from your hardware vendor: Ethernet, Wi-Fi (if the machine
-     depends on it), chipset, audio and GPU drivers. Keep them on a drive you
-     can reach during and after installation.
+   - Este perfil excluye los drivers entregados mediante Windows Update.
+     Descarga con antelación, desde el fabricante de tu hardware: drivers de
+     Ethernet, Wi-Fi (si el equipo depende de él), chipset, audio y GPU.
+     Guárdalos en una unidad accesible durante y después de la instalación.
 7. Software.
-   - Keep installers for the apps you will need right after installing
-     (browser, development tools, game launchers). This repository does not
-     install third-party software automatically.
-8. Installation media.
-   - Use a genuine Windows 11 x64 / amd64 ISO from a trusted source and a USB
-     drive you can erase; installing Ventoy repartitions and formats the USB
-     drive.
+   - Conserva los instaladores de las aplicaciones que necesitarás justo
+     después de instalar (navegador, herramientas de desarrollo, launchers de
+     juegos). Este repositorio no instala software de terceros
+     automáticamente.
+8. Medio de instalación.
+   - Usa una ISO genuina de Windows 11 x64 / amd64 de una fuente confiable y
+     un USB que puedas borrar; instalar Ventoy reparticiona y formatea la
+     unidad USB.
 
-## Create the Ventoy USB
+## Crear el USB de Ventoy
 
-The installation media is built with [Ventoy](https://www.ventoy.net/), an
-open-source tool that boots ISO files directly from a USB drive.
+El medio de instalación se construye con [Ventoy](https://www.ventoy.net/), una
+herramienta de código abierto que arranca archivos ISO directamente desde un
+USB.
 
-1. Download Ventoy from its official source (<https://www.ventoy.net/>). Use
-   the latest stable release; this repository does not pin a specific version.
+1. Descarga Ventoy desde su fuente oficial (<https://www.ventoy.net/>). Usa la
+   última versión estable; este repositorio no fija una versión concreta.
 
-2. Install Ventoy on the USB drive.
+2. Instala Ventoy en la unidad USB.
 
-   Warning: installing Ventoy on a drive erases and repartitions that drive.
-   Make sure you select the correct USB device and that it contains nothing you
-   want to keep.
+   Advertencia: instalar Ventoy en una unidad borra y reparticiona esa unidad.
+   Asegúrate de seleccionar el dispositivo USB correcto y de que no contiene
+   nada que quieras conservar.
 
-3. Copy the repository files to the USB drive using exactly the structure
-   expected by `ventoy.json`:
+3. Copia los archivos del repositorio al USB con exactamente la estructura que
+   espera `ventoy.json`:
 
    ```text
-   <USB drive root>
+   <raíz del USB>
    ├── Windows11_Client_x64_es-es_26300_9457.iso
    └── ventoy/
        ├── ventoy.json
@@ -305,79 +334,86 @@ open-source tool that boots ISO files directly from a USB drive.
            └── autounattend.xml
    ```
 
-   - `ventoy.json` goes to `\ventoy\ventoy.json` on the Ventoy partition.
-   - `autounattend.xml` goes to `\ventoy\script\autounattend.xml`; this is the
-     path declared as `template` in `ventoy.json`.
-   - The Windows ISO goes to the root of the USB drive with the exact file name
-     declared as `image` in `ventoy.json`, currently
+   - `ventoy.json` va en `\ventoy\ventoy.json` de la partición Ventoy.
+   - `autounattend.xml` va en `\ventoy\script\autounattend.xml`; esa es la ruta
+     declarada como `template` en `ventoy.json`.
+   - La ISO de Windows va en la raíz del USB con el nombre de archivo exacto
+     declarado como `image` en `ventoy.json`, actualmente
      `Windows11_Client_x64_es-es_26300_9457.iso`.
 
-4. The ISO file name and path must match the `image` value in `ventoy.json`.
-   If you use a different ISO, rename your file to match or edit `ventoy.json`
-   coherently (the same applies to any other path). Do not use modified or
-   unverified ISOs.
+4. El nombre y la ruta de la ISO deben coincidir con el valor `image` de
+   `ventoy.json`. Si usas otra ISO, renombra tu archivo para que coincida o
+   edita `ventoy.json` de forma coherente (lo mismo se aplica a cualquier otra
+   ruta). No uses ISOs modificadas ni fuentes no verificadas.
 
-5. Eject the USB drive safely before removing it.
+5. Expulsa el USB de forma segura antes de retirarlo.
 
-When you boot the ISO, Ventoy shows a boot menu for that image with two
-options:
+Cuando arrancas la ISO, Ventoy muestra un menú de arranque para esa imagen con
+dos opciones:
 
-- `Boot without auto installation template`: boots the plain Windows ISO with
-  no answer file.
-- `Boot with /ventoy/script/autounattend.xml`: boots the ISO applying the
-  `autounattend.xml` declared as `template` in `ventoy.json` as the answer file
-  for that image.
+- `Boot without auto installation template`: arranca la ISO de Windows sin
+  aplicar ningún archivo de respuestas.
+- `Boot with /ventoy/script/autounattend.xml`: arranca la ISO aplicando como
+  archivo de respuestas el `autounattend.xml` declarado como `template` en
+  `ventoy.json`.
 
-To install TMPC Windows 11 Optimization, choose
+Para instalar TMPC Windows 11 Optimization, elige
 `Boot with /ventoy/script/autounattend.xml`.
 
-## Boot from the USB
+## Arrancar desde el USB
 
-1. Connect the USB drive and power on (or restart) the target machine.
-2. Open the UEFI/BIOS boot menu of your machine. The key varies by
-   motherboard/device (commonly F12, F10, F2, Esc or Del, but there is no
-   universal key); consult your machine documentation if needed.
-3. Select the USB drive entry. Prefer the UEFI entry; this profile targets the
-   amd64/UEFI path.
-4. Ventoy starts and lists the ISO files found on the drive. Select
-   `Windows11_Client_x64_es-es_26300_9457.iso`. Ventoy then shows the boot menu for that
-   image: choose `Boot with /ventoy/script/autounattend.xml` to install with
-   the profile, or `Boot without auto installation template` to boot the plain
-   ISO without applying `autounattend.xml`.
-5. Windows Setup starts.
+1. Conecta el USB y enciende (o reinicia) el equipo de destino.
+2. Abre el menú de arranque UEFI/BIOS de tu equipo. La tecla varía según la
+   placa o el dispositivo (habitualmente F12, F10, F2, Esc o Del, pero no hay
+   una tecla universal); consulta la documentación de tu equipo si es
+   necesario.
+3. Selecciona la entrada del USB. Prefiere la entrada UEFI; este perfil está
+   orientado a la ruta amd64/UEFI.
+4. Ventoy arranca y muestra los archivos ISO encontrados en la unidad.
+   Selecciona `Windows11_Client_x64_es-es_26300_9457.iso`. Ventoy muestra entonces el menú
+   de arranque de esa imagen: elige
+   `Boot with /ventoy/script/autounattend.xml` para instalar con el perfil, o
+   `Boot without auto installation template` para arrancar la ISO sin aplicar
+   `autounattend.xml`.
+5. Comienza la instalación de Windows.
 
 ## Windows Setup
 
-- The profile does not automate disk selection or disk erasure. Select the
-  target disk and partitions yourself and verify very carefully which disk you
-  are about to modify. If the disk already contains an old installation you
-  want to remove, delete its partitions in Setup or use the manual DiskPart
-  procedure described below; make sure you are working on the right drive.
-- The answer file bypasses the Windows 11 hardware requirement checks (TPM,
-  Secure Boot, CPU, RAM, storage and disk) during Setup. Installing on
-  unsupported hardware is still your responsibility.
-- A product key screen may appear: the answer file contains a placeholder key,
-  not a real license. Use your own key if you have one.
-- Setup continues automatically from the answer file; do not interrupt it.
-- OOBE is designed to allow creating a local account. During OOBE the network
-  adapters may appear disabled; this is intentional and is not an error: the
-  adapters are re-enabled automatically at first logon.
-- Complete OOBE by creating your local user account and reaching the desktop.
+- El perfil no automatiza la selección ni el borrado de discos. Selecciona tú
+  el disco y las particiones de destino y verifica con mucho cuidado qué disco
+  vas a modificar. Si el disco ya contiene una instalación antigua que quieres
+  eliminar, borra sus particiones en la instalación o usa el procedimiento
+  manual con DiskPart descrito más abajo; asegúrate de trabajar en la unidad
+  correcta.
+- El archivo de respuestas omite las comprobaciones de requisitos de hardware
+  de Windows 11 (TPM, Secure Boot, CPU, RAM, almacenamiento y disco) durante la
+  instalación. Instalar en hardware no compatible sigue siendo tu
+  responsabilidad.
+- Puede aparecer una pantalla de clave de producto: el archivo de respuestas
+  contiene una clave de marcador de posición, no una licencia real. Usa tu
+  propia clave si la tienes.
+- La instalación continúa automáticamente a partir del archivo de respuestas;
+  no la interrumpas.
+- El OOBE está diseñado para permitir crear una cuenta local. Durante el OOBE
+  los adaptadores de red pueden aparecer desactivados; es intencionado y no es
+  un error: se vuelven a activar automáticamente en el primer inicio de sesión.
+- Completa el OOBE creando tu cuenta de usuario local y llegando al escritorio.
 
-### Preparing the disk manually with DiskPart
+### Preparación manual del disco con DiskPart
 
-The answer file does not select or erase any disk; you are responsible for
-choosing the correct target disk. This procedure is destructive and is the
-documented manual procedure for a clean installation in which you prepare the
-disk explicitly; it is not mandatory for every scenario. If you can,
-disconnect any other disk that does not take part in the installation.
+El archivo de respuestas no selecciona ni borra ningún disco; tú eres
+responsable de elegir el disco de destino correcto. Este procedimiento es
+destructivo y es el procedimiento manual documentado para una instalación
+limpia en la que preparas el disco explícitamente; no es obligatorio para
+todos los escenarios. Si puedes, desconecta cualquier otro disco que no
+participe en la instalación.
 
-1. In Windows Setup, press `Shift + F10` to open a command console.
-2. Run DiskPart and identify the target disk.
+1. En Windows Setup, pulsa `Shift + F10` para abrir una consola de comandos.
+2. Ejecuta DiskPart e identifica el disco de destino.
 
-   > **Warning:** `clean` irreversibly removes the partition structure of the
-   > selected disk. Confirm the disk number with `list disk` and `detail disk`
-   > before running it.
+   > **Advertencia:** `clean` elimina de forma irreversible la estructura de
+   > particiones del disco seleccionado. Confirma el número de disco con
+   > `list disk` y `detail disk` antes de ejecutarlo.
 
    ```text
    diskpart
@@ -389,200 +425,229 @@ disconnect any other disk that does not take part in the installation.
    exit
    ```
 
-   - Replace `X` with the number of the correct target disk.
-   - `list disk` shows the available disks.
-   - `detail disk` is the final check before erasing: confirm that the selected
-     disk is the correct one.
-   - `clean` removes the partition structure of the selected disk and must be
-     treated as a destructive operation.
-   - `convert gpt` explicitly prepares the disk as GPT for the UEFI flow.
-   - Do not use `clean all`: it is not required for this procedure.
-3. Close the console, return to Windows Setup, select Refresh and choose the
-   unallocated space so that Windows creates the required partitions.
+   - Sustituye `X` por el número del disco de destino correcto.
+   - `list disk` muestra los discos disponibles.
+   - `detail disk` es la comprobación final antes del borrado: confirma que el
+     disco seleccionado es el correcto.
+   - `clean` elimina la estructura de particiones del disco seleccionado y debe
+     tratarse como una operación destructiva.
+   - `convert gpt` prepara explícitamente el disco como GPT para el flujo UEFI.
+   - No uses `clean all`: no es necesario para este procedimiento.
+3. Cierra la consola, vuelve a Windows Setup, pulsa Actualizar (Refresh) y
+   selecciona el espacio sin asignar para que Windows cree las particiones
+   necesarias.
 
-## First logon and automatic restart
+## Primer inicio de sesión y reinicio automático
 
-This part is important. The behavior of the validated baseline is:
+Esta parte es importante. El comportamiento del baseline validado es:
 
-1. Windows reaches the desktop for the first time.
-2. User-specific settings are applied by a one-time task started at logon.
-3. When the flow finishes, the machine schedules an automatic restart (about
-   20 seconds of notice are shown).
-4. Do not shut down, reset or interrupt the machine while this is happening.
-5. After that restart you reach the final desktop; temporary setup files are
-   removed automatically at startup.
+1. Windows llega al escritorio por primera vez.
+2. Las personalizaciones de usuario se aplican mediante una tarea de un solo
+   uso que se ejecuta al iniciar sesión.
+3. Cuando el flujo termina, el equipo programa un reinicio automático (se
+   muestra un aviso de unos 20 segundos).
+4. No apagues, reinicies ni interrumpas el equipo mientras ocurre esto.
+5. Después de ese reinicio llegas al escritorio final; los archivos temporales
+   de la instalación se eliminan automáticamente al arrancar.
 
-Consider the installation finished once you reach the final desktop after the
-automatic restart.
+Considera la instalación terminada cuando alcances el escritorio final después
+del reinicio automático.
 
-## After installation
+## Después de la instalación
 
-After the final desktop:
+Después del escritorio final:
 
-- Check network connectivity. If the adapters were not re-enabled
-  automatically, enable them from Windows Settings or Device Manager.
-- Install the OEM drivers you prepared in advance: chipset, network/Wi-Fi,
-  audio and GPU. Remember that driver updates through Windows Update are
-  excluded by this profile.
-- Run Windows Update normally to install quality and security updates.
-- Check Device Manager for devices with missing drivers.
-- Restore your data and reinstall your applications.
-- Reconfigure accounts, services and development environments as needed.
-- Verify that Microsoft Defender is active and that Windows Security reports no
-  critical warnings.
+- Comprueba la conectividad de red. Si los adaptadores no se reactivaron
+  automáticamente, actívalos desde Configuración de Windows o el Administrador
+  de dispositivos.
+- Instala los drivers OEM que preparaste con antelación: chipset, red/Wi-Fi,
+  audio y GPU. Recuerda que las actualizaciones de drivers mediante Windows
+  Update están excluidas por este perfil.
+- Ejecuta Windows Update con normalidad para instalar actualizaciones de
+  calidad y seguridad.
+- Revisa el Administrador de dispositivos por si hubiera dispositivos sin
+  driver.
+- Restaura tus datos y vuelve a instalar tus aplicaciones.
+- Reconfigura cuentas, servicios y entornos de desarrollo según necesites.
+- Verifica que Microsoft Defender está activo y que Seguridad de Windows no
+  muestra avisos críticos.
 
-This repository does not install third-party software, browsers or utilities;
-that remains a user decision.
+Este repositorio no instala software, navegadores ni utilidades de terceros:
+eso sigue siendo una decisión del usuario.
 
-For a more complete hardware and post-installation validation checklist,
-including PCIe/GPU-Z, display, RAM, storage and peripherals, see
-[Post-installation checks](docs/post-installation-checks.md).
+Para una comprobación más completa del hardware y del sistema después de
+instalar, incluyendo PCIe/GPU-Z, monitor, RAM, almacenamiento y periféricos,
+consulta [Comprobaciones posteriores a la
+instalación](docs/comprobaciones-posteriores-instalacion.md).
 
-## Quick verification
+## Verificación rápida
 
-A quick, user-level checklist for a successful installation:
+Lista de comprobación rápida, a nivel de usuario, para una instalación
+correcta:
 
-- [ ] The final desktop is reached after one automatic restart.
-- [ ] Network connectivity works.
-- [ ] Microsoft Defender is active.
-- [ ] Windows Update is available (quality/security updates; no driver
-      updates).
-- [ ] Microsoft Store opens.
-- [ ] OneDrive is not installed.
-- [ ] Game Mode is enabled and Game DVR is disabled.
-- [ ] File Explorer shows file extensions and hidden files (protected system
-      files stay hidden), with compact view enabled.
-- [ ] Downloads opens without grouping by date, and the state persists after
-      closing and reopening File Explorer.
-- [ ] Do Not Disturb is off.
-- [ ] Transparency effects are disabled and the default theme is dark.
+- [ ] Se alcanza el escritorio final después de un reinicio automático.
+- [ ] La conectividad de red funciona.
+- [ ] Microsoft Defender está activo.
+- [ ] Windows Update está disponible (actualizaciones de calidad/seguridad; sin
+      actualizaciones de drivers).
+- [ ] Microsoft Store abre.
+- [ ] OneDrive no está instalado.
+- [ ] Game Mode está activado y Game DVR desactivado.
+- [ ] File Explorer muestra las extensiones de archivo y los archivos ocultos
+      (los archivos protegidos del sistema siguen ocultos), con la vista
+      compacta activada.
+- [ ] Downloads abre sin agrupar por fecha y el estado persiste tras cerrar y
+      reabrir el Explorador.
+- [ ] "No molestar" está desactivado.
+- [ ] Los efectos de transparencia están desactivados y el tema por defecto es
+      oscuro.
 
-This checklist reflects tested behavior; it does not replace the static
-validation described below.
+Esta lista refleja el comportamiento probado; no sustituye la validación
+estática descrita más abajo.
 
-For detailed hardware checks (PCIe link with GPU-Z, display, RAM, storage and
-peripherals), see [Post-installation checks](docs/post-installation-checks.md).
+La verificación detallada de hardware (PCIe con GPU-Z, monitor, RAM,
+almacenamiento y periféricos) está en [Comprobaciones posteriores a la
+instalación](docs/comprobaciones-posteriores-instalacion.md).
 
-## File integrity (SHA-256)
+## Integridad de archivos (SHA-256)
 
-Hashes of the current documented baseline:
+Hashes del baseline documentado actual:
 
 ```text
 autounattend.xml
-D99BF0EC59A8CB322A84E99F36373FEDD6358350A0D053A02FEB24C11A608EA4
+2E85E8DD733434364AEFF17BFBB27A5869F771CB1C3DE1942722F8439D470B36
 
 ventoy.json
 058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B
 ```
 
-The current answer file targets Windows 11 Pro 26H2 (build base 26300) and
-stages the Start pins policy as the ADMX-exact machine policy pair
-(`ConfigureStartPins` = DWord 1 and `ConfigureStartPinsJSON` =
-REG_EXPAND_SZ path) pointing to a persistent empty layout with `applyOnce`. That
-pair was validated manually on Windows 11 26H2 (empty Pinned section, later user
-pins preserved), but the integrated answer file still requires a clean-install
-sign-in test before its Start result is considered validated. The current
-answer file also adds the `DisableCloudOptimizedContent` (DWord 1) machine
-policy to suppress cloud optimized promotional taskbar pins for new profiles;
-it does not remove existing pins, and the integrated clean-install result is
-still pending. The current answer file additionally initializes the All apps
-view as List (`AllAppsViewMode` = DWord 2) in the one-time user phase, only when
-the value is absent: `RUNTIME_EXISTING_PROFILE = PASS` (manual registry change
-on an existing Windows 11 Pro 26H2 profile, List visible after signing out and
-back in, with Category and Grid still available),
-`CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED` and
-`STANDALONE_RUNTIME = NOT_TESTED`. The rest of the profile keeps the runtime
-evidence of the published v0.1.5 baseline, which was validated on the historical
-Windows 11 Pro 25H2 reference. The current answer file also introduces the
-idempotent verified registry engine (read first, write only when a value
-differs, re-read to verify) and the hardened OneNote/OneDrive blocks (no
-arbitrary uninstall strings, no forced process termination, no ownership or ACL
-changes, no deferred deletions). An isolated test suite (`scripts/tests`)
-exercises the engine and the hardening against in-memory doubles.
+El archivo de respuestas actual tiene como objetivo Windows 11 Pro 26H2 (build
+base 26300) y prepara la política de pins de Inicio como el
+par ADMX exacto de política de máquina (`ConfigureStartPins` = DWord 1 y
+`ConfigureStartPinsJSON` = REG_EXPAND_SZ con la ruta) apuntando a un diseño
+vacío persistente con `applyOnce`. Ese par se validó manualmente en Windows 11
+26H2 (sección Pinned vacía y pins posteriores del usuario conservados), pero el
+archivo de respuestas integrado todavía necesita una prueba de inicio de sesión
+en instalación limpia antes de considerar validado su resultado en Inicio. El
+archivo de respuestas actual añade además la política de máquina
+`DisableCloudOptimizedContent` (DWord 1) para evitar anclajes promocionales de
+contenido optimizado en la nube en perfiles nuevos; no elimina anclados que ya
+existan y su resultado integrado en instalación limpia sigue pendiente. El
+archivo de respuestas actual también inicializa la vista de Todas las
+aplicaciones como Lista (`AllAppsViewMode` = DWord 2) en la fase de usuario de
+un solo uso, únicamente si el valor no existe:
+`RUNTIME_EXISTING_PROFILE = PASS` (cambio manual del Registro en un perfil
+existente de Windows 11 Pro 26H2, Lista visible tras cerrar y abrir sesión, con
+Categoría y Cuadrícula todavía disponibles),
+`CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED` y
+`STANDALONE_RUNTIME = NOT_TESTED`. El resto del perfil conserva la evidencia
+runtime del baseline publicado v0.1.5, que se validó en la referencia histórica
+Windows 11 Pro 25H2. El archivo de respuestas actual incorpora además el motor
+de Registro idempotente y verificado (leer primero, escribir solo si un valor
+difiere, releer para verificar) y los bloques endurecidos de OneNote/OneDrive
+(sin cadenas de desinstalación arbitrarias, sin terminación forzada de procesos,
+sin cambios de propiedad o ACL y sin borrados diferidos). Una suite de pruebas
+aislada (`scripts/tests`) ejercita el motor y el endurecimiento con dobles en
+memoria. Las correcciones R1 garantizan que el valor predeterminado sin nombre
+del Registro se lea y escriba mediante el nombre vacío que devuelve
+`GetValueNames()`, que las escrituras `REG_BINARY` reciban un `byte[]` y se
+verifiquen byte a byte, que las entradas XML de desinstalación de ámbito máquina
+exijan el argumento explícito `/allusers` y que la limpieza OneDrive del
+standalone separe los ámbitos máquina y usuario con evidencia independiente: una
+desinstalación de usuario o una lectura denegada del Registro nunca autorizan la
+limpieza de ámbito máquina. Estos cambios están validados estáticamente y
+cubiertos por la suite aislada; no se han ejecutado en una instalación limpia y
+el nuevo hash del XML no equivale al de ninguna versión probada anteriormente.
 
-Verify them on your copy:
+Verifícalos en tu copia:
 
 ```powershell
 Get-FileHash -Algorithm SHA256 .\autounattend.xml, .\ventoy.json
 ```
 
-If the hashes match, you are using the documented baseline. If they differ,
-review the files before using them.
+Si los hashes coinciden, estás usando el baseline documentado. Si difieren,
+revisa los archivos antes de usarlos.
 
-## Known limitations
+## Limitaciones conocidas
 
-- The published v0.1.5 baseline was validated specifically on Windows 11 Pro
-  25H2 (historical reference); the current reference is Windows 11 Pro 26H2
-  (build base 26300). The integrated answer file still lacks a clean-install
-  revalidation of the latest changes and the standalone has no host runtime
-  test (static validation plus the isolated test suite only). Other Windows 11
-  client builds inside the supported envelope are accepted as
-  `NOT_RUNTIME_TESTED` and may require revalidation.
-- No hardware-specific drivers are included. Prepare chipset, network, audio
-  and GPU drivers yourself.
-- No third-party software is installed by the profile.
-- `IQuietHoursSettings`, used to switch Do Not Disturb off, is an internal,
-  undocumented COM interface; it may change in future Windows builds.
-- Do Not Disturb is left OFF as a checked state at apply time, not as a
-  permanent guarantee. Windows 11 can turn Do Not Disturb on again through
-  automatic activation (rules available in Settings > System > Notifications:
-  during certain times of the day, when duplicating the display, when playing
-  a game, when using an app in full-screen mode and for the first hour after a
-  Windows feature update; a Focus session also turns it on automatically).
-  TMPC does not modify, disable or override those Windows rules, so a
-  reactivation of Do Not Disturb does not by itself indicate a TMPC failure.
-  The exact cause observed on a real PC is not demonstrated. For the current
-  conditions and defaults, see Microsoft Support: "Notifications and Do Not
+- El baseline publicado v0.1.5 se validó específicamente en Windows 11 Pro 25H2
+  (referencia histórica); la referencia actual es Windows 11 Pro 26H2 (build
+  base 26300). El archivo de respuestas integrado todavía no tiene una
+  revalidación en instalación limpia de los últimos cambios y el standalone no
+  tiene prueba runtime en anfitrión (solo validación estática más la suite de
+  pruebas aislada). Otras builds de Windows 11 cliente dentro del marco admitido
+  se aceptan como `NOT_RUNTIME_TESTED` y pueden requerir revalidación.
+- No se incluyen drivers específicos del hardware. Prepara tú mismo los
+  drivers de chipset, red, audio y GPU.
+- El perfil no instala software de terceros.
+- `IQuietHoursSettings`, usada para desactivar "No molestar", es una interfaz
+  COM interna no documentada; puede cambiar en futuras builds de Windows.
+- "No molestar" queda desactivado como estado comprobado en el momento de
+  aplicar el perfil, no como garantía permanente. Windows 11 puede volver a
+  activarlo mediante su activación automática (reglas disponibles en
+  Configuración > Sistema > Notificaciones: determinados horarios, duplicación
+  de pantalla, durante juegos, aplicaciones a pantalla completa y la primera
+  hora posterior a una actualización de características de Windows; una sesión
+  de concentración también lo activa automáticamente). TMPC no modifica,
+  desactiva ni sobrescribe esas reglas de Windows, por lo que una reactivación
+  de "No molestar" no demuestra por sí sola un fallo de TMPC. La causa concreta
+  observada en un PC real no está demostrada. Para las condiciones y valores
+  actuales, consulta el soporte oficial de Microsoft: "Notifications and Do Not
   Disturb in Windows"
   (https://support.microsoft.com/en-us/windows/experience/notifications-and-do-not-disturb-in-windows).
-- The per-user override for the Downloads folder view depends on the current
-  Windows behavior and is not a public API; a major update may remove it and
-  the one-time task does not re-apply it automatically. Before copying the
-  folder type, the profile verifies the installed default
-  (`GroupBy = System.DateModified`); that value was verified on the historical
-  25H2 reference and has not been re-verified on 26H2. If it differs, the
-  override is skipped and the mismatch is recorded as an error instead of
-  writing an unverified view.
-- Paint may still show some AI-related elements or messages even though its AI
-  policies are applied; a fully clean Paint AI UI was not achieved. In the test
-  installation, Notepad showed no visible AI features.
-- A historical first-logon visual anomaly (light taskbar and wallpaper until a
-  logoff/logon) did not reproduce on the current baseline; its root cause is
-  still unconfirmed.
-- The Start pins policy pair in the current answer file (persistent empty
-  layout with `applyOnce`, applied at the next sign-in) was validated manually
-  on Windows 11 26H2; the integrated answer file still requires a clean-install
-  sign-in validation, and staging the policy does not by itself prove an empty
-  Start menu. Taskbar icons are independent of Start pins.
-- The `DisableCloudOptimizedContent` machine policy (added to suppress
-  promotional taskbar pins such as the Outlook for Windows placeholder on new
-  profiles) turns off cloud optimized content globally: personalized cloud
-  content and Windows Spotlight wallpapers become unavailable, while static
-  wallpapers still work. It does not remove pins that already exist. The CSP
-  reference lists the setting for Enterprise/Education editions: it is not
-  documented official support for Pro. It was visually checked with a
-  genuinely new local user on Windows 11 Pro 26H2 (Outlook not pinned; Edge,
-  File Explorer and Microsoft Store kept; empty Pinned section). Integrated
-  clean-install validation and side-effect coverage are still pending; the
-  historical 25H2 baseline did not include this policy, and the Start pins ADMX
-  pair keeps its previous manual 26H2 validation.
-- The initial List view for All apps is an `AllAppsViewMode` (DWord 2) user
-  preference written during the first-logon user customization phase only when
-  the value is absent; an existing preference is never overwritten and the
-  setting can be changed later to Grid or Category. On an existing Windows 11
-  Pro 26H2 profile, changing the value manually and signing out and back in
-  showed the List view (`RUNTIME_EXISTING_PROFILE = PASS`), with Category and
-  Grid still available. Automatic application by a clean installation
-  (`CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED`) and the standalone runtime
-  (`STANDALONE_RUNTIME = NOT_TESTED`) have not been tested; behavior on other
-  builds, including the historical 25H2 reference, is also untested.
-  `AllAppsViewMode` is an observed registry behavior, not a documented
-  Microsoft-supported interface.
+- El override por usuario de la vista de la carpeta Downloads depende del
+  comportamiento actual de Windows y no es una API pública; una actualización
+  mayor puede eliminarlo y la tarea de un solo uso no lo reaplica
+  automáticamente. Antes de copiar el FolderType, el perfil verifica el default
+  instalado (`GroupBy = System.DateModified`); ese valor se verificó en la
+  referencia histórica 25H2 y no se ha vuelto a verificar en 26H2. Si difiere,
+  el override se omite y la discrepancia se registra como error en lugar de
+  escribir una vista no verificada.
+- Paint puede seguir mostrando determinados elementos o avisos relacionados
+  con IA aunque sus políticas de IA se apliquen; no se logró una interfaz de
+  Paint totalmente limpia de IA. En la instalación de prueba, Notepad no mostró
+  funciones de IA visibles.
+- Una anomalía visual histórica del primer inicio de sesión (barra de tareas y
+  fondo claros hasta un cierre y apertura de sesión) no se reprodujo en el
+  baseline actual; su causa sigue sin confirmarse.
+- El par de política de pins de Inicio del archivo de respuestas actual (diseño
+  vacío persistente con `applyOnce`, aplicado en el siguiente inicio de sesión)
+  se validó manualmente en Windows 11 26H2; el archivo de respuestas integrado
+  todavía requiere una validación de inicio de sesión en instalación limpia, y
+  preparar la política no demuestra por sí solo un menú Inicio vacío. Los
+  iconos de la barra de tareas son independientes de los pins de Inicio.
+- La política de máquina `DisableCloudOptimizedContent` (añadida para evitar
+  anclajes promocionales en la barra de tareas, como el marcador de Outlook
+  para Windows, en perfiles nuevos) desactiva globalmente el contenido
+  optimizado en la nube: el contenido personalizado y los fondos de Windows
+  Spotlight dejan de estar disponibles, aunque se pueden fijar fondos
+  estáticos. No elimina anclados que ya existan. La referencia CSP lista la
+  opción para ediciones Enterprise/Education: no es soporte Pro documentado.
+  Se comprobó visualmente con un usuario local genuinamente nuevo en Windows 11
+  Pro 26H2 (Outlook no anclado; Edge, Explorador de archivos y Microsoft Store
+  conservados; sección Pinned vacía). La validación integrada en instalación
+  limpia y la cobertura de efectos secundarios siguen pendientes; el baseline
+  histórico 25H2 no incluía esta política, y el par ADMX de pins de Inicio
+  conserva su validación manual previa en 26H2.
+- La vista inicial Lista de Todas las aplicaciones es una preferencia de
+  usuario `AllAppsViewMode` (DWord 2) escrita durante la fase de personalización
+  de usuario del primer inicio de sesión y solo si el valor no existe; nunca se
+  sobrescribe una preferencia previa y el ajuste puede cambiarse después a
+  Cuadrícula o Categoría. En un perfil existente de Windows 11 Pro 26H2, cambiar
+  el valor manualmente y cerrar y abrir sesión mostró la vista Lista
+  (`RUNTIME_EXISTING_PROFILE = PASS`), con Categoría y Cuadrícula todavía
+  disponibles. La aplicación automática por una instalación limpia
+  (`CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED`) y el runtime del standalone
+  (`STANDALONE_RUNTIME = NOT_TESTED`) no se han probado; el comportamiento en
+  otras builds, incluida la referencia histórica 25H2, tampoco.
+  `AllAppsViewMode` es un comportamiento observado del Registro, no una
+  interfaz documentada y soportada por Microsoft.
 
-## Repository layout
+## Estructura del repositorio
 
 ```text
 README.md
+README.en.md
 README.es.md
 LICENSE
 THIRD_PARTY_NOTICES.md
@@ -604,69 +669,76 @@ scripts/
     Invoke-TMPCTests.ps1
 ```
 
-Main files:
+`README.es.md` se conserva como página de compatibilidad para enlaces
+antiguos y no sustituye a este README.
 
-- `autounattend.xml`: installation automation and customization profile.
-- `Apply-TMPCOptimizations.ps1`: independent Full / UserOnly post-install method.
-- `ventoy.json`: Ventoy configuration that binds the ISO to the answer file.
-- `.gitattributes`: repository line-ending policy.
-- `LICENSE`: project license (MIT).
-- `THIRD_PARTY_NOTICES.md`: copyright and license notices for third-party
-  portions.
-- `scripts/validate-baseline.ps1`: local, read-only static validator.
-- `scripts/tests/`: isolated automated tests driven by in-memory doubles; they
-  never touch the host registry, filesystem or processes.
+Archivos principales:
 
-## Local static validation
+- `autounattend.xml`: automatización y perfil de personalización de la
+  instalación.
+- `Apply-TMPCOptimizations.ps1`: vía post-install independiente Full / UserOnly.
+- `ventoy.json`: configuración de Ventoy que enlaza la ISO con el archivo de
+  respuestas.
+- `.gitattributes`: política de finales de línea del repositorio.
+- `LICENSE`: licencia del proyecto (MIT).
+- `THIRD_PARTY_NOTICES.md`: avisos de copyright y licencia de los componentes
+  de terceros.
+- `scripts/validate-baseline.ps1`: validador estático local de solo lectura.
+- `scripts/tests/`: pruebas automatizadas aisladas con dobles en memoria; nunca
+  tocan el Registro, el sistema de archivos ni los procesos del anfitrión.
 
-The repository includes a read-only static validator:
+## Validación estática local
+
+El repositorio incluye un validador estático de solo lectura:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\validate-baseline.ps1
 ```
 
-It checks the repository structure, the XML well-formedness and architecture,
-the syntax of the embedded PowerShell, `ventoy.json`, documented hashes, line
-endings and documentation links. It also parses the standalone and checks its
-source binding, profile inventories, idempotent registry engine, layered
-compatibility preflight and critical static guards. It never executes either
-optimizer and does not replace a controlled runtime test.
+Comprueba la estructura del repositorio, que el XML esté bien formado y su
+arquitectura, la sintaxis del PowerShell embebido, `ventoy.json`, los hashes
+documentados, los finales de línea y los enlaces de la documentación. También
+parsea el standalone y comprueba su vínculo fuente, inventarios del perfil,
+motor de Registro idempotente, preflight de compatibilidad por capas y
+protecciones estáticas críticas. Nunca ejecuta ninguno de los optimizadores ni
+sustituye una prueba runtime controlada.
 
-The isolated automated tests run the same logic against in-memory doubles and
-never touch the host registry, filesystem or processes:
+Las pruebas automatizadas aisladas ejecutan la misma lógica con dobles en
+memoria y nunca tocan el Registro, el sistema de archivos ni los procesos del
+anfitrión:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\tests\Invoke-TMPCTests.ps1
 ```
 
-## Technical documentation
+## Documentación técnica
 
-Advanced reference documents (in English):
+Documentos de referencia avanzada (en español):
 
-- [`docs/pre-installation-preparation.md`](docs/pre-installation-preparation.md):
-  pre-installation preparation, backups and driver checklist.
-- [`docs/configuration-testing-limitations-sources.md`](docs/configuration-testing-limitations-sources.md):
-  applied configuration, validation status, limitations and sources.
-- [`docs/post-installation-checks.md`](docs/post-installation-checks.md):
-  detailed post-installation hardware and system validation.
+- [`docs/preparacion-previa-instalacion.md`](docs/preparacion-previa-instalacion.md):
+  preparación previa a la instalación, backups y lista de drivers.
+- [`docs/configuracion-pruebas-limitaciones-fuentes.md`](docs/configuracion-pruebas-limitaciones-fuentes.md):
+  configuración aplicada, estado de validación, limitaciones y fuentes.
+- [`docs/comprobaciones-posteriores-instalacion.md`](docs/comprobaciones-posteriores-instalacion.md):
+  comprobación detallada de hardware y del sistema después de instalar.
 
-No step required to install the profile exists only in those documents; this
-README is self-sufficient.
+Ningún paso imprescindible para instalar el perfil existe únicamente en esos
+documentos; este README es autosuficiente.
 
-## Sources and licensing
+## Fuentes y licencias
 
-- TMPC Windows 11 Optimization is licensed under the MIT License.
-  Copyright (c) 2026 Alvaro-TMPC. See [LICENSE](LICENSE).
-- Third-party portions retain their own copyright and license notices; see
-  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- Portions of `autounattend.xml` are derived from or based on code distributed
-  in [memstechtips/UnattendedWinstall](https://github.com/memstechtips/UnattendedWinstall)
-  (reference revision `cca752363772a845eb0fed9d3a5b89b5d0a10d20`, MIT License,
-  Copyright (c) 2025 Marco du Plessis). This includes `BloatRemoval.ps1`
-  (version 2.3), `OneDriveRemoval.ps1` (version 1.2, locally hardened on the
-  TMPC profile) and related helper/automation logic. The local profile has been
-  modified and extended for this project.
-- The answer file keeps the historical attribution
-  <https://github.com/memstechtips/Autounattend> present in those scripts; the
-  canonical upstream reference used for licensing and traceability of this
-  release is <https://github.com/memstechtips/UnattendedWinstall>.
+- TMPC Windows 11 Optimization se distribuye bajo la licencia MIT.
+  Copyright (c) 2026 Alvaro-TMPC. Consulta [LICENSE](LICENSE).
+- Los componentes de terceros conservan sus propios avisos de copyright y
+  licencia; consulta [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- Parte de `autounattend.xml` deriva de, o se basa en, código distribuido en
+  [memstechtips/UnattendedWinstall](https://github.com/memstechtips/UnattendedWinstall)
+  (revisión de referencia `cca752363772a845eb0fed9d3a5b89b5d0a10d20`, licencia
+  MIT, Copyright (c) 2025 Marco du Plessis). Esto incluye `BloatRemoval.ps1`
+  (versión 2.3), `OneDriveRemoval.ps1` (versión 1.2, endurecido localmente en el
+  perfil TMPC) y lógica auxiliar/automatización relacionada. El perfil local ha
+  sido modificado y ampliado para este proyecto.
+- El archivo de respuestas conserva la atribución histórica
+  <https://github.com/memstechtips/Autounattend> presente en esos scripts; la
+  referencia canónica usada para licencias y trazabilidad de esta release es
+  <https://github.com/memstechtips/UnattendedWinstall>.

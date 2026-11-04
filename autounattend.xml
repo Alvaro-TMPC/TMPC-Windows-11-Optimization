@@ -245,8 +245,32 @@ function Get-UserSID {
 # WRITE_DENIED, WRITE_FAILED, VERIFY_FAILED and CONFLICTING_STATE. A failed
 # read never assumes absence and never leads to a blind write. Logs carry the
 # description and the state, not registry blobs or raw error payloads.
+#
+# The unnamed default value is named by the empty string in
+# RegistryKey.GetValueNames(); the readable inventory alias "(Default)" is
+# normalized to that empty name so reads and verification address the real
+# default value. No other value name is rewritten.
+function ConvertTo-RegistryValueName {
+    param($Name)
+    if ($null -ne $Name -and [string]::Equals([string]$Name, '(Default)', [StringComparison]::OrdinalIgnoreCase)) {
+        return ''
+    }
+    return $Name
+}
+
+function Test-RegistryValueName {
+    # Models RegistryKey.GetValueNames(): the default value is named "".
+    param([string[]]$ValueNames, $Name)
+    $normalizedName = ConvertTo-RegistryValueName -Name $Name
+    if ($null -eq $normalizedName) { return $false }
+    return @($ValueNames) -contains $normalizedName
+}
+
 function Get-RegistryEntryState {
-    param([string]$Path, [string]$Name)
+    # $Name is deliberately untyped: $null means "probe the key only", while an
+    # empty string means the unnamed default value.
+    param([string]$Path, $Name)
+    $normalizedName = ConvertTo-RegistryValueName -Name $Name
     $pathExists = $false
     $valueExists = $false
     $kind = $null
@@ -261,11 +285,11 @@ function Get-RegistryEntryState {
     if ($key) {
         $pathExists = $true
         try {
-            if ($Name) {
-                $valueExists = @($key.GetValueNames()) -contains $Name
+            if ($null -ne $normalizedName) {
+                $valueExists = Test-RegistryValueName -ValueNames @($key.GetValueNames()) -Name $normalizedName
                 if ($valueExists) {
-                    $kind = $key.GetValueKind($Name)
-                    $value = $key.GetValue($Name)
+                    $kind = $key.GetValueKind($normalizedName)
+                    $value = $key.GetValue($normalizedName)
                 }
             }
         } finally { $key.Close() }
@@ -293,6 +317,22 @@ function Test-RegistryStateEqual {
     return [string]::Equals([string]$Value, [string]$Expected, [StringComparison]::Ordinal)
 }
 
+function Write-RegistryValue {
+    # Sole registry write primitive for Set-RegistryValue. The provider maps
+    # "(Default)" to the unnamed value; an empty -Name does not bind in Windows
+    # PowerShell 5.1, so the alias is used only at this boundary.
+    param(
+        [string]$Path,
+        [string]$Name,
+        [string]$Type,
+        $Value,
+        [bool]$PathExists
+    )
+    $providerName = if ($Name -eq '') { '(Default)' } else { $Name }
+    if (-not $PathExists) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
+    Set-ItemProperty -Path $Path -Name $providerName -Value $Value -Type $Type -Force -ErrorAction Stop
+}
+
 function Get-RegistryErrorReason {
     param($ErrorRecord)
     $reason = $ErrorRecord.Exception.Message
@@ -309,6 +349,8 @@ function Set-RegistryValue {
         [string]$Description
     )
 
+    $displayName = $Name
+    $Name = ConvertTo-RegistryValueName -Name $Name
     try {
         $state = $null
         try { $state = Get-RegistryEntryState -Path $Path -Name $Name }
@@ -317,12 +359,13 @@ function Set-RegistryValue {
         if ($Type -eq 'Binary') { $expected = [byte[]]$Value }
         if ($Type -eq 'DWord') { $expected = [int]$Value }
         if ($state.ValueExists -and (Test-RegistryStateEqual -Type $Type -Expected $expected -Kind $state.Kind -Value $state.Value)) {
-            Write-Log "$Description | $Path\$Name | ALREADY_COMPLIANT; no write performed" "INFO"
+            Write-Log "$Description | $Path\$displayName | ALREADY_COMPLIANT; no write performed" "INFO"
             return
         }
         try {
-            if (-not $state.PathExists) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
-            Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force -ErrorAction Stop
+            # Binary writes must receive the byte[] conversion, never the raw
+            # Object[] that the caller may use to express the bytes.
+            Write-RegistryValue -Path $Path -Name $Name -Type $Type -Value $expected -PathExists ([bool]$state.PathExists)
         } catch {
             $denied = ($_.Exception -is [System.UnauthorizedAccessException]) -or ($_.Exception -is [System.Security.SecurityException])
             if ($denied) { throw 'WRITE_DENIED' }
@@ -334,11 +377,11 @@ function Set-RegistryValue {
         if (-not ($after.ValueExists -and (Test-RegistryStateEqual -Type $Type -Expected $expected -Kind $after.Kind -Value $after.Value))) {
             throw 'VERIFY_FAILED'
         }
-        Write-Log "$Description | $Path\$Name | APPLIED and verified" "SUCCESS"
+        Write-Log "$Description | $Path\$displayName | APPLIED and verified" "SUCCESS"
     }
     catch {
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to set $Path\$Name | $(Get-RegistryErrorReason $_)" "ERROR"
+        Write-Log "Failed to set $Path\$displayName | $(Get-RegistryErrorReason $_)" "ERROR"
     }
 }
 
@@ -1209,13 +1252,14 @@ function Start-TMPCVerifiedUninstaller {
 }
 
 function Invoke-OneDriveUninstaller {
-    param([string]$RegistryPath)
+    param([string]$RegistryPath, [switch]$Machine)
     # No cmd.exe, arbitrary registry command or shell expansion: only the
     # installed OneDriveSetup.exe with baseline uninstall switches, inside known
     # software locations and with a valid Microsoft signature, is executed.
     # This variant runs as SYSTEM during Setup, where the machine entry is the
     # inbox stub (System32\OneDriveSetup.exe); user-scope entries are deferred
-    # by the caller instead of being executed as SYSTEM.
+    # by the caller instead of being executed as SYSTEM. A machine-scope entry
+    # must use the explicit /allusers uninstall scope.
     $state = $null
     try { $state = Get-RegistryEntryState -Path $RegistryPath -Name 'UninstallString' }
     catch { throw 'READ_DENIED' }
@@ -1231,6 +1275,10 @@ function Invoke-OneDriveUninstaller {
     }
     $exe = [IO.Path]::GetFullPath($matches[1])
     $arguments = $matches[2]
+    if ($Machine -and $arguments -ne '/uninstall /allusers') {
+        Write-Log "Machine OneDrive uninstall lacks allusers scope; deferred to avoid wrong-account removal."
+        return $false
+    }
     $roots = @((Join-Path $env:ProgramFiles 'Microsoft OneDrive'), (Join-Path $env:SystemRoot 'System32'), (Join-Path $env:SystemRoot 'SysWOW64'))
     $trusted = $false
     foreach ($root in $roots) {
@@ -1396,7 +1444,7 @@ if ($oneDriveRunning) {
     $machineUninstalled = $false
     Write-Log "Checking the HKLM OneDrive uninstall entry"
     try {
-        $machineUninstalled = Invoke-OneDriveUninstaller -RegistryPath $machineUninstallKey
+        $machineUninstalled = Invoke-OneDriveUninstaller -RegistryPath $machineUninstallKey -Machine
     } catch {
         Write-Log "HKLM OneDrive uninstall failed: $(Get-RegistryErrorReason $_)"
         $script:HadErrors = $true
