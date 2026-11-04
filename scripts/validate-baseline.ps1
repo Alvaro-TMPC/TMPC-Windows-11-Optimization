@@ -885,6 +885,8 @@ function Test-GitAttributesCrossCheck {
         'README.es.md',
         'LICENSE',
         'THIRD_PARTY_NOTICES.md',
+        'docs/guia-completa.md',
+        'docs/full-guide.md',
         'docs/preparacion-previa-instalacion.md',
         'docs/pre-installation-preparation.md',
         'docs/configuracion-pruebas-limitaciones-fuentes.md',
@@ -918,6 +920,8 @@ function Test-GitAttributesCrossCheck {
         'README.es.md'                                       = 'lf'
         'LICENSE'                                            = 'lf'
         'THIRD_PARTY_NOTICES.md'                             = 'lf'
+        'docs/guia-completa.md'                              = 'lf'
+        'docs/full-guide.md'                                 = 'lf'
         'docs/preparacion-previa-instalacion.md'             = 'lf'
         'docs/pre-installation-preparation.md'               = 'lf'
         'docs/configuracion-pruebas-limitaciones-fuentes.md' = 'lf'
@@ -953,24 +957,71 @@ function Test-DocumentLinks {
     if (-not $record.DecodeOk) { return }
     $baseDir = Split-Path -Parent $record.Abs
     $checked = 0
+    $anchorChecked = 0
     $broken = 0
+    $anchorBroken = 0
+    $anchorCache = @{}
     foreach ($m in [regex]::Matches($record.Text, '\]\(([^)]+)\)')) {
         $target = $m.Groups[1].Value.Trim()
         if ([string]::IsNullOrWhiteSpace($target)) { continue }
         $target = ($target -split '\s+')[0]
-        if ($target -match '^(https?://|mailto:|#)') { continue }
+        if ($target -match '^(https?://|mailto:)') { continue }
+
+        $anchor = $null
         $anchorIndex = $target.IndexOf('#')
-        if ($anchorIndex -ge 0) { $target = $target.Substring(0, $anchorIndex) }
-        if ([string]::IsNullOrWhiteSpace($target)) { continue }
-        $checked++
-        $candidate = Join-Path $baseDir $target
-        if (-not (Test-Path -LiteralPath $candidate)) {
-            $broken++
-            Add-Fail ("{0}: enlace relativo no encontrado: {1}" -f $RelativePath, $target)
+        if ($anchorIndex -ge 0) {
+            $anchor = $target.Substring($anchorIndex + 1)
+            $target = $target.Substring(0, $anchorIndex)
+            try { $anchor = [System.Uri]::UnescapeDataString($anchor) } catch { }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($target)) {
+            $candidate = $record.Abs
+            $targetText = $record.Text
+        } else {
+            $checked++
+            $candidate = Join-Path $baseDir $target
+            if (-not (Test-Path -LiteralPath $candidate)) {
+                $broken++
+                Add-Fail ("{0}: enlace relativo no encontrado: {1}" -f $RelativePath, $target)
+                continue
+            }
+            $targetText = $null
+            if ($anchor -and [System.IO.Path]::GetExtension($candidate).ToLowerInvariant() -eq '.md') {
+                if ($anchorCache.ContainsKey($candidate)) {
+                    $targetText = $anchorCache[$candidate]
+                } else {
+                    try {
+                        $targetText = [System.IO.File]::ReadAllText($candidate, (New-Object System.Text.UTF8Encoding($false, $true)))
+                        $anchorCache[$candidate] = $targetText
+                    } catch {
+                        Add-Warn ("{0}: no se pudo leer el destino del ancla: {1}" -f $RelativePath, $target)
+                        continue
+                    }
+                }
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($anchor)) {
+            if ($null -eq $targetText) {
+                if ([System.IO.Path]::GetExtension($candidate).ToLowerInvariant() -ne '.md') {
+                    Add-Warn ("{0}: ancla en destino no Markdown no verificable: {1}" -f $RelativePath, $target)
+                }
+                continue
+            }
+            $anchors = @(Get-MarkdownHeadingAnchors -Text $targetText)
+            $anchorChecked++
+            if ($anchors -notcontains $anchor) {
+                $anchorBroken++
+                Add-Fail ("{0}: ancla no encontrada en {1}: {2}" -f $RelativePath, $target, $anchor)
+            }
         }
     }
     if ($broken -eq 0) {
         Add-Ok ("{0}: {1} enlace(s) relativo(s) comprobado(s)" -f $RelativePath, $checked)
+    }
+    if ($anchorBroken -eq 0) {
+        Add-Ok ("{0}: {1} ancla(s) relativa(s) verificada(s)" -f $RelativePath, $anchorChecked)
     }
 }
 
@@ -1039,19 +1090,23 @@ function Test-ReadmeLanguageStructure {
         Add-Fail ("README.md/README.en.md: secciones H2 desiguales ({0} / {1})" -f $spanishH2, $englishH2)
     }
 
-    $anchors = @(Get-MarkdownHeadingAnchors -Text $spanish.Text)
+    $guideRecord = Get-FileRecord -RelativePath 'docs/guia-completa.md'
+    $guideAnchors = @()
+    if ($guideRecord.Exists -and $guideRecord.DecodeOk) {
+        $guideAnchors = @(Get-MarkdownHeadingAnchors -Text $guideRecord.Text)
+    }
     $deepLinks = 0
     $missing = 0
-    foreach ($match in [regex]::Matches($compat.Text, '\]\(README\.md#([^)]+)\)')) {
+    foreach ($match in [regex]::Matches($compat.Text, '\]\(docs/guia-completa\.md#([^)]+)\)')) {
         $deepLinks++
         $anchor = $match.Groups[1].Value.Trim()
-        if ($anchors -notcontains $anchor) {
+        if ($guideAnchors -notcontains $anchor) {
             $missing++
-            Add-Fail ("README.es.md: ancla no encontrada en README.md: {0}" -f $anchor)
+            Add-Fail ("README.es.md: ancla no encontrada en docs/guia-completa.md: {0}" -f $anchor)
         }
     }
     if ($deepLinks -ge 18 -and $missing -eq 0) {
-        Add-Ok ("README.es.md: {0} enlace(s) profundo(s) verificados contra README.md" -f $deepLinks)
+        Add-Ok ("README.es.md: {0} enlace(s) profundo(s) verificados contra docs/guia-completa.md" -f $deepLinks)
     } elseif ($deepLinks -lt 18) {
         Add-Fail ("README.es.md: enlaces profundos insuficientes ({0}; esperado >= 18)" -f $deepLinks)
     }
@@ -1070,6 +1125,203 @@ function Test-ReadmeLanguageStructure {
             Add-Ok ("{0}: enlace al README secundario EN" -f $doc)
         } else {
             Add-Fail ("{0}: enlace al README secundario EN ausente o incorrecto" -f $doc)
+        }
+    }
+
+    $englishGuide = Get-FileRecord -RelativePath 'docs/full-guide.md'
+    foreach ($guide in @($guideRecord, $englishGuide)) {
+        if (-not $guide.Exists -or -not $guide.DecodeOk) {
+            Add-Fail ("{0}: guia completa no disponible" -f $guide.Relative)
+            return
+        }
+    }
+    if ($guideRecord.Text -match '(?m)^\*\*Espa.ol\*\* \| \[English\]\(full-guide\.md\)[ \t]*$') {
+        Add-Ok 'docs/guia-completa.md: navegacion ES -> EN presente'
+    } else {
+        Add-Fail 'docs/guia-completa.md: falta la navegacion ES -> EN'
+    }
+    if ($englishGuide.Text -match '(?m)^\[Espa.ol\]\(guia-completa\.md\) \| \*\*English\*\*[ \t]*$') {
+        Add-Ok 'docs/full-guide.md: navegacion EN -> ES presente'
+    } else {
+        Add-Fail 'docs/full-guide.md: falta la navegacion EN -> ES'
+    }
+    foreach ($guide in @($guideRecord, $englishGuide)) {
+        if ($guide.Text.Contains('](../README.md)') -and $guide.Text.Contains('](../README.en.md)')) {
+            Add-Ok ("{0}: enlaces a los dos README presentes" -f $guide.Relative)
+        } else {
+            Add-Fail ("{0}: faltan enlaces a los README" -f $guide.Relative)
+        }
+    }
+
+    $requiredSpanishSections = @(
+        'Características principales',
+        'Requisitos y compatibilidad',
+        'Dos modos de utilización',
+        'Descarga',
+        'Advertencia esencial',
+        'Estado de validación',
+        'Documentación completa',
+        'Licencia MIT'
+    )
+    foreach ($section in $requiredSpanishSections) {
+        $pattern = '(?m)^##[ \t]+' + [regex]::Escape($section) + '[ \t]*$'
+        if ($spanish.Text -match $pattern) {
+            Add-Ok ("README.md: seccion de portada presente: {0}" -f $section)
+        } else {
+            Add-Fail ("README.md: falta la seccion de portada: {0}" -f $section)
+        }
+    }
+    $requiredEnglishSections = @(
+        'Key features',
+        'Requirements and compatibility',
+        'Two ways to use it',
+        'Download',
+        'Essential warning',
+        'Validation status',
+        'Complete documentation',
+        'MIT License'
+    )
+    foreach ($section in $requiredEnglishSections) {
+        $pattern = '(?m)^##[ \t]+' + [regex]::Escape($section) + '[ \t]*$'
+        if ($english.Text -match $pattern) {
+            Add-Ok ("README.en.md: seccion de portada presente: {0}" -f $section)
+        } else {
+            Add-Fail ("README.en.md: falta la seccion de portada: {0}" -f $section)
+        }
+    }
+
+    foreach ($portada in @($spanish, $english)) {
+        $lineCount = ([regex]::Split($portada.Text, "\r\n|\n|\r")).Count
+        if ($lineCount -ge 90 -and $lineCount -le 170) {
+            Add-Ok ("{0}: portada dentro del rango editorial ({1} lineas)" -f $portada.Relative, $lineCount)
+        } else {
+            Add-Warn ("{0}: portada fuera del rango editorial ({1} lineas; objetivo 100-150)" -f $portada.Relative, $lineCount)
+        }
+        if ($portada.Text -notmatch '\b[0-9A-Fa-f]{64}\b') {
+            Add-Ok ("{0}: portada sin hashes largos" -f $portada.Relative)
+        } else {
+            Add-Fail ("{0}: la portada contiene un hash SHA-256 largo" -f $portada.Relative)
+        }
+    }
+
+    $requiredSpanishGuideAnchors = @(
+        'qué-es-este-proyecto',
+        'qué-hace',
+        'entorno-probado',
+        'advertencia-importante',
+        'aplicar-las-optimizaciones-a-una-instalación-de-windows-existente',
+        'cobertura-y-diferencias-post-install',
+        'antes-de-empezar',
+        'crear-el-usb-de-ventoy',
+        'arrancar-desde-el-usb',
+        'windows-setup',
+        'preparación-manual-del-disco-con-diskpart',
+        'primer-inicio-de-sesión-y-reinicio-automático',
+        'después-de-la-instalación',
+        'verificación-rápida',
+        'integridad-de-archivos-sha-256',
+        'limitaciones-conocidas',
+        'estructura-del-repositorio',
+        'validación-estática-local',
+        'documentación-técnica',
+        'fuentes-y-licencias'
+    )
+    $missingSpanishAnchors = @($requiredSpanishGuideAnchors | Where-Object { $guideAnchors -notcontains $_ })
+    if ($missingSpanishAnchors.Count -eq 0) {
+        Add-Ok 'docs/guia-completa.md: secciones tecnicas historicas preservadas'
+    } else {
+        Add-Fail ("docs/guia-completa.md: faltan anclas tecnicas: {0}" -f ($missingSpanishAnchors -join ', '))
+    }
+
+    $englishGuideAnchors = @(Get-MarkdownHeadingAnchors -Text $englishGuide.Text)
+    $requiredEnglishGuideAnchors = @(
+        'what-this-project-is',
+        'what-it-does',
+        'requirements-and-compatibility',
+        'tested-environment',
+        'important-warning',
+        'before-you-start',
+        'create-the-ventoy-usb',
+        'boot-from-the-usb',
+        'windows-setup',
+        'first-logon-and-automatic-restart',
+        'after-installation',
+        'quick-verification',
+        'apply-the-optimizations-to-an-existing-windows-installation',
+        'file-integrity-sha-256',
+        'known-limitations',
+        'local-static-validation',
+        'repository-layout',
+        'technical-documentation',
+        'sources-and-licensing'
+    )
+    $missingEnglishAnchors = @($requiredEnglishGuideAnchors | Where-Object { $englishGuideAnchors -notcontains $_ })
+    if ($missingEnglishAnchors.Count -eq 0) {
+        Add-Ok 'docs/full-guide.md: secciones tecnicas historicas preservadas'
+    } else {
+        Add-Fail ("docs/full-guide.md: faltan anclas tecnicas: {0}" -f ($missingEnglishAnchors -join ', '))
+    }
+}
+
+function Test-GuideContentPreservation {
+    $checks = @(
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'Boot with /ventoy/script/autounattend.xml'; Description = 'Guia ES: arranque Ventoy con plantilla' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'Windows11_Client_x64_es-es_26300_9457.iso'; Description = 'Guia ES: ISO de referencia' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'diskpart'; Description = 'Guia ES: DiskPart manual' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'convert gpt'; Description = 'Guia ES: conversion GPT' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = '-UserOnly'; Description = 'Guia ES: modo UserOnly' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = '-Restart'; Description = 'Guia ES: parametro Restart' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = '-NetFx3Source'; Description = 'Guia ES: parametro NetFx3Source' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'Mismos 40 objetivos AppX'; Description = 'Guia ES: matriz de cobertura debloat' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'Quiet Hours usa la ABI COM nativa'; Description = 'Guia ES: cobertura Quiet Hours' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'DisableCloudOptimizedContent'; Description = 'Guia ES: politica CloudContent' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'AllAppsViewMode'; Description = 'Guia ES: vista de Todas las aplicaciones' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'RUNTIME_EXISTING_PROFILE = PASS'; Description = 'Guia ES: estado runtime existente' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED'; Description = 'Guia ES: estado de instalacion limpia' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'STANDALONE_RUNTIME = NOT_TESTED'; Description = 'Guia ES: runtime del standalone no probado' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'IQuietHoursSettings'; Description = 'Guia ES: limitacion COM Quiet Hours' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'cca752363772a845eb0fed9d3a5b89b5d0a10d20'; Description = 'Guia ES: snapshot de terceros' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'SHA256SUMS.txt'; Description = 'Guia ES: verificacion de releases' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'preparacion-previa-instalacion.md'; Description = 'Guia ES: enlace a preparacion' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'configuracion-pruebas-limitaciones-fuentes.md'; Description = 'Guia ES: enlace a configuracion' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'comprobaciones-posteriores-instalacion.md'; Description = 'Guia ES: enlace a comprobaciones' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'pre-installation-preparation.md'; Description = 'Guia ES: enlace a preparacion EN' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'configuration-testing-limitations-sources.md'; Description = 'Guia ES: enlace a configuracion EN' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'post-installation-checks.md'; Description = 'Guia ES: enlace a comprobaciones EN' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'Boot with /ventoy/script/autounattend.xml'; Description = 'Guia EN: arranque Ventoy con plantilla' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'Windows11_Client_x64_es-es_26300_9457.iso'; Description = 'Guia EN: ISO de referencia' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'diskpart'; Description = 'Guia EN: DiskPart manual' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'convert gpt'; Description = 'Guia EN: conversion GPT' },
+        @{ Path = 'docs/full-guide.md'; Snippet = '-UserOnly'; Description = 'Guia EN: modo UserOnly' },
+        @{ Path = 'docs/full-guide.md'; Snippet = '-Restart'; Description = 'Guia EN: parametro Restart' },
+        @{ Path = 'docs/full-guide.md'; Snippet = '-NetFx3Source'; Description = 'Guia EN: parametro NetFx3Source' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'Same 40 AppX targets'; Description = 'Guia EN: matriz de cobertura debloat' },
+        @{ Path = 'docs/full-guide.md'; Snippet = "Quiet Hours uses the source's native COM ABI"; Description = 'Guia EN: cobertura Quiet Hours' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'DisableCloudOptimizedContent'; Description = 'Guia EN: politica CloudContent' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'AllAppsViewMode'; Description = 'Guia EN: vista de Todas las aplicaciones' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'RUNTIME_EXISTING_PROFILE = PASS'; Description = 'Guia EN: estado runtime existente' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED'; Description = 'Guia EN: estado de instalacion limpia' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'STANDALONE_RUNTIME = NOT_TESTED'; Description = 'Guia EN: runtime del standalone no probado' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'IQuietHoursSettings'; Description = 'Guia EN: limitacion COM Quiet Hours' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'cca752363772a845eb0fed9d3a5b89b5d0a10d20'; Description = 'Guia EN: snapshot de terceros' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'SHA256SUMS.txt'; Description = 'Guia EN: verificacion de releases' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'pre-installation-preparation.md'; Description = 'Guia EN: enlace a preparacion' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'configuration-testing-limitations-sources.md'; Description = 'Guia EN: enlace a configuracion' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'post-installation-checks.md'; Description = 'Guia EN: enlace a comprobaciones' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'preparacion-previa-instalacion.md'; Description = 'Guia EN: enlace a preparacion ES' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'configuracion-pruebas-limitaciones-fuentes.md'; Description = 'Guia EN: enlace a configuracion ES' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'comprobaciones-posteriores-instalacion.md'; Description = 'Guia EN: enlace a comprobaciones ES' },
+        @{ Path = 'README.md'; Snippet = 'docs/guia-completa.md'; Description = 'README ES: enlace a guia completa' },
+        @{ Path = 'README.md'; Snippet = 'Apply-TMPCOptimizations.ps1'; Description = 'README ES: enlace al standalone' },
+        @{ Path = 'README.en.md'; Snippet = 'docs/full-guide.md'; Description = 'README EN: enlace a guia completa' },
+        @{ Path = 'README.en.md'; Snippet = 'Apply-TMPCOptimizations.ps1'; Description = 'README EN: enlace al standalone' }
+    )
+    foreach ($check in $checks) {
+        $record = Get-FileRecord -RelativePath $check.Path
+        if ($record.Exists -and $record.DecodeOk -and $record.Text.Contains($check.Snippet)) {
+            Add-Ok $check.Description
+        } else {
+            Add-Fail ("{0}: fragmento no encontrado ({1})" -f $check.Description, $check.Snippet)
         }
     }
 }
@@ -1197,6 +1449,8 @@ $mandatoryFiles = @(
     'README.es.md',
     'LICENSE',
     'THIRD_PARTY_NOTICES.md',
+    'docs/guia-completa.md',
+    'docs/full-guide.md',
     'docs/preparacion-previa-instalacion.md',
     'docs/pre-installation-preparation.md',
     'docs/configuracion-pruebas-limitaciones-fuentes.md',
@@ -1600,13 +1854,13 @@ foreach ($relativePath in @('autounattend.xml', 'ventoy.json')) {
 
 $baselineHashSources = @(
     @{
-        Path   = 'README.md'
+        Path   = 'docs/guia-completa.md'
         Start  = '(?m)^## Integridad de archivos \(SHA-256\)[ \t]*\r?\n'
         End    = '(?m)^##[ \t]'
         Marker = '## Integridad de archivos (SHA-256)'
     },
     @{
-        Path   = 'README.en.md'
+        Path   = 'docs/full-guide.md'
         Start  = '(?m)^## File integrity \(SHA-256\)[ \t]*\r?\n'
         End    = '(?m)^##[ \t]'
         Marker = '## File integrity (SHA-256)'
@@ -1673,6 +1927,8 @@ Test-FilePolicy -RelativePath 'README.en.md' -ExpectedEol 'LF' -ExpectedBom 'NON
 Test-FilePolicy -RelativePath 'README.es.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'LICENSE' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'THIRD_PARTY_NOTICES.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
+Test-FilePolicy -RelativePath 'docs/guia-completa.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
+Test-FilePolicy -RelativePath 'docs/full-guide.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'docs/preparacion-previa-instalacion.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'docs/pre-installation-preparation.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
 Test-FilePolicy -RelativePath 'docs/configuracion-pruebas-limitaciones-fuentes.md' -ExpectedEol 'LF' -ExpectedBom 'NONE'
@@ -1734,6 +1990,7 @@ Test-DocumentLinks -RelativePath 'README.md'
 Test-DocumentLinks -RelativePath 'README.en.md'
 Test-DocumentLinks -RelativePath 'README.es.md'
 Test-ReadmeLanguageStructure
+Test-GuideContentPreservation
 Test-DocumentLinks -RelativePath 'THIRD_PARTY_NOTICES.md'
 $docsDir = Join-Path $script:Root 'docs'
 if (Test-Path -LiteralPath $docsDir) {
