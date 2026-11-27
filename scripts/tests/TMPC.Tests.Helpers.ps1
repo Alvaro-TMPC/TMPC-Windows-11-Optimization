@@ -62,6 +62,9 @@ function Initialize-TMPCTestState {
     $script:CanApplyUser = $true
     $script:OneDriveProtectionReady = $true
     $script:ProtectedOneDriveRoots = @()
+    $script:TrackAppliedOperations = $false
+    $script:AppliedOperationKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    $script:PermanentErrorCount = 0
 }
 
 # ---------------------------------------------------------------------------
@@ -180,10 +183,12 @@ function Write-TMPCRegistryEntry {
         'String' { [Microsoft.Win32.RegistryValueKind]::String }
         'ExpandString' { [Microsoft.Win32.RegistryValueKind]::ExpandString }
         'Binary' { [Microsoft.Win32.RegistryValueKind]::Binary }
+        'MultiString' { [Microsoft.Win32.RegistryValueKind]::MultiString }
         default { throw 'Unsupported registry type.' }
     }
     if ($Type -eq 'DWord') { $stored = [int]$Value }
     elseif ($Type -eq 'Binary') { $stored = [byte[]]$Value }
+    elseif ($Type -eq 'MultiString') { $stored = [string[]]$Value }
     else { $stored = [string]$Value }
     if ($script:TestCorruptAfterWrite -and -not $script:TestFailWrite) {
         if ($Type -eq 'Binary') { $stored = [byte[]](1,2,3) }
@@ -210,12 +215,14 @@ function Write-RegistryValue {
         'String' { [Microsoft.Win32.RegistryValueKind]::String }
         'ExpandString' { [Microsoft.Win32.RegistryValueKind]::ExpandString }
         'Binary' { [Microsoft.Win32.RegistryValueKind]::Binary }
+        'MultiString' { [Microsoft.Win32.RegistryValueKind]::MultiString }
         default { throw 'Unsupported registry type.' }
     }
     if ($Type -eq 'Binary') {
         if ($Value -isnot [byte[]]) { throw 'binary write did not receive byte[]' }
         $stored = [byte[]]$Value
     } elseif ($Type -eq 'DWord') { $stored = [int]$Value }
+    elseif ($Type -eq 'MultiString') { $stored = [string[]]$Value }
     else { $stored = [string]$Value }
     if ($script:TestCorruptAfterWrite -and -not $script:TestFailWrite) {
         if ($Type -eq 'Binary') { $stored = [byte[]](1,2,3) }

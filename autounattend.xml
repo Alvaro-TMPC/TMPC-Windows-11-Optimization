@@ -61,17 +61,17 @@
           <Description>Registry Entry to Create a Local Account during OOBE</Description>
           <Path>reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE" /v BypassNRO /t REG_DWORD /d 1 /f</Path>
         </RunSynchronousCommand>
-        <!-- Network stays disabled during OOBE only. FirstLogonCommands re-enables the adapters; if that command fails, the machine stays offline until they are enabled manually. -->
+        <!-- Network stays disabled during OOBE only. NetworkGuard records each adapter GUID and its previous status before changing anything, and restores only the adapters that TMPC disabled after OOBE completes. A conditional logon recovery task is registered only if the first restore is incomplete; manual recovery is documented. -->
         <RunSynchronousCommand wcm:action="add">
           <Order>3</Order>
-          <Description>Disable All Network Adapters Temporarily so Windows Doesn't Update During OOBE and to Allow Local Account Creation</Description>
-          <Path>powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "Get-NetAdapter | Disable-NetAdapter -Confirm:$false"</Path>
+          <Description>Disable Network Adapters Temporarily for OOBE and Persist the Restore Plan</Description>
+          <Path>powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\ProgramData\Autounattend\Unattend\Scripts\NetworkGuard.ps1" -Mode Disable</Path>
         </RunSynchronousCommand>
-        <!-- .NET Framework 3.5 payload comes from the installation media (drive letter varies); LimitAccess prevents falling back to Windows Update. -->
+        <!-- .NET Framework 3.5 payload comes from the installation media (drive letter varies); LimitAccess prevents falling back to Windows Update. NetFx3.ps1 verifies the feature before and after DISM and never downloads or reboots. -->
         <RunSynchronousCommand wcm:action="add">
           <Order>4</Order>
-          <Description>Enables .NET Framework 3.5 from Windows Installation Media</Description>
-          <Path>powershell.exe -NoProfile -WindowStyle Hidden -Command "foreach($d in 'C','D','E','F','G','H','I','J','K'){$src=Join-Path ($d+':') 'sources\sxs';if(Test-Path $src\*.cab){dism /Online /Enable-Feature /FeatureName:NetFx3 /All /LimitAccess /Source:$src;break}}"</Path>
+          <Description>Enables .NET Framework 3.5 from Verified Local Windows Installation Media</Description>
+          <Path>powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\ProgramData\Autounattend\Unattend\Scripts\NetFx3.ps1" -AutoDetect</Path>
         </RunSynchronousCommand>
         <!-- SYSTEM-wide phase: HKLM settings plus the generated BloatRemoval/OneDriveRemoval scripts. HKCU settings run later as the user through the one-shot task registered by this script. -->
         <RunSynchronousCommand wcm:action="add">
@@ -95,11 +95,11 @@
         <ProtectYourPC>3</ProtectYourPC>
       </OOBE>
       <FirstLogonCommands>
-        <!-- First logon only: re-enables the network adapters disabled during specialize. If it fails, the machine stays offline until adapters are enabled manually. -->
+        <!-- First logon only: restores the exact adapters that TMPC disabled during specialize, verifies each result, and registers a bounded logon recovery task only if a present adapter remains disabled. It never enables adapters that were already disabled before TMPC. If restoration is incomplete, manual recovery is documented. -->
         <SynchronousCommand>
         <Order>1</Order>
-        <Description>Enables Network Adapters After OOBE Completes</Description>
-        <CommandLine>powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "Get-NetAdapter | Enable-NetAdapter -Confirm:$false"</CommandLine>
+        <Description>Restores the TMPC-Disabled Network Adapters After OOBE Completes</Description>
+        <CommandLine>powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\ProgramData\Autounattend\Unattend\Scripts\NetworkGuard.ps1" -Mode Restore</CommandLine>
         </SynchronousCommand>
     </FirstLogonCommands>
     </component>
@@ -154,7 +154,8 @@ foreach( $file in $Document.unattend.Extensions.File ) {
 # Invoked twice: as SYSTEM without the switch (HKLM-wide work) and as the interactive
 # user with -UserCustomizations (HKCU work). The one-shot task below bridges both contexts.
 param(
-    [switch]$UserCustomizations
+    [switch]$UserCustomizations,
+    [string]$ExpectedSid
 )
 
 # ============================================================================
@@ -195,45 +196,752 @@ if ($UserCustomizations) {
 Write-Log "=================================================================================" "INFO"
 
 $script:CustomizationHadErrors = $false
+$script:CustomizationDeferred = $false
+$script:PermanentErrorCount = 0
+$script:TrackAppliedOperations = $false
+$script:AppliedOperationKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+$script:BloatStatus = 'PENDING'
+$script:OneDriveStatus = 'PENDING'
+$script:UserPhaseStatus = 'PENDING'
+$script:CleanupStatus = 'PENDING'
 
+# Interactive identity resolution. The profile folder name is NOT an identity:
+# the SID comes from the Explorer owner and ProfileList is consulted BY SID.
+# Ambiguous sessions or identities fail closed; there is no fallback to the
+# first account, the first profile or a path-derived SID.
+function Resolve-TMPCInteractiveIdentity {
+    param(
+        [object[]]$ExplorerProcesses,
+        [object[]]$Profiles,
+        [string]$CurrentSid
+    )
 
-function Get-TargetUser {
-    try {
-        $user = Get-WmiObject Win32_ComputerSystem | Select-Object -ExpandProperty UserName
-        if ($user -and $user -ne "NT AUTHORITY\SYSTEM") {
-            $username = $user.Split('\')[1]
-            if ($username -ne "defaultuser0") {
-                return $username
-            }
-        }
-    } catch { }
+    $explorers = @($ExplorerProcesses | Where-Object { $_ -and ([int]$_.SessionId -gt 0) })
+    if ($explorers.Count -eq 0) {
+        return [pscustomobject]@{ Status='NO_EXPLORER'; Sid=$null; UserName=$null; SessionId=0; ProfilePath=$null; Detail='No Explorer process in an interactive session.' }
+    }
 
-    try {
-        $explorer = Get-CimInstance Win32_Process -Filter "Name = 'explorer.exe'" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($explorer) {
-            $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction Stop
-            if ($owner.ReturnValue -eq 0 -and $owner.User -and $owner.User -ne "defaultuser0") {
-                return $owner.User
-            }
-        }
-    } catch { }
+    $sessionIds = @($explorers | ForEach-Object { [int]$_.SessionId } | Sort-Object -Unique)
+    if ($sessionIds.Count -ne 1) {
+        return [pscustomobject]@{ Status='AMBIGUOUS_SESSION'; Sid=$null; UserName=$null; SessionId=0; ProfilePath=$null; Detail='More than one interactive session has Explorer.' }
+    }
 
-    return $null
+    $ownerSids = @($explorers | ForEach-Object { [string]$_.OwnerSid } | Where-Object { $_ })
+    if ($ownerSids.Count -ne $explorers.Count) {
+        return [pscustomobject]@{ Status='OWNER_UNKNOWN'; Sid=$null; UserName=$null; SessionId=$sessionIds[0]; ProfilePath=$null; Detail='An Explorer owner SID could not be read.' }
+    }
+
+    $uniqueSids = @($ownerSids | Sort-Object -Unique)
+    if ($uniqueSids.Count -ne 1) {
+        return [pscustomobject]@{ Status='AMBIGUOUS_IDENTITY'; Sid=$null; UserName=$null; SessionId=$sessionIds[0]; ProfilePath=$null; Detail='Explorer processes in the same session have different SIDs.' }
+    }
+
+    $sid = [string]$uniqueSids[0]
+    if ($CurrentSid -and -not [string]::Equals($CurrentSid, $sid, [StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Status='IDENTITY_MISMATCH'; Sid=$sid; UserName=$null; SessionId=$sessionIds[0]; ProfilePath=$null; Detail='The current process identity does not match the interactive identity.' }
+    }
+
+    $profile = @($Profiles | Where-Object { $_ -and [string]::Equals([string]$_.Sid, $sid, [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1)
+    if ($profile.Count -eq 0) {
+        return [pscustomobject]@{ Status='PROFILE_NOT_FOUND'; Sid=$sid; UserName=$null; SessionId=$sessionIds[0]; ProfilePath=$null; Detail='The interactive SID has no ProfileList entry.' }
+    }
+
+    $userName = @($explorers | ForEach-Object { [string]$_.OwnerUser } | Where-Object { $_ } | Select-Object -First 1)
+    return [pscustomobject]@{
+        Status      = 'OK'
+        Sid         = $sid
+        UserName    = [string]$userName
+        SessionId   = [int]$sessionIds[0]
+        ProfilePath = [string]$profile[0].ProfileImagePath
+        Detail      = 'Interactive identity verified by Explorer owner SID and ProfileList.'
+    }
 }
 
-function Get-UserSID {
-    param($Username)
+function Test-TMPCIdentityMatch {
+    param(
+        [string]$ExpectedSid,
+        [string]$ActualSid,
+        [string]$LinkedSid
+    )
+    if ([string]::IsNullOrWhiteSpace($ExpectedSid) -or [string]::IsNullOrWhiteSpace($ActualSid)) { return $false }
+    if (-not [string]::Equals($ExpectedSid, $ActualSid, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    if ($LinkedSid -and -not [string]::Equals($ExpectedSid, $LinkedSid, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    return $true
+}
+
+function Get-TMPCInteractiveIdentity {
+    $explorers = New-Object System.Collections.Generic.List[object]
     try {
-        $profListPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
-        foreach ($key in Get-ChildItem $profListPath -ErrorAction SilentlyContinue) {
-            $profPath = (Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
-            if ($profPath -and $profPath.EndsWith("\$Username")) {
-                return $key.PSChildName
+        foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'explorer.exe'" -ErrorAction Stop)) {
+            $ownerSid = $null
+            $ownerUser = $null
+            try {
+                $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+                if ($owner.ReturnValue -eq 0 -and $owner.Sid) { $ownerSid = [string]$owner.Sid }
+            } catch { }
+            try {
+                $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop
+                if ($owner.ReturnValue -eq 0 -and $owner.User) { $ownerUser = [string]$owner.User }
+            } catch { }
+            $null = $explorers.Add([pscustomobject]@{
+                SessionId = [int]$process.SessionId
+                OwnerSid  = $ownerSid
+                OwnerUser = $ownerUser
+            })
+        }
+    } catch { }
+
+    $profiles = New-Object System.Collections.Generic.List[object]
+    try {
+        foreach ($key in @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction Stop)) {
+            $profilePath = $null
+            try { $profilePath = (Get-ItemProperty -LiteralPath $key.PSPath -Name 'ProfileImagePath' -ErrorAction Stop).ProfileImagePath } catch { }
+            if ($profilePath) {
+                $null = $profiles.Add([pscustomobject]@{ Sid = [string]$key.PSChildName; ProfileImagePath = [string]$profilePath })
             }
         }
-        return $null
+    } catch { }
+
+    return (Resolve-TMPCInteractiveIdentity -ExplorerProcesses @($explorers) -Profiles @($profiles))
+}
+
+# Trusted diagnostic ACL and summary integrity helpers. These functions are
+# pure decision code except for the read-only ACL snapshot probe. The cleanup
+# command embeds the same definitions so the task does not trust the summary
+# merely because it is under ProgramData.
+function Get-TMPCPrivilegedSidList {
+    return @(
+        'S-1-5-18',
+        'S-1-5-32-544',
+        'S-1-3-0',
+        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    )
+}
+
+function Test-TMPCPrivilegedSid {
+    param([string]$Sid)
+    if ([string]::IsNullOrWhiteSpace($Sid)) { return $false }
+    if ($Sid -in (Get-TMPCPrivilegedSidList)) { return $true }
+    if ($Sid -match '^S-1-5-21-\d+-\d+-\d+-(512|519)$') { return $true }
+    return $false
+}
+
+function Get-TMPCAclSnapshot {
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $ownerSid = [string]$acl.Owner
+    try {
+        $ownerSid = ([System.Security.Principal.NTAccount]::new([string]$acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch { }
+    $rules = @()
+    foreach ($rule in @($acl.Access)) {
+        $identity = [string]$rule.IdentityReference
+        try {
+            $identity = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+        } catch { }
+        $rules += [pscustomobject]@{
+            Identity    = [string]$identity
+            Rights      = [string]$rule.FileSystemRights
+            RightsValue = [int]$rule.FileSystemRights
+            Type        = [string]$rule.AccessControlType
+        }
+    }
+    return [pscustomobject]@{
+        Path        = [string]$item.FullName
+        Exists      = $true
+        IsContainer = [bool]$item.PSIsContainer
+        Attributes  = $item.Attributes
+        OwnerSid    = [string]$ownerSid
+        Rules       = @($rules)
+    }
+}
+
+function Test-TMPCDirectoryAclSnapshot {
+    param($Snapshot)
+    if ($null -eq $Snapshot -or -not $Snapshot.Exists -or -not $Snapshot.IsContainer) { return $false }
+    if (($Snapshot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+    if (-not (Test-TMPCPrivilegedSid -Sid ([string]$Snapshot.OwnerSid))) { return $false }
+    # Effective rights are evaluated with specific numeric FileSystemRights bits.
+    # Composite names such as Modify or FullControl also contain read/synchronize
+    # bits and cannot be used directly as a safe mask.
+    $unsafe = [int]([System.Security.AccessControl.FileSystemRights]::Delete -bor
+        [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [System.Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+        [System.Security.AccessControl.FileSystemRights]::WriteData -bor
+        [System.Security.AccessControl.FileSystemRights]::AppendData -bor
+        [System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+        [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes)
+    foreach ($rule in @($Snapshot.Rules)) {
+        if ([string]$rule.Type -ne 'Allow') { continue }
+        if (Test-TMPCPrivilegedSid -Sid ([string]$rule.Identity)) { continue }
+        if (@($rule.PSObject.Properties.Name) -notcontains 'RightsValue') { return $false }
+        if (([int]$rule.RightsValue -band $unsafe) -ne 0) { return $false }
+    }
+    return $true
+}
+
+function Test-TMPCFileAclSnapshot {
+    param($Snapshot)
+    if ($null -eq $Snapshot -or -not $Snapshot.Exists -or $Snapshot.IsContainer) { return $false }
+    if (($Snapshot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+    if (-not (Test-TMPCPrivilegedSid -Sid ([string]$Snapshot.OwnerSid))) { return $false }
+    # Write, append, delete or control changes on a summary file owned by a
+    # non-privileged identity would allow substitution; use specific bits rather
+    # than composite names that include read/synchronize rights.
+    $unsafe = [int]([System.Security.AccessControl.FileSystemRights]::WriteData -bor
+        [System.Security.AccessControl.FileSystemRights]::AppendData -bor
+        [System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+        [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+        [System.Security.AccessControl.FileSystemRights]::Delete -bor
+        [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
+    foreach ($rule in @($Snapshot.Rules)) {
+        if ([string]$rule.Type -ne 'Allow') { continue }
+        if (Test-TMPCPrivilegedSid -Sid ([string]$rule.Identity)) { continue }
+        if (@($rule.PSObject.Properties.Name) -notcontains 'RightsValue') { return $false }
+        if (([int]$rule.RightsValue -band $unsafe) -ne 0) { return $false }
+    }
+    return $true
+}
+
+function Test-TMPCDiagnosticAclSnapshot {
+    param($DirectorySnapshot, $FileSnapshot)
+    return ((Test-TMPCDirectoryAclSnapshot -Snapshot $DirectorySnapshot) -and
+        (Test-TMPCFileAclSnapshot -Snapshot $FileSnapshot))
+}
+
+function Test-TMPCPropertyPresent {
+    param($Object, [string[]]$Names)
+    if ($null -eq $Object) { return $false }
+    $present = @($Object.PSObject.Properties.Name)
+    foreach ($name in $Names) {
+        if ($present -notcontains $name) { return $false }
+    }
+    return $true
+}
+
+function Test-TMPCSetupSummarySchema {
+    param($Summary, [string]$ExpectedRevision = 'R2-local')
+    $required = @(
+        'SchemaVersion','Profile','Revision','ExecutionId','SystemPhase','SystemHadErrors',
+        'SystemDeferred','BloatStatus','OneDriveStatus','UserTaskRegistration','HkcUserPhase',
+        'HkcHadErrors','HkcDeferred','HkcAttempts','HkcOutcome','HkcRetryExhausted','HkcReason',
+        'CleanupStatus','CleanupAttempts','CleanupReason',
+        'CleanupTimestampUtc','OverallStatus','TimestampUtc'
+    )
+    if (-not (Test-TMPCPropertyPresent -Object $Summary -Names $required)) { return $false }
+    if ([int]$Summary.SchemaVersion -ne 1) { return $false }
+    if ([string]$Summary.Profile -ne 'TMPC-Windows-11-Optimization') { return $false }
+    if ([string]$Summary.Revision -ne $ExpectedRevision) { return $false }
+
+    $executionGuid = [Guid]::Empty
+    if (-not [Guid]::TryParse([string]$Summary.ExecutionId, [ref]$executionGuid) -or $executionGuid -eq [Guid]::Empty) { return $false }
+
+    $validPhases = @('SUCCESS','PARTIAL_SUCCESS','FAILED','DEFERRED','UNKNOWN_OR_INTERRUPTED')
+    $system = [string]$Summary.SystemPhase
+    $hkc = [string]$Summary.HkcUserPhase
+    $overall = [string]$Summary.OverallStatus
+    if ($system -notin $validPhases -or $hkc -notin $validPhases -or $overall -notin $validPhases) { return $false }
+    if ([string]$Summary.OverallStatus -ne (Get-TMPCOverallStatus -SystemPhase $system -HkcUserPhase $hkc)) { return $false }
+
+    $hkcAttempts = -1
+    if (-not [int]::TryParse([string]$Summary.HkcAttempts, [ref]$hkcAttempts) -or $hkcAttempts -lt 0 -or $hkcAttempts -gt 3) { return $false }
+    $hkcOutcome = [string]$Summary.HkcOutcome
+    if ($hkcOutcome -notin @('PENDING','SUCCESS','TRANSIENT','PERMANENT','DEFERRED','NOT_APPLICABLE','UNKNOWN')) { return $false }
+    if ($Summary.HkcRetryExhausted -isnot [bool]) { return $false }
+    $hkcReason = [string]$Summary.HkcReason
+    if ($hkcReason -and $hkcReason -notmatch '^[A-Z][A-Z0-9_]{0,63}$') { return $false }
+    if ($hkc -eq 'SUCCESS') {
+        if ($hkcOutcome -ne 'SUCCESS' -or $hkcAttempts -lt 1 -or [bool]$Summary.HkcRetryExhausted) { return $false }
+    }
+    if ($hkc -eq 'PENDING' -and $hkcAttempts -ne 0) { return $false }
+    if ($hkc -eq 'FAILED' -and $hkcOutcome -notin @('TRANSIENT','PERMANENT','NOT_APPLICABLE','UNKNOWN')) { return $false }
+    if ($hkc -eq 'DEFERRED' -and $hkcOutcome -ne 'DEFERRED') { return $false }
+    if ([bool]$Summary.HkcRetryExhausted -and $hkc -ne 'FAILED') { return $false }
+
+    $cleanupStatuses = @('PENDING','IN_PROGRESS','SUCCESS','FAILED','DEFERRED')
+    if ([string]$Summary.CleanupStatus -notin $cleanupStatuses) { return $false }
+    $attempts = 0
+    if (-not [int]::TryParse([string]$Summary.CleanupAttempts, [ref]$attempts) -or $attempts -lt 0) { return $false }
+    $timestamp = [DateTime]::MinValue
+    if (-not [DateTime]::TryParse([string]$Summary.TimestampUtc, [ref]$timestamp)) { return $false }
+
+    if ($system -eq 'SUCCESS') {
+        if ([bool]$Summary.SystemHadErrors -or [bool]$Summary.SystemDeferred) { return $false }
+        if ([string]$Summary.BloatStatus -ne 'SUCCESS' -or [string]$Summary.OneDriveStatus -ne 'SUCCESS' -or [string]$Summary.UserTaskRegistration -ne 'SUCCESS') { return $false }
+    }
+    if ($hkc -eq 'SUCCESS') {
+        if ([bool]$Summary.HkcHadErrors -or [bool]$Summary.HkcDeferred) { return $false }
+    }
+    if ($hkc -eq 'FAILED' -and -not [bool]$Summary.HkcHadErrors) { return $false }
+    if ($hkc -eq 'DEFERRED' -and -not [bool]$Summary.HkcDeferred) { return $false }
+    return $true
+}
+
+function Test-TMPCSetupExecutionIdentity {
+    param($Summary, [string]$RegistryExecutionId)
+    if ($null -eq $Summary -or [string]::IsNullOrWhiteSpace($RegistryExecutionId)) { return $false }
+    $summaryId = [string]$Summary.ExecutionId
+    if ([string]::IsNullOrWhiteSpace($summaryId)) { return $false }
+    return [string]::Equals($summaryId, $RegistryExecutionId, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Resolve-TMPCCleanupTaskState {
+    param([bool]$QuerySucceeded, [bool]$TaskFound, [bool]$ErrorIsNotFound)
+    if (-not $QuerySucceeded) {
+        if ($ErrorIsNotFound) { return 'ABSENT_VERIFIED' }
+        return 'UNKNOWN'
+    }
+    if ($TaskFound) { return 'PRESENT' }
+    return 'UNKNOWN'
+}
+
+function Get-TMPCCleanupTaskState {
+    try {
+        $task = Get-ScheduledTask -TaskName 'AutounattendUserCustomizations' -TaskPath '\Autounattend\' -ErrorAction Stop
+        $found = ($null -ne $task)
+        return (Resolve-TMPCCleanupTaskState -QuerySucceeded $true -TaskFound $found -ErrorIsNotFound $false)
+    } catch {
+        $notFound = ($_.CategoryInfo.Category -eq 'ObjectNotFound') -or
+            ($_.FullyQualifiedErrorId -match 'NotFound') -or
+            ($_.Exception.Message -match 'No MSFT_ScheduledTask')
+        return (Resolve-TMPCCleanupTaskState -QuerySucceeded $false -TaskFound $false -ErrorIsNotFound $notFound)
+    }
+}
+
+function Get-TMPCCleanupDecision {
+    param(
+        $Summary,
+        [string]$RegistryExecutionId,
+        $DirectoryAcl,
+        $FileAcl,
+        [string]$TaskState,
+        [string]$ExpectedRevision = 'R2-local'
+    )
+    if (-not (Test-TMPCDiagnosticAclSnapshot -DirectorySnapshot $DirectoryAcl -FileSnapshot $FileAcl)) { return 'STOP' }
+    if (-not (Test-TMPCSetupSummarySchema -Summary $Summary -ExpectedRevision $ExpectedRevision)) { return 'STOP' }
+    if (-not (Test-TMPCSetupExecutionIdentity -Summary $Summary -RegistryExecutionId $RegistryExecutionId)) { return 'STOP' }
+    if ($TaskState -eq 'PRESENT' -or $TaskState -eq 'UNKNOWN') { return 'RETRY' }
+    if ($TaskState -ne 'ABSENT_VERIFIED') { return 'STOP' }
+    if ([string]$Summary.OverallStatus -ne 'SUCCESS') { return 'STOP' }
+    return 'ALLOW'
+}
+
+# Diagnostic summary. The only accepted location is the fixed ProgramData
+# diagnostics directory. Reparse points, redirected paths and untrusted ACLs
+# fail closed.
+function Get-TMPCDiagnosticDirectory {
+    $programData = [IO.Path]::GetFullPath($env:ProgramData).TrimEnd('\')
+    $expected = [IO.Path]::GetFullPath((Join-Path $programData 'TMPC-Windows-11-Optimization\Logs'))
+    $allowedPrefix = $programData + '\TMPC-Windows-11-Optimization\Logs'
+    if (-not $expected.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Unsafe diagnostic path.'
+    }
+
+    $probe = $expected
+    while ($probe -and -not [string]::Equals($probe, $programData, [StringComparison]::OrdinalIgnoreCase)) {
+        if (Test-Path -LiteralPath $probe) {
+            $item = Get-Item -LiteralPath $probe -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Diagnostic path is redirected.'
+            }
+        }
+        $parent = Split-Path -Parent $probe
+        if (-not $parent -or $parent -eq $probe) { break }
+        $probe = $parent
+    }
+
+    if (-not (Test-Path -LiteralPath $expected)) {
+        New-Item -ItemType Directory -Path $expected -Force -ErrorAction Stop | Out-Null
+    }
+    $directory = Get-Item -LiteralPath $expected -Force -ErrorAction Stop
+    if (-not $directory.PSIsContainer -or (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw 'Diagnostic directory is not safe.'
+    }
+    $directoryAcl = Get-TMPCAclSnapshot -Path $directory.FullName
+    if (-not (Test-TMPCDirectoryAclSnapshot -Snapshot $directoryAcl)) {
+        throw 'Diagnostic directory ACL is not trusted.'
+    }
+    $parentPath = Split-Path -Parent $directory.FullName
+    $parentAcl = Get-TMPCAclSnapshot -Path $parentPath
+    if (-not (Test-TMPCDirectoryAclSnapshot -Snapshot $parentAcl)) {
+        throw 'Diagnostic parent ACL is not trusted.'
+    }
+    return $directory.FullName
+}
+
+function Get-TMPCSetupSummaryPath {
+    $directory = Get-TMPCDiagnosticDirectory
+    return (Join-Path $directory 'SetupSummary.json')
+}
+
+function Read-TMPCSetupSummary {
+    $path = Get-TMPCSetupSummaryPath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try {
+        return (Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json)
     } catch {
         return $null
+    }
+}
+
+function Write-TMPCSetupSummary {
+    param(
+        [hashtable]$Values = @{},
+        [switch]$Reset
+    )
+
+    $directory = Get-TMPCDiagnosticDirectory
+    $path = Join-Path $directory 'SetupSummary.json'
+    $data = [ordered]@{}
+
+    if (-not $Reset) {
+        $existing = Read-TMPCSetupSummary
+        if ($null -eq $existing) { throw 'Existing setup summary is missing or invalid.' }
+        foreach ($property in $existing.PSObject.Properties) { $data[$property.Name] = $property.Value }
+    }
+    foreach ($key in @($Values.Keys)) { $data[$key] = $Values[$key] }
+    $data['TimestampUtc'] = (Get-Date).ToUniversalTime().ToString('o')
+
+    $json = $data | ConvertTo-Json -Depth 8
+    $temp = Join-Path $directory ('SetupSummary.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [IO.File]::WriteAllText($temp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $temp -Destination $path -Force -ErrorAction Stop
+    } catch {
+        Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    try {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or $item.Length -le 0) { throw 'Setup summary file verification failed.' }
+        $fileAcl = Get-TMPCAclSnapshot -Path $path
+        if (-not (Test-TMPCFileAclSnapshot -Snapshot $fileAcl)) { throw 'Setup summary file ACL is not trusted.' }
+        $persisted = Read-TMPCSetupSummary
+        if ($null -eq $persisted) { throw 'Setup summary read-back failed.' }
+        foreach ($key in @($data.Keys)) {
+            $property = $persisted.PSObject.Properties[$key]
+            if ($null -eq $property -or [string]$property.Value -ne [string]$data[$key]) {
+                throw 'Setup summary read-back content mismatch.'
+            }
+        }
+        return $path
+    } catch {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function Get-TMPCOverallStatus {
+    param([string]$SystemPhase, [string]$HkcUserPhase)
+    if ([string]::IsNullOrWhiteSpace($SystemPhase) -or [string]::IsNullOrWhiteSpace($HkcUserPhase)) { return 'UNKNOWN_OR_INTERRUPTED' }
+    if ($SystemPhase -eq 'PENDING' -or $HkcUserPhase -eq 'PENDING') { return 'UNKNOWN_OR_INTERRUPTED' }
+    if ($SystemPhase -eq 'UNKNOWN_OR_INTERRUPTED' -or $HkcUserPhase -eq 'UNKNOWN_OR_INTERRUPTED') { return 'UNKNOWN_OR_INTERRUPTED' }
+    if ($SystemPhase -eq 'SUCCESS' -and $HkcUserPhase -eq 'SUCCESS') { return 'SUCCESS' }
+    if ($SystemPhase -eq 'FAILED' -and $HkcUserPhase -eq 'FAILED') { return 'FAILED' }
+    if ($SystemPhase -eq 'FAILED' -or $HkcUserPhase -eq 'FAILED') { return 'PARTIAL_SUCCESS' }
+    if ($SystemPhase -eq 'DEFERRED' -or $HkcUserPhase -eq 'DEFERRED') { return 'DEFERRED' }
+    return 'PARTIAL_SUCCESS'
+}
+
+function Get-TMPCSetupExecutionId {
+    try {
+        return [string](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Autounattend' -Name 'SetupExecutionId' -ErrorAction Stop).SetupExecutionId
+    } catch {
+        return $null
+    }
+}
+
+function Update-TMPCUserPhaseSummary {
+    param(
+        [string]$Phase,
+        [bool]$HadErrors,
+        [bool]$Deferred,
+        [int]$Attempts = -1,
+        [string]$Outcome,
+        [bool]$RetryExhausted = $false,
+        [string]$Reason = ''
+    )
+    $existing = Read-TMPCSetupSummary
+    if ($null -eq $existing) { throw 'Setup summary is missing or invalid.' }
+    if ([int]$existing.SchemaVersion -ne 1 -or
+        [string]$existing.Profile -ne 'TMPC-Windows-11-Optimization' -or
+        [string]$existing.Revision -ne 'R2-local') {
+        throw 'Setup summary schema or revision is incompatible.'
+    }
+    $registryExecutionId = Get-TMPCSetupExecutionId
+    if (-not (Test-TMPCSetupExecutionIdentity -Summary $existing -RegistryExecutionId $registryExecutionId)) {
+        throw 'Setup summary does not belong to this execution.'
+    }
+    if ($Attempts -lt 0) {
+        $existingAttempts = 0
+        if (@($existing.PSObject.Properties.Name) -contains 'HkcAttempts') { $existingAttempts = [int]$existing.HkcAttempts }
+        $Attempts = $existingAttempts
+    }
+    if ($Phase -eq 'SUCCESS' -and $Attempts -lt 1) { $Attempts = 1 }
+    if ($Phase -eq 'PENDING') { $Attempts = 0 }
+    if ([string]::IsNullOrWhiteSpace($Outcome)) {
+        $Outcome = switch ($Phase) {
+            'SUCCESS' { 'SUCCESS' }
+            'DEFERRED' { 'DEFERRED' }
+            'FAILED' { 'TRANSIENT' }
+            default { 'PENDING' }
+        }
+    }
+    $overall = Get-TMPCOverallStatus -SystemPhase ([string]$existing.SystemPhase) -HkcUserPhase $Phase
+    $path = Write-TMPCSetupSummary -Values @{
+        HkcUserPhase = $Phase
+        HkcHadErrors = $HadErrors
+        HkcDeferred = $Deferred
+        HkcAttempts = $Attempts
+        HkcOutcome = $Outcome
+        HkcRetryExhausted = $RetryExhausted
+        HkcReason = $Reason
+        CleanupStatus = 'PENDING'
+        CleanupReason = ''
+        CleanupTimestampUtc = ''
+        OverallStatus = $overall
+    }
+    $persisted = Read-TMPCSetupSummary
+    if (-not (Test-TMPCSetupSummarySchema -Summary $persisted -ExpectedRevision 'R2-local')) {
+        throw 'Setup summary schema verification failed after the user phase update.'
+    }
+    return $path
+}
+
+function Get-TMPCCleanupCommand {
+    $functionNames = @(
+        'Get-TMPCPrivilegedSidList',
+        'Test-TMPCPrivilegedSid',
+        'Get-TMPCAclSnapshot',
+        'Test-TMPCDirectoryAclSnapshot',
+        'Test-TMPCFileAclSnapshot',
+        'Test-TMPCDiagnosticAclSnapshot',
+        'Test-TMPCPropertyPresent',
+        'Get-TMPCOverallStatus',
+        'Test-TMPCSetupSummarySchema',
+        'Test-TMPCSetupExecutionIdentity',
+        'Resolve-TMPCCleanupTaskState',
+        'Get-TMPCCleanupTaskState',
+        'Get-TMPCCleanupDecision',
+        'Get-TMPCDiagnosticDirectory',
+        'Get-TMPCSetupSummaryPath',
+        'Read-TMPCSetupSummary',
+        'Write-TMPCSetupSummary',
+        'Get-TMPCSetupExecutionId'
+    )
+    $definitions = foreach ($name in $functionNames) {
+        $definition = (Get-Command -Name $name -CommandType Function -ErrorAction Stop).Definition
+        "function $name {`n$definition`n}"
+    }
+    $main = @'
+$ErrorActionPreference = 'Stop'
+$summaryPath = 'C:\ProgramData\TMPC-Windows-11-Optimization\Logs\SetupSummary.json'
+$directoryPath = 'C:\ProgramData\TMPC-Windows-11-Optimization\Logs'
+$parentPath = 'C:\ProgramData\TMPC-Windows-11-Optimization'
+$setupPath = 'C:\ProgramData\Autounattend'
+$markerPath = 'HKLM:\SOFTWARE\Autounattend'
+$taskName = 'AutounattendCleanup'
+$taskPath = '\Autounattend\'
+$state = $null
+try { $state = Get-Content -LiteralPath $summaryPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch { $state = $null }
+if ($null -eq $state) { Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false -ErrorAction SilentlyContinue; exit 0 }
+$registryExecutionId = Get-TMPCSetupExecutionId
+$directoryAcl = $null
+$fileAcl = $null
+$parentAcl = $null
+$aclOk = $true
+try {
+    $directoryAcl = Get-TMPCAclSnapshot -Path $directoryPath
+    $fileAcl = Get-TMPCAclSnapshot -Path $summaryPath
+    $parentAcl = Get-TMPCAclSnapshot -Path $parentPath
+} catch { $aclOk = $false }
+$trusted = $false
+if ($aclOk) {
+    $trusted = (Test-TMPCDiagnosticAclSnapshot -DirectorySnapshot $directoryAcl -FileSnapshot $fileAcl) -and
+        (Test-TMPCDirectoryAclSnapshot -Snapshot $parentAcl) -and
+        (Test-TMPCSetupSummarySchema -Summary $state -ExpectedRevision 'R2-local') -and
+        (Test-TMPCSetupExecutionIdentity -Summary $state -RegistryExecutionId $registryExecutionId)
+}
+if (-not $trusted) { Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false -ErrorAction SilentlyContinue; exit 0 }
+$taskState = Get-TMPCCleanupTaskState
+$decision = 'STOP'
+try {
+    $decision = Get-TMPCCleanupDecision -Summary $state -RegistryExecutionId $registryExecutionId -DirectoryAcl $directoryAcl -FileAcl $fileAcl -TaskState $taskState -ExpectedRevision 'R2-local'
+} catch {
+    $decision = 'STOP'
+}
+$attempt = [int]$state.CleanupAttempts + 1
+$cleanup = 'DEFERRED'
+$reason = $decision
+if ($decision -eq 'ALLOW') {
+    $preOk = $true
+    try {
+        $null = Write-TMPCSetupSummary -Values @{ CleanupStatus='IN_PROGRESS'; CleanupAttempts=$attempt; CleanupReason='ALLOWED'; CleanupTimestampUtc=(Get-Date).ToUniversalTime().ToString('o') }
+    } catch { $preOk = $false }
+    if (-not $preOk) {
+        $cleanup = 'FAILED'
+        $reason = 'SUMMARY_WRITE_FAILED'
+    } else {
+        $deleted = $false
+        for ($i = 0; $i -lt 3; $i++) {
+            Remove-Item -LiteralPath $setupPath -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $markerPath -Recurse -Force -ErrorAction SilentlyContinue
+            if ((-not (Test-Path -LiteralPath $setupPath)) -and (-not (Test-Path -LiteralPath $markerPath))) { $deleted = $true; break }
+            Start-Sleep -Seconds 2
+        }
+        if ($deleted) { $cleanup = 'SUCCESS'; $reason = 'DELETED_AND_VERIFIED' }
+        else { $cleanup = 'FAILED'; $reason = 'DELETION_NOT_VERIFIED' }
+    }
+} elseif ($decision -eq 'RETRY') {
+    $reason = 'TASK_STATE_' + $taskState
+} else {
+    $reason = 'INTEGRITY_OR_STATUS_STOP'
+}
+$writeOk = $true
+try {
+    $null = Write-TMPCSetupSummary -Values @{ CleanupStatus=$cleanup; CleanupAttempts=$attempt; CleanupReason=$reason; CleanupTimestampUtc=(Get-Date).ToUniversalTime().ToString('o') }
+} catch { $writeOk = $false }
+if (-not $writeOk) { $cleanup = 'FAILED'; $reason = 'SUMMARY_WRITE_FAILED' }
+if (($cleanup -eq 'SUCCESS') -or ($decision -eq 'STOP') -or ($attempt -ge 3) -or (-not $writeOk)) {
+    Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false -ErrorAction SilentlyContinue
+}
+exit 0
+'@
+    $command = (($definitions -join "`r`n") + "`r`n" + $main)
+    if ($command.Contains('"')) { throw 'Cleanup command contains a double quote.' }
+    if ($command.Length -gt 30000) { throw 'Cleanup command is too long.' }
+    return $command
+}
+
+# User-phase retry and completed-operation tracking. The applied-operation list
+# is stored per user in HKCU\Software\Autounattend\AppliedOperations (REG_MULTI_SZ)
+# and is consulted before each HKCU mutation. A retry therefore does not rewrite
+# values that already completed their initial application, even if the user
+# changed them afterwards. Tracking is enabled only in the interactive child;
+# SYSTEM/HKLM work and the standalone engine are unaffected.
+function Get-TMPCOperationKey {
+    param([string]$Operation, [string]$Path, [string]$Name, [string]$Type, [string]$Value)
+    $material = @($Operation, $Path, [string]$Name, $Type, $Value) -join '|'
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($material))
+        return ([System.BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
+    } finally { $sha.Dispose() }
+}
+
+function Test-TMPCAppliedOperation {
+    param([string]$Key)
+    if (-not $script:TrackAppliedOperations) { return $false }
+    return $script:AppliedOperationKeys.Contains($Key)
+}
+
+function Add-TMPCAppliedOperation {
+    param([string]$Key)
+    if (-not $script:TrackAppliedOperations) { return }
+    if ($script:AppliedOperationKeys.Contains($Key)) { return }
+    $null = $script:AppliedOperationKeys.Add($Key)
+    $items = @($script:AppliedOperationKeys | Sort-Object)
+    $path = 'HKCU:\Software\Autounattend'
+    try {
+        $pathState = Get-RegistryEntryState -Path $path -Name $null
+        Write-RegistryValue -Path $path -Name 'AppliedOperations' -Type 'MultiString' -Value ([string[]]$items) -PathExists ([bool]$pathState.PathExists)
+    } catch {
+        $null = $script:AppliedOperationKeys.Remove($Key)
+        throw 'STATE_WRITE_FAILED'
+    }
+    $state = $null
+    try { $state = Get-RegistryEntryState -Path $path -Name 'AppliedOperations' }
+    catch { throw 'STATE_VERIFY_FAILED' }
+    if (-not ($state.ValueExists -and $state.Kind -eq [Microsoft.Win32.RegistryValueKind]::MultiString -and $null -ne $state.Value)) {
+        throw 'STATE_VERIFY_FAILED'
+    }
+    $persisted = @($state.Value | Sort-Object)
+    if ($persisted.Count -ne $items.Count) { throw 'STATE_VERIFY_FAILED' }
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        if (-not [string]::Equals([string]$persisted[$i], [string]$items[$i], [StringComparison]::Ordinal)) { throw 'STATE_VERIFY_FAILED' }
+    }
+}
+
+function Initialize-TMPCAppliedOperations {
+    $script:AppliedOperationKeys.Clear()
+    $state = Get-RegistryEntryState -Path 'HKCU:\Software\Autounattend' -Name 'AppliedOperations'
+    if (-not $state.ValueExists) { return }
+    if ($state.Kind -ne [Microsoft.Win32.RegistryValueKind]::MultiString -or $null -eq $state.Value) {
+        throw 'Applied operation state has an unexpected type.'
+    }
+    foreach ($item in @($state.Value)) {
+        if ([string]$item -notmatch '^[0-9a-f]{64}$') { throw 'Applied operation state contains an invalid entry.' }
+        $null = $script:AppliedOperationKeys.Add([string]$item)
+    }
+}
+
+function Get-TMPCUserPhaseOutcome {
+    param([int]$ExitCode, [bool]$HadErrors, [bool]$Deferred)
+    if ($Deferred) { return 'DEFERRED' }
+    if ($ExitCode -eq 0 -and -not $HadErrors) { return 'SUCCESS' }
+    if ($ExitCode -eq 0 -and $HadErrors) { return 'TRANSIENT' }
+    if ($ExitCode -eq 3) { return 'PERMANENT' }
+    if ($ExitCode -eq 4) { return 'NOT_APPLICABLE' }
+    if ($ExitCode -eq 2) { return 'DEFERRED' }
+    if ($ExitCode -eq 1 -or $ExitCode -lt 0) { return 'TRANSIENT' }
+    return 'UNKNOWN'
+}
+
+function Get-TMPCUserRetryDecision {
+    param([bool]$MarkerApplied, [int]$Attempts, [string]$LastOutcome, [int]$MaxAttempts = 3)
+    if ($MarkerApplied) { return 'ALREADY_APPLIED' }
+    if ($Attempts -ge $MaxAttempts) { return 'EXHAUSTED' }
+    if ($LastOutcome -in @('PERMANENT', 'NOT_APPLICABLE')) { return 'STOP_PERMANENT' }
+    return 'RUN'
+}
+
+function Get-TMPCUserPhaseState {
+    $result = [pscustomobject]@{ Available = $true; Attempts = 0; Outcome = 'PENDING'; ExitCode = 0; Reason = '' }
+    try {
+        $key = 'HKLM:\SOFTWARE\Autounattend'
+        if (-not (Test-Path -LiteralPath $key)) { return $result }
+        $attemptState = Get-RegistryEntryState -Path $key -Name 'UserPhaseAttempts'
+        if (-not $attemptState.ValueExists) { return $result }
+        if ($attemptState.Kind -ne [Microsoft.Win32.RegistryValueKind]::DWord) { throw 'UserPhaseAttempts is not REG_DWORD.' }
+        $result.Attempts = [int]$attemptState.Value
+        if ($result.Attempts -lt 0 -or $result.Attempts -gt 3) { throw 'UserPhaseAttempts is out of range.' }
+        $outcomeState = Get-RegistryEntryState -Path $key -Name 'UserPhaseOutcome'
+        if ($outcomeState.ValueExists) {
+            if ($outcomeState.Kind -ne [Microsoft.Win32.RegistryValueKind]::String) { throw 'UserPhaseOutcome is not REG_SZ.' }
+            $result.Outcome = [string]$outcomeState.Value
+            if ($result.Outcome -notin @('PENDING', 'SUCCESS', 'TRANSIENT', 'PERMANENT', 'DEFERRED', 'NOT_APPLICABLE', 'UNKNOWN')) { throw 'UserPhaseOutcome is invalid.' }
+        }
+        $exitState = Get-RegistryEntryState -Path $key -Name 'UserPhaseExitCode'
+        if ($exitState.ValueExists) {
+            if ($exitState.Kind -ne [Microsoft.Win32.RegistryValueKind]::DWord) { throw 'UserPhaseExitCode is not REG_DWORD.' }
+            $result.ExitCode = [int]$exitState.Value
+        }
+    } catch {
+        $result.Available = $false
+        $result.Reason = 'STATE_READ_FAILED'
+    }
+    return $result
+}
+
+function Set-TMPCUserPhaseState {
+    param([int]$Attempts, [string]$Outcome, [int]$ExitCode)
+    $key = 'HKLM:\SOFTWARE\Autounattend'
+    if (-not (Test-Path -LiteralPath $key)) { New-Item -Path $key -Force -ErrorAction Stop | Out-Null }
+    try {
+        Set-ItemProperty -LiteralPath $key -Name 'UserPhaseAttempts' -Type DWord -Value $Attempts -Force -ErrorAction Stop
+        Set-ItemProperty -LiteralPath $key -Name 'UserPhaseOutcome' -Type String -Value $Outcome -Force -ErrorAction Stop
+        Set-ItemProperty -LiteralPath $key -Name 'UserPhaseExitCode' -Type DWord -Value $ExitCode -Force -ErrorAction Stop
+    } catch { throw 'STATE_WRITE_FAILED' }
+    $attemptState = Get-RegistryEntryState -Path $key -Name 'UserPhaseAttempts'
+    $outcomeState = Get-RegistryEntryState -Path $key -Name 'UserPhaseOutcome'
+    $exitState = Get-RegistryEntryState -Path $key -Name 'UserPhaseExitCode'
+    if (-not ($attemptState.ValueExists -and [int]$attemptState.Value -eq $Attempts -and
+        $outcomeState.ValueExists -and [string]$outcomeState.Value -eq $Outcome -and
+        $exitState.ValueExists -and [int]$exitState.Value -eq $ExitCode)) {
+        throw 'STATE_VERIFY_FAILED'
     }
 }
 
@@ -304,6 +1012,7 @@ function Test-RegistryStateEqual {
         'String' { [Microsoft.Win32.RegistryValueKind]::String }
         'ExpandString' { [Microsoft.Win32.RegistryValueKind]::ExpandString }
         'Binary' { [Microsoft.Win32.RegistryValueKind]::Binary }
+        'MultiString' { [Microsoft.Win32.RegistryValueKind]::MultiString }
         default { throw 'Unsupported registry type.' }
     }
     if ($Kind -ne $expectedKind) { return $false }
@@ -311,6 +1020,15 @@ function Test-RegistryStateEqual {
         if ($null -eq $Value -or $Value -isnot [byte[]]) { return $false }
         if ($Value.Length -ne $Expected.Length) { return $false }
         for ($i = 0; $i -lt $Expected.Length; $i++) { if ($Value[$i] -ne $Expected[$i]) { return $false } }
+        return $true
+    }
+    if ($Type -eq 'MultiString') {
+        $actualItems = @($Value)
+        $expectedItems = @($Expected)
+        if ($actualItems.Count -ne $expectedItems.Count) { return $false }
+        for ($i = 0; $i -lt $expectedItems.Count; $i++) {
+            if (-not [string]::Equals([string]$actualItems[$i], [string]$expectedItems[$i], [StringComparison]::Ordinal)) { return $false }
+        }
         return $true
     }
     if ($Type -eq 'DWord') { return ([int]$Value -eq [int]$Expected) }
@@ -336,7 +1054,7 @@ function Write-RegistryValue {
 function Get-RegistryErrorReason {
     param($ErrorRecord)
     $reason = $ErrorRecord.Exception.Message
-    if ($reason -in @('READ_DENIED','WRITE_DENIED','WRITE_FAILED','VERIFY_FAILED','CONFLICTING_STATE','Unsupported registry type.')) { return $reason }
+    if ($reason -in @('READ_DENIED','WRITE_DENIED','WRITE_FAILED','VERIFY_FAILED','CONFLICTING_STATE','STATE_WRITE_FAILED','STATE_VERIFY_FAILED','Unsupported registry type.')) { return $reason }
     return '{0}, HRESULT 0x{1:X8}' -f $ErrorRecord.Exception.GetType().Name, $ErrorRecord.Exception.HResult
 }
 
@@ -352,13 +1070,24 @@ function Set-RegistryValue {
     $displayName = $Name
     $Name = ConvertTo-RegistryValueName -Name $Name
     try {
-        $state = $null
-        try { $state = Get-RegistryEntryState -Path $Path -Name $Name }
-        catch { throw 'READ_DENIED' }
         $expected = $Value
         if ($Type -eq 'Binary') { $expected = [byte[]]$Value }
         if ($Type -eq 'DWord') { $expected = [int]$Value }
+        if ($Type -eq 'MultiString') { $expected = [string[]]$Value }
+        $operationKey = $null
+        if ($script:TrackAppliedOperations) {
+            $operationValue = if ($Type -eq 'Binary') { (@($expected | ForEach-Object { '{0:X2}' -f [byte]$_ }) -join ',') } else { [string]$expected }
+            $operationKey = Get-TMPCOperationKey -Operation 'SET' -Path $Path -Name ([string]$Name) -Type $Type -Value $operationValue
+            if (Test-TMPCAppliedOperation -Key $operationKey) {
+                Write-Log "$Description | $Path\$displayName | ALREADY_COMPLETED_PREVIOUS_RUN; no write performed" "INFO"
+                return
+            }
+        }
+        $state = $null
+        try { $state = Get-RegistryEntryState -Path $Path -Name $Name }
+        catch { throw 'READ_DENIED' }
         if ($state.ValueExists -and (Test-RegistryStateEqual -Type $Type -Expected $expected -Kind $state.Kind -Value $state.Value)) {
+            if ($script:TrackAppliedOperations) { Add-TMPCAppliedOperation -Key $operationKey }
             Write-Log "$Description | $Path\$displayName | ALREADY_COMPLIANT; no write performed" "INFO"
             return
         }
@@ -377,11 +1106,14 @@ function Set-RegistryValue {
         if (-not ($after.ValueExists -and (Test-RegistryStateEqual -Type $Type -Expected $expected -Kind $after.Kind -Value $after.Value))) {
             throw 'VERIFY_FAILED'
         }
+        if ($script:TrackAppliedOperations) { Add-TMPCAppliedOperation -Key $operationKey }
         Write-Log "$Description | $Path\$displayName | APPLIED and verified" "SUCCESS"
     }
     catch {
+        $reason = Get-RegistryErrorReason $_
+        if ($reason -in @('READ_DENIED','WRITE_DENIED','CONFLICTING_STATE','STATE_WRITE_FAILED','STATE_VERIFY_FAILED')) { $script:PermanentErrorCount++ }
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to set $Path\$displayName | $(Get-RegistryErrorReason $_)" "ERROR"
+        Write-Log "Failed to set $Path\$displayName | $reason" "ERROR"
     }
 }
 
@@ -393,10 +1125,19 @@ function Remove-RegistryValue {
     )
 
     try {
+        $operationKey = $null
+        if ($script:TrackAppliedOperations) {
+            $operationKey = Get-TMPCOperationKey -Operation 'REMOVEVALUE' -Path $Path -Name $Name -Type '' -Value ''
+            if (Test-TMPCAppliedOperation -Key $operationKey) {
+                Write-Log "$Description | $Path\$Name | ALREADY_COMPLETED_PREVIOUS_RUN; value absent" "INFO"
+                return
+            }
+        }
         $state = $null
         try { $state = Get-RegistryEntryState -Path $Path -Name $Name }
         catch { throw 'READ_DENIED' }
         if (-not $state.ValueExists) {
+            if ($script:TrackAppliedOperations) { Add-TMPCAppliedOperation -Key $operationKey }
             Write-Log "$Description | $Path\$Name | ALREADY_COMPLIANT; value absent" "INFO"
             return
         }
@@ -406,11 +1147,14 @@ function Remove-RegistryValue {
         try { $after = Get-RegistryEntryState -Path $Path -Name $Name }
         catch { throw 'VERIFY_FAILED' }
         if ($after.ValueExists) { throw 'VERIFY_FAILED' }
+        if ($script:TrackAppliedOperations) { Add-TMPCAppliedOperation -Key $operationKey }
         Write-Log "$Description | Removed $Path\$Name | APPLIED and verified" "SUCCESS"
     }
     catch {
+        $reason = Get-RegistryErrorReason $_
+        if ($reason -in @('READ_DENIED','WRITE_DENIED','CONFLICTING_STATE','STATE_WRITE_FAILED','STATE_VERIFY_FAILED')) { $script:PermanentErrorCount++ }
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to remove $Path\$Name | $(Get-RegistryErrorReason $_)" "ERROR"
+        Write-Log "Failed to remove $Path\$Name | $reason" "ERROR"
     }
 }
 
@@ -421,10 +1165,19 @@ function Remove-RegistryKey {
     )
 
     try {
+        $operationKey = $null
+        if ($script:TrackAppliedOperations) {
+            $operationKey = Get-TMPCOperationKey -Operation 'REMOVEKEY' -Path $Path -Name '' -Type '' -Value ''
+            if (Test-TMPCAppliedOperation -Key $operationKey) {
+                Write-Log "$Description | $Path | ALREADY_COMPLETED_PREVIOUS_RUN; key absent" "INFO"
+                return
+            }
+        }
         $state = $null
         try { $state = Get-RegistryEntryState -Path $Path -Name $null }
         catch { throw 'READ_DENIED' }
         if (-not $state.PathExists) {
+            if ($script:TrackAppliedOperations) { Add-TMPCAppliedOperation -Key $operationKey }
             Write-Log "$Description | $Path | ALREADY_COMPLIANT; key absent" "INFO"
             return
         }
@@ -434,11 +1187,14 @@ function Remove-RegistryKey {
         try { $after = Get-RegistryEntryState -Path $Path -Name $null }
         catch { throw 'VERIFY_FAILED' }
         if ($after.PathExists) { throw 'VERIFY_FAILED' }
+        if ($script:TrackAppliedOperations) { Add-TMPCAppliedOperation -Key $operationKey }
         Write-Log "$Description | Removed key $Path | APPLIED and verified" "SUCCESS"
     }
     catch {
+        $reason = Get-RegistryErrorReason $_
+        if ($reason -in @('READ_DENIED','WRITE_DENIED','CONFLICTING_STATE','STATE_WRITE_FAILED','STATE_VERIFY_FAILED')) { $script:PermanentErrorCount++ }
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to remove key $Path | $(Get-RegistryErrorReason $_)" "ERROR"
+        Write-Log "Failed to remove key $Path | $reason" "ERROR"
     }
 }
 
@@ -449,10 +1205,19 @@ function New-RegistryKey {
     )
 
     try {
+        $operationKey = $null
+        if ($script:TrackAppliedOperations) {
+            $operationKey = Get-TMPCOperationKey -Operation 'NEWKEY' -Path $Path -Name '' -Type '' -Value ''
+            if (Test-TMPCAppliedOperation -Key $operationKey) {
+                Write-Log "$Description | $Path | ALREADY_COMPLETED_PREVIOUS_RUN; key exists" "INFO"
+                return
+            }
+        }
         $state = $null
         try { $state = Get-RegistryEntryState -Path $Path -Name $null }
         catch { throw 'READ_DENIED' }
         if ($state.PathExists) {
+            if ($script:TrackAppliedOperations) { Add-TMPCAppliedOperation -Key $operationKey }
             Write-Log "$Description | $Path | ALREADY_COMPLIANT; key exists" "INFO"
             return
         }
@@ -462,11 +1227,14 @@ function New-RegistryKey {
         try { $after = Get-RegistryEntryState -Path $Path -Name $null }
         catch { throw 'VERIFY_FAILED' }
         if (-not $after.PathExists) { throw 'VERIFY_FAILED' }
+        if ($script:TrackAppliedOperations) { Add-TMPCAppliedOperation -Key $operationKey }
         Write-Log "$Description | Created key $Path | APPLIED and verified" "SUCCESS"
     }
     catch {
+        $reason = Get-RegistryErrorReason $_
+        if ($reason -in @('READ_DENIED','WRITE_DENIED','CONFLICTING_STATE','STATE_WRITE_FAILED','STATE_VERIFY_FAILED')) { $script:PermanentErrorCount++ }
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to create key $Path | $(Get-RegistryErrorReason $_)" "ERROR"
+        Write-Log "Failed to create key $Path | $reason" "ERROR"
     }
 }
 
@@ -481,6 +1249,14 @@ function Set-BinaryBit {
     )
 
     try {
+        $operationKey = $null
+        if ($script:TrackAppliedOperations) {
+            $operationKey = Get-TMPCOperationKey -Operation 'BINARYBIT' -Path $Path -Name $Name -Type 'BinaryBit' -Value ("{0}|{1}|{2}" -f $ByteIndex, $BitMask, $SetBit)
+            if (Test-TMPCAppliedOperation -Key $operationKey) {
+                Write-Log "$Description | $Path\$Name bit mask 0x$($BitMask.ToString('X2')) at byte $ByteIndex | ALREADY_COMPLETED_PREVIOUS_RUN; no write performed" "INFO"
+                return
+            }
+        }
         $state = $null
         try { $state = Get-RegistryEntryState -Path $Path -Name $Name }
         catch { throw 'READ_DENIED' }
@@ -499,6 +1275,7 @@ function Set-BinaryBit {
 
         $target = if ($SetBit) { $bytes[$ByteIndex] -bor $BitMask } else { $bytes[$ByteIndex] -band (-bnot $BitMask) }
         if ($state.ValueExists -and $target -eq $bytes[$ByteIndex]) {
+            if ($script:TrackAppliedOperations) { Add-TMPCAppliedOperation -Key $operationKey }
             Write-Log "$Description | $Path\$Name bit mask 0x$($BitMask.ToString('X2')) at byte $ByteIndex | ALREADY_COMPLIANT; no write performed" "INFO"
             return
         }
@@ -523,11 +1300,14 @@ function Set-BinaryBit {
         $final = $after.Value
         if ($final.Length -ne $updated.Length) { throw 'VERIFY_FAILED' }
         for ($i = 0; $i -lt $updated.Length; $i++) { if ($final[$i] -ne $updated[$i]) { throw 'VERIFY_FAILED' } }
+        if ($script:TrackAppliedOperations) { Add-TMPCAppliedOperation -Key $operationKey }
         Write-Log "$Description | $Path\$Name bit mask 0x$($BitMask.ToString('X2')) at byte $ByteIndex = $SetBit | APPLIED and verified" "SUCCESS"
     }
     catch {
+        $reason = Get-RegistryErrorReason $_
+        if ($reason -in @('READ_DENIED','WRITE_DENIED','CONFLICTING_STATE','STATE_WRITE_FAILED','STATE_VERIFY_FAILED')) { $script:PermanentErrorCount++ }
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to modify binary bit $Path\$Name | $(Get-RegistryErrorReason $_)" "ERROR"
+        Write-Log "Failed to modify binary bit $Path\$Name | $reason" "ERROR"
     }
 }
 
@@ -541,6 +1321,14 @@ function Set-BinaryByte {
     )
 
     try {
+        $operationKey = $null
+        if ($script:TrackAppliedOperations) {
+            $operationKey = Get-TMPCOperationKey -Operation 'BINARYBYTE' -Path $Path -Name $Name -Type 'BinaryByte' -Value ("{0}|{1}" -f $ByteIndex, $ByteValue)
+            if (Test-TMPCAppliedOperation -Key $operationKey) {
+                Write-Log "$Description | $Path\$Name byte $ByteIndex | ALREADY_COMPLETED_PREVIOUS_RUN; no write performed" "INFO"
+                return
+            }
+        }
         $state = $null
         try { $state = Get-RegistryEntryState -Path $Path -Name $Name }
         catch { throw 'READ_DENIED' }
@@ -558,6 +1346,7 @@ function Set-BinaryByte {
         }
 
         if ($state.ValueExists -and $ByteValue -eq $bytes[$ByteIndex]) {
+            if ($script:TrackAppliedOperations) { Add-TMPCAppliedOperation -Key $operationKey }
             Write-Log "$Description | $Path\$Name byte $ByteIndex | ALREADY_COMPLIANT; no write performed" "INFO"
             return
         }
@@ -582,11 +1371,14 @@ function Set-BinaryByte {
         $final = $after.Value
         if ($final.Length -ne $updated.Length) { throw 'VERIFY_FAILED' }
         for ($i = 0; $i -lt $updated.Length; $i++) { if ($final[$i] -ne $updated[$i]) { throw 'VERIFY_FAILED' } }
+        if ($script:TrackAppliedOperations) { Add-TMPCAppliedOperation -Key $operationKey }
         Write-Log "$Description | $Path\$Name byte $ByteIndex = 0x$($ByteValue.ToString('X2')) | APPLIED and verified" "SUCCESS"
     }
     catch {
+        $reason = Get-RegistryErrorReason $_
+        if ($reason -in @('READ_DENIED','WRITE_DENIED','CONFLICTING_STATE','STATE_WRITE_FAILED','STATE_VERIFY_FAILED')) { $script:PermanentErrorCount++ }
         $script:CustomizationHadErrors = $true
-        Write-Log "Failed to modify binary byte $Path\$Name | $(Get-RegistryErrorReason $_)" "ERROR"
+        Write-Log "Failed to modify binary byte $Path\$Name | $reason" "ERROR"
     }
 }
 
@@ -605,13 +1397,33 @@ function Register-AutounattendUserCustomizationsTask {
     }
 }
 
+function Remove-TMPCAutounattendUserCustomizationsTask {
+    # Bounded retries and permanent outcomes must not leave a resident task.
+    # Removal is verified; a failure is reported and never converted to success.
+    try {
+        Unregister-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -Confirm:$false -ErrorAction Stop
+        $remaining = Get-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -ErrorAction SilentlyContinue
+        if ($remaining) { throw "AutounattendUserCustomizations is still registered after the unregister attempt." }
+        Write-Log "Removed the one-shot user customization task after a terminal retry outcome" "SUCCESS"
+        return $true
+    } catch {
+        Write-Log "Could not remove the one-shot user customization task after a terminal retry outcome: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
 
 # Runs a child process in the interactive user's session from SYSTEM: duplicates the explorer
 # token (elevated linked token under UAC) and waits up to 10 minutes; success is exit code 0.
 # Required because HKCU must be written in the user's own context.
 function Start-ProcessAsUser {
-    param([string]$CommandLine)
+    param(
+        [string]$CommandLine,
+        [int]$TargetSessionId,
+        [string]$ExpectedSid
+    )
 
+    $script:LastChildExitCode = -1
     if (-not ([System.Management.Automation.PSTypeName]'Autounattend.TL'.Type)) {
         Add-Type -MemberDefinition @'
 [DllImport("advapi32.dll",SetLastError=true)]public static extern bool OpenProcessToken(IntPtr h,uint a,out IntPtr t);
@@ -619,8 +1431,6 @@ function Start-ProcessAsUser {
 [DllImport("advapi32.dll",SetLastError=true)]public static extern bool DuplicateTokenEx(IntPtr t,uint a,IntPtr s,int il,int tt,out IntPtr n);
 [DllImport("advapi32.dll",SetLastError=true,CharSet=CharSet.Unicode)]public static extern bool CreateProcessAsUserW(IntPtr t,string app,string cmd,IntPtr pa,IntPtr ta,bool ih,int cf,IntPtr env,string dir,ref SI si,out PI pi);
 [DllImport("kernel32.dll",SetLastError=true)]public static extern bool CloseHandle(IntPtr h);
-[DllImport("kernel32.dll")]public static extern uint WTSGetActiveConsoleSessionId();
-[DllImport("kernel32.dll",SetLastError=true)]public static extern bool ProcessIdToSessionId(uint p,out uint s);
 [DllImport("kernel32.dll",SetLastError=true)]public static extern uint WaitForSingleObject(IntPtr h,uint ms);
 [DllImport("kernel32.dll",SetLastError=true)]public static extern bool GetExitCodeProcess(IntPtr h,out uint c);
 [DllImport("userenv.dll",SetLastError=true)]public static extern bool CreateEnvironmentBlock(out IntPtr env,IntPtr token,bool inherit);
@@ -631,34 +1441,68 @@ function Start-ProcessAsUser {
     }
 
     $T = [Autounattend.TL]
-    $tok = $dup = $envBlock = [IntPtr]::Zero
+    $tok = $dup = $envBlock = $linked = [IntPtr]::Zero
     $pi = New-Object Autounattend.TL+PI
     $launched = $false
 
     try {
-        $cs = $T::WTSGetActiveConsoleSessionId()
-        if ($cs -eq 0xFFFFFFFF) { Write-Log "No active console session" "ERROR"; return $false }
-
-        $ep = $null
-        foreach ($p in (Get-Process explorer -ErrorAction SilentlyContinue)) {
-            $s = [uint32]0
-            if ($T::ProcessIdToSessionId([uint32]$p.Id, [ref]$s) -and $s -eq $cs) { $ep = $p; break }
+        if ($TargetSessionId -le 0 -or [string]::IsNullOrWhiteSpace($ExpectedSid)) {
+            Write-Log "Child launch rejected: missing target session or expected identity" "ERROR"
+            return $false
         }
-        if (-not $ep) { Write-Log "No explorer.exe in session $cs" "ERROR"; return $false }
 
+        $processes = @()
+        foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name = 'explorer.exe'" -ErrorAction Stop)) {
+            if ([int]$p.SessionId -ne $TargetSessionId) { continue }
+            $owner = $null
+            try { $owner = Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid -ErrorAction Stop } catch { }
+            if ($null -eq $owner -or $owner.ReturnValue -ne 0 -or -not (Test-TMPCIdentityMatch -ExpectedSid $ExpectedSid -ActualSid ([string]$owner.Sid))) {
+                Write-Log "Explorer identity does not match the expected interactive identity" "ERROR"
+                return $false
+            }
+            $processes += $p
+        }
+        if ($processes.Count -eq 0) {
+            Write-Log "No explorer.exe in target session $TargetSessionId" "ERROR"
+            return $false
+        }
+
+        $ep = Get-Process -Id ([int]$processes[0].ProcessId) -ErrorAction Stop
         if (-not $T::OpenProcessToken($ep.Handle, 0x000A, [ref]$tok)) {
             Write-Log "OpenProcessToken failed (err $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))" "ERROR"; return $false
         }
 
-        # If user is admin with UAC, get the linked elevated token (TokenElevationType=18, TokenLinkedToken=19)
-        $dupSrc = $tok; $linked = [IntPtr]::Zero
+        $tokenSid = $null
+        try {
+            $tokenIdentity = New-Object System.Security.Principal.WindowsIdentity -ArgumentList $tok
+            $tokenSid = [string]$tokenIdentity.User.Value
+            $tokenIdentity.Dispose()
+        } catch { }
+        if (-not (Test-TMPCIdentityMatch -ExpectedSid $ExpectedSid -ActualSid $tokenSid)) {
+            Write-Log "Explorer token identity does not match the expected identity" "ERROR"
+            return $false
+        }
+
+        # If user is admin with UAC, use the linked elevated token only after
+        # verifying that the linked token belongs to the same SID.
+        $dupSrc = $tok
         $eb = [Runtime.InteropServices.Marshal]::AllocHGlobal(4); $rl = 0
         if ($T::GetTokenInformation($tok, 18, $eb, 4, [ref]$rl) -and [Runtime.InteropServices.Marshal]::ReadInt32($eb) -eq 3) {
             $lb = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
             if ($T::GetTokenInformation($tok, 19, $lb, [IntPtr]::Size, [ref]$rl)) {
                 $linked = [Runtime.InteropServices.Marshal]::ReadIntPtr($lb)
+                $linkedSid = $null
+                try {
+                    $linkedIdentity = New-Object System.Security.Principal.WindowsIdentity -ArgumentList $linked
+                    $linkedSid = [string]$linkedIdentity.User.Value
+                    $linkedIdentity.Dispose()
+                } catch { }
+                if (-not (Test-TMPCIdentityMatch -ExpectedSid $ExpectedSid -ActualSid $linkedSid)) {
+                    Write-Log "Linked elevated token identity does not match the expected identity" "ERROR"
+                    return $false
+                }
                 $dupSrc = $linked
-                Write-Log "Using elevated linked token for admin user" "INFO"
+                Write-Log "Using elevated linked token for the verified identity" "INFO"
             }
             [Runtime.InteropServices.Marshal]::FreeHGlobal($lb)
         }
@@ -667,7 +1511,22 @@ function Start-ProcessAsUser {
         if (-not $T::DuplicateTokenEx($dupSrc, 0xF01FF, [IntPtr]::Zero, 2, 1, [ref]$dup)) {
             Write-Log "DuplicateTokenEx failed (err $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))" "ERROR"; return $false
         }
-        if ($linked -ne [IntPtr]::Zero) { $null = $T::CloseHandle($linked) }
+
+        $dupSid = $null
+        try {
+            $dupIdentity = New-Object System.Security.Principal.WindowsIdentity -ArgumentList $dup
+            $dupSid = [string]$dupIdentity.User.Value
+            $dupIdentity.Dispose()
+        } catch { }
+        if (-not (Test-TMPCIdentityMatch -ExpectedSid $ExpectedSid -ActualSid $dupSid)) {
+            Write-Log "Duplicated token identity does not match the expected identity" "ERROR"
+            return $false
+        }
+
+        if ($linked -ne [IntPtr]::Zero) {
+            $null = $T::CloseHandle($linked)
+            $linked = [IntPtr]::Zero
+        }
 
         $null = $T::CreateEnvironmentBlock([ref]$envBlock, $dup, $false)
 
@@ -681,13 +1540,14 @@ function Start-ProcessAsUser {
         }
 
         $launched = $true
-        Write-Log "Launched child process as user (PID $($pi.pid))" "INFO"
+        Write-Log "Launched child process for the verified identity (PID $($pi.pid))" "INFO"
 
         $wait = $T::WaitForSingleObject($pi.hp, 600000)
-        if ($wait -ne 0) { Write-Log "Child process timed out" "ERROR"; return $false }
+        if ($wait -ne 0) { Write-Log "Child process timed out" "ERROR"; $script:LastChildExitCode = -2; return $false }
 
         $ec = [uint32]0
         $null = $T::GetExitCodeProcess($pi.hp, [ref]$ec)
+        $script:LastChildExitCode = [int]$ec
         Write-Log "Child process exited with code $ec" "INFO"
         return ($ec -eq 0)
     }
@@ -699,6 +1559,7 @@ function Start-ProcessAsUser {
         }
         if ($envBlock -ne [IntPtr]::Zero) { $null = $T::DestroyEnvironmentBlock($envBlock) }
         if ($dup -ne [IntPtr]::Zero) { $null = $T::CloseHandle($dup) }
+        if ($linked -ne [IntPtr]::Zero) { $null = $T::CloseHandle($linked) }
         if ($tok -ne [IntPtr]::Zero) { $null = $T::CloseHandle($tok) }
     }
 }
@@ -1102,6 +1963,7 @@ If (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
 $logFolder = "C:\ProgramData\Autounattend\Logs"
 $logFile = "$logFolder\OneDriveRemovalLog.txt"
 $script:HadErrors = $false
+$script:HadDeferrals = $false
 
 # Create log directory if it doesn't exist
 if (!(Test-Path $logFolder)) {
@@ -1166,7 +2028,7 @@ function Get-RegistryEntryState {
 function Get-RegistryErrorReason {
     param($ErrorRecord)
     $reason = $ErrorRecord.Exception.Message
-    if ($reason -in @('READ_DENIED','WRITE_DENIED','WRITE_FAILED','VERIFY_FAILED','CONFLICTING_STATE','Unsupported registry type.')) { return $reason }
+    if ($reason -in @('READ_DENIED','WRITE_DENIED','WRITE_FAILED','VERIFY_FAILED','CONFLICTING_STATE','STATE_WRITE_FAILED','STATE_VERIFY_FAILED','Unsupported registry type.')) { return $reason }
     return '{0}, HRESULT 0x{1:X8}' -f $ErrorRecord.Exception.GetType().Name, $ErrorRecord.Exception.HResult
 }
 
@@ -1211,6 +2073,7 @@ function Remove-OneDriveRemnant {
     param([string]$Path, [string[]]$AllowedRoots, [string[]]$ProtectedRoots)
     # Sole filesystem deletion entry point for OneDrive remnants: exact
     # allowlist, protected sync roots and link rejection, one level at a time.
+    if (-not $script:OneDriveProtectionReady) { throw 'Sync-root protection inventory unavailable; remnants preserved.' }
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     foreach ($root in @($ProtectedRoots)) {
         if (-not $root) { continue }
@@ -1295,100 +2158,319 @@ function Invoke-OneDriveUninstaller {
     return $true
 }
 
+function Get-TMPCOneDriveRegistrationState {
+    # A successful read that reports no key is the only accepted proof of
+    # absence. A denied or failed read is UNKNOWN and never authorizes cleanup.
+    param([string]$Path)
+    if (-not $Path) { return 'NOT_APPLICABLE' }
+    $state = $null
+    try { $state = Get-RegistryEntryState -Path $Path -Name $null }
+    catch { return 'UNKNOWN' }
+    if ($state.PathExists) { return 'PRESENT' }
+    return 'ABSENT_VERIFIED'
+}
+
+function Get-TMPCOneDriveCleanupPlan {
+    # Machine and user evidence are independent. A user success never
+    # authorizes machine cleanup and a machine success never authorizes user
+    # cleanup. User cleanup additionally requires a verified identity.
+    param(
+        [bool]$MachineUninstalled,
+        [bool]$UserUninstalled,
+        [bool]$MachineAbsentVerified,
+        [bool]$UserAbsentVerified,
+        [bool]$CanApplyUser
+    )
+    $machineEvidence = [bool]($MachineUninstalled -or $MachineAbsentVerified)
+    $userEvidence = [bool]($CanApplyUser -and ($UserUninstalled -or $UserAbsentVerified))
+    [pscustomobject]@{
+        MachineUninstalled         = [bool]$MachineUninstalled
+        UserUninstalled            = [bool]$UserUninstalled
+        MachineAbsentVerified      = [bool]$MachineAbsentVerified
+        UserAbsentVerified         = [bool]$UserAbsentVerified
+        MachineEvidence            = $machineEvidence
+        UserEvidence               = $userEvidence
+        RemoveMachineConfiguration = $machineEvidence
+        RemoveMachineRemnants      = $machineEvidence
+        RemoveUserConfiguration    = $userEvidence
+        RemoveUserRemnants         = $userEvidence
+    }
+}
+
+function New-TMPCRegistryKey {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
+}
+
+function Set-TMPCRegistryEntryValue {
+    param([string]$Path, [string]$Name, [string]$Type, $Value)
+    Set-ItemProperty -LiteralPath $Path -Name $Name -Type $Type -Value $Value -Force -ErrorAction Stop
+}
+
+function Get-TMPCDefaultHivePath {
+    $profileRoot = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -Name 'Default' -ErrorAction Stop).Default
+    if (-not $profileRoot) { throw 'Default profile path is unavailable.' }
+    return (Join-Path ([Environment]::ExpandEnvironmentVariables([string]$profileRoot)) 'NTUSER.DAT')
+}
+
+function Test-TMPCDefaultHiveMounted {
+    param([string]$MountName)
+    return (Test-Path -LiteralPath "Registry::HKEY_USERS\$MountName")
+}
+
+function Invoke-TMPCDefaultHiveLoad {
+    param([string]$MountName, [string]$HivePath)
+    reg.exe load ("HKEY_USERS\$MountName") $HivePath 2>&1 | Out-Null
+    return $LASTEXITCODE
+}
+
+function Invoke-TMPCDefaultHiveUnload {
+    param([string]$MountName)
+    reg.exe unload ("HKEY_USERS\$MountName") 2>&1 | Out-Null
+    return $LASTEXITCODE
+}
+
+function Invoke-DefaultOneDrivePolicy {
+    # Unique temporary mount, no foreign hive unload, bounded unload retries and
+    # a marker written only after the temporary key is verified absent.
+    $markerKey = 'HKLM:\SOFTWARE\Autounattend\OneDriveRemoval'
+    $markerState = $null
+    try { $markerState = Get-RegistryEntryState -Path $markerKey -Name 'DefaultUserConfigured' }
+    catch { return 'DEFERRED' }
+    if ($markerState.ValueExists) {
+        if ($markerState.Kind -eq [Microsoft.Win32.RegistryValueKind]::String -and
+            ([string]$markerState.Value).StartsWith('R1|', [StringComparison]::Ordinal)) {
+            return 'ALREADY_COMPLIANT'
+        }
+        # A legacy or malformed marker cannot prove that unload was verified.
+        # Re-run the operation and keep the old marker until a verified unload.
+    }
+
+    try { $defaultHivePath = Get-TMPCDefaultHivePath } catch { return 'DEFERRED' }
+    if (-not $defaultHivePath) { return 'DEFERRED' }
+    try {
+        $hiveItem = Get-TMPCPathItem -Path $defaultHivePath
+        if ($hiveItem.PSIsContainer) { return 'DEFERRED' }
+        Assert-NoReparsePath $defaultHivePath
+    } catch { return 'DEFERRED' }
+
+    $mountName = 'TMPC_Default_' + [Guid]::NewGuid().ToString('N')
+    if (Test-TMPCDefaultHiveMounted -MountName $mountName) { return 'DEFERRED' }
+    $loadExit = Invoke-TMPCDefaultHiveLoad -MountName $mountName -HivePath $defaultHivePath
+    if ($loadExit -ne 0 -or -not (Test-TMPCDefaultHiveMounted -MountName $mountName)) {
+        Write-Log "Default user hive load failed or its temporary mount was not verified."
+        return 'FAILED'
+    }
+
+    $mounted = $true
+    $configured = $false
+    try {
+        $runKey = "Registry::HKEY_USERS\$mountName\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+        $runState = Get-RegistryEntryState -Path $runKey -Name 'OneDriveSetup'
+        if ($runState.ValueExists) {
+            $null = Remove-RegistryEntryIfPresent -Path $runKey -Name 'OneDriveSetup'
+            Write-Log "Removed the default user OneDriveSetup Run entry"
+        }
+
+        $thdfKey = "Registry::HKEY_USERS\$mountName\SOFTWARE\Microsoft\OneDrive"
+        $thdfState = Get-RegistryEntryState -Path $thdfKey -Name 'EnableTHDFFeatures'
+        if ($thdfState.ValueExists -and $thdfState.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $thdfState.Value -eq 0) {
+            $configured = $true
+            Write-Log "Default user OneDrive policy already compliant"
+        } else {
+            if (-not $thdfState.PathExists) { New-TMPCRegistryKey -Path $thdfKey }
+            Set-TMPCRegistryEntryValue -Path $thdfKey -Name 'EnableTHDFFeatures' -Type DWord -Value 0
+            $thdfAfter = Get-RegistryEntryState -Path $thdfKey -Name 'EnableTHDFFeatures'
+            if ($thdfAfter.ValueExists -and $thdfAfter.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $thdfAfter.Value -eq 0) {
+                $configured = $true
+                Write-Log "Default user OneDrive policy staged and verified"
+            } else {
+                throw 'VERIFY_FAILED'
+            }
+        }
+    } catch {
+        Write-Log "Default user configuration failed: $(Get-RegistryErrorReason $_)"
+        $configured = $false
+    } finally {
+        if ($mounted) {
+            [GC]::Collect()
+            [GC]::WaitForPendingFinalizers()
+            $unloaded = $false
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                $unloadExit = Invoke-TMPCDefaultHiveUnload -MountName $mountName
+                if ($unloadExit -eq 0 -and -not (Test-TMPCDefaultHiveMounted -MountName $mountName)) {
+                    $unloaded = $true
+                    break
+                }
+                Start-Sleep -Seconds 1
+            }
+            if (-not $unloaded) {
+                Write-Log "Default user hive unload was not verified; the completion marker will not be written."
+                $configured = $false
+            }
+        }
+    }
+
+    if (-not $configured) { return 'FAILED' }
+
+    try {
+        $markerParent = Get-RegistryEntryState -Path 'HKLM:\SOFTWARE\Autounattend' -Name $null
+        if (-not $markerParent.PathExists) { New-TMPCRegistryKey -Path 'HKLM:\SOFTWARE\Autounattend' }
+        $markerKeyState = Get-RegistryEntryState -Path $markerKey -Name $null
+        if (-not $markerKeyState.PathExists) { New-TMPCRegistryKey -Path $markerKey }
+        $markerValue = 'R1|' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        Set-TMPCRegistryEntryValue -Path $markerKey -Name 'DefaultUserConfigured' -Type String -Value $markerValue
+        $markerAfter = Get-RegistryEntryState -Path $markerKey -Name 'DefaultUserConfigured'
+        if (-not ($markerAfter.ValueExists -and $markerAfter.Kind -eq [Microsoft.Win32.RegistryValueKind]::String -and [string]$markerAfter.Value -eq $markerValue)) {
+            throw 'VERIFY_FAILED'
+        }
+        Write-Log "Default user configuration completed and marked after verified unload"
+        return 'APPLIED'
+    } catch {
+        Write-Log "Default user configuration completed but the verified marker could not be written: $(Get-RegistryErrorReason $_)"
+        return 'FAILED'
+    }
+}
+
 Write-Host "Starting OneDrive removal process. See $logFile for details."
 Write-Log "Starting OneDrive removal process"
 
-# Get the interactive user when running as SYSTEM (not needed for regular user execution).
-# Logs avoid user names: only detection steps and outcomes are recorded.
-function Get-TargetUser {
-    Write-Log "Get-TargetUser: Starting user detection"
+# Interactive identity resolution by Explorer owner SID and ProfileList BY SID.
+# The profile folder name never identifies the account. Ambiguous or unresolved
+# identities defer only the user scope; there is no first-account fallback.
+function Resolve-TMPCInteractiveIdentity {
+    param(
+        [object[]]$ExplorerProcesses,
+        [object[]]$Profiles,
+        [string]$CurrentSid
+    )
 
-    try {
-        $user = Get-WmiObject Win32_ComputerSystem | Select-Object -ExpandProperty UserName
-        if ($user -and $user -ne "NT AUTHORITY\SYSTEM") {
-            Write-Log "Get-TargetUser: interactive user detected through Win32_ComputerSystem"
-            return $user.Split('\')[1]
-        }
-        Write-Log "Get-TargetUser: user is null or a system account, trying fallback method"
-    }
-    catch {
-        Write-Log "Get-TargetUser: Win32_ComputerSystem detection failed"
+    $explorers = @($ExplorerProcesses | Where-Object { $_ -and ([int]$_.SessionId -gt 0) })
+    if ($explorers.Count -eq 0) {
+        return [pscustomobject]@{ Status='NO_EXPLORER'; Sid=$null; UserName=$null; SessionId=0; ProfilePath=$null }
     }
 
-    # Fallback: find user running explorer.exe
-    try {
-        $explorer = Get-CimInstance Win32_Process -Filter "Name = 'explorer.exe'" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($explorer) {
-            $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction Stop
-            if ($owner.ReturnValue -eq 0 -and $owner.User) {
-                Write-Log "Get-TargetUser: interactive user detected through explorer.exe"
-                return $owner.User
-            }
-        }
-        Write-Log "Get-TargetUser: no usable explorer owner found"
-    }
-    catch {
-        Write-Log "Get-TargetUser: explorer detection failed"
+    $sessionIds = @($explorers | ForEach-Object { [int]$_.SessionId } | Sort-Object -Unique)
+    if ($sessionIds.Count -ne 1) {
+        return [pscustomobject]@{ Status='AMBIGUOUS_SESSION'; Sid=$null; UserName=$null; SessionId=0; ProfilePath=$null }
     }
 
-    Write-Log "Get-TargetUser: no user found, returning null"
-    return $null
-}
-
-# Get the user's SID for registry access
-function Get-UserSID {
-    param($Username)
-    try {
-        $profListPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
-        foreach ($key in Get-ChildItem $profListPath -ErrorAction SilentlyContinue) {
-            $profPath = (Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
-            if ($profPath -and $profPath.EndsWith("\$Username")) {
-                return $key.PSChildName
-            }
-        }
-        Write-Log "Get-UserSID: no profile found for the target user"
-        return $null
+    $ownerSids = @($explorers | ForEach-Object { [string]$_.OwnerSid } | Where-Object { $_ })
+    if ($ownerSids.Count -ne $explorers.Count) {
+        return [pscustomobject]@{ Status='OWNER_UNKNOWN'; Sid=$null; UserName=$null; SessionId=$sessionIds[0]; ProfilePath=$null }
     }
-    catch {
-        Write-Log "Get-UserSID: profile lookup failed"
-        return $null
+
+    $uniqueSids = @($ownerSids | Sort-Object -Unique)
+    if ($uniqueSids.Count -ne 1) {
+        return [pscustomobject]@{ Status='AMBIGUOUS_IDENTITY'; Sid=$null; UserName=$null; SessionId=$sessionIds[0]; ProfilePath=$null }
+    }
+
+    $sid = [string]$uniqueSids[0]
+    if ($CurrentSid -and -not [string]::Equals($CurrentSid, $sid, [StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Status='IDENTITY_MISMATCH'; Sid=$sid; UserName=$null; SessionId=$sessionIds[0]; ProfilePath=$null }
+    }
+
+    $profile = @($Profiles | Where-Object { $_ -and [string]::Equals([string]$_.Sid, $sid, [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1)
+    if ($profile.Count -eq 0) {
+        return [pscustomobject]@{ Status='PROFILE_NOT_FOUND'; Sid=$sid; UserName=$null; SessionId=$sessionIds[0]; ProfilePath=$null }
+    }
+
+    $userName = @($explorers | ForEach-Object { [string]$_.OwnerUser } | Where-Object { $_ } | Select-Object -First 1)
+    return [pscustomobject]@{
+        Status      = 'OK'
+        Sid         = $sid
+        UserName    = [string]$userName
+        SessionId   = [int]$sessionIds[0]
+        ProfilePath = [string]$profile[0].ProfileImagePath
     }
 }
 
-# Determine user profile to check (logs avoid user names and profile paths).
-if ($env:USERNAME -eq "SYSTEM" -or $env:USERNAME -like "*$" -or $env:USERPROFILE -like "*\system32\config\systemprofile") {
-    Write-Log "Running as a system account, attempting to detect the target user"
-    $targetUser = Get-TargetUser
-    if ($targetUser) {
-        $userProfilePath = "C:\Users\$targetUser"
-        Write-Log "Running as a system account; a target user profile will be used"
-    } else {
-        Write-Log "Running as a system account but no target user was found; user paths are skipped"
-        $userProfilePath = $null
-    }
+function Test-TMPCIdentityMatch {
+    param([string]$ExpectedSid, [string]$ActualSid, [string]$LinkedSid)
+    if ([string]::IsNullOrWhiteSpace($ExpectedSid) -or [string]::IsNullOrWhiteSpace($ActualSid)) { return $false }
+    if (-not [string]::Equals($ExpectedSid, $ActualSid, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    if ($LinkedSid -and -not [string]::Equals($ExpectedSid, $LinkedSid, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    return $true
+}
+
+function Get-TMPCInteractiveIdentity {
+    $explorers = New-Object System.Collections.Generic.List[object]
+    try {
+        foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'explorer.exe'" -ErrorAction Stop)) {
+            $ownerSid = $null
+            $ownerUser = $null
+            try {
+                $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+                if ($owner.ReturnValue -eq 0 -and $owner.Sid) { $ownerSid = [string]$owner.Sid }
+            } catch { }
+            try {
+                $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop
+                if ($owner.ReturnValue -eq 0 -and $owner.User) { $ownerUser = [string]$owner.User }
+            } catch { }
+            $null = $explorers.Add([pscustomobject]@{
+                SessionId = [int]$process.SessionId
+                OwnerSid  = $ownerSid
+                OwnerUser = $ownerUser
+            })
+        }
+    } catch { }
+
+    $profiles = New-Object System.Collections.Generic.List[object]
+    try {
+        foreach ($key in @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction Stop)) {
+            $profilePath = $null
+            try { $profilePath = (Get-ItemProperty -LiteralPath $key.PSPath -Name 'ProfileImagePath' -ErrorAction Stop).ProfileImagePath } catch { }
+            if ($profilePath) {
+                $null = $profiles.Add([pscustomobject]@{ Sid = [string]$key.PSChildName; ProfileImagePath = [string]$profilePath })
+            }
+        }
+    } catch { }
+
+    return (Resolve-TMPCInteractiveIdentity -ExplorerProcesses @($explorers) -Profiles @($profiles))
+}
+
+$identity = Get-TMPCInteractiveIdentity
+$canApplyUser = ($identity.Status -eq 'OK')
+$userIdentityState = 'NOT_APPLICABLE'
+if ($canApplyUser) {
+    $targetUserSid = $identity.Sid
+    $userProfilePath = $identity.ProfilePath
+    $userRegistryHive = "Registry::HKEY_USERS\$targetUserSid"
+    Write-Log "Interactive identity verified for session $($identity.SessionId)"
 } else {
-    $targetUser = $env:USERNAME
-    $userProfilePath = $env:USERPROFILE
-    Write-Log "Running as a regular user; using the current profile"
+    $targetUserSid = $null
+    $userProfilePath = $null
+    $userRegistryHive = $null
+    if ($identity.Status -ne 'NO_EXPLORER') {
+        $userIdentityState = 'UNKNOWN'
+        $script:HadDeferrals = $true
+    }
+    Write-Log "User-scope OneDrive work deferred: interactive identity status $($identity.Status)"
 }
 
 # OneDrive custom sync-root protection inventory (read BEFORE uninstall or
 # configuration cleanup changes those keys). Only the UserFolder value is read;
 # account tokens and credentials are never touched.
+$script:OneDriveProtectionReady = $false
 $syncRoots = New-Object System.Collections.Generic.List[string]
-foreach ($hive in @(Get-ChildItem -LiteralPath 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue)) {
-    $accounts = $hive.PSPath + '\SOFTWARE\Microsoft\OneDrive\Accounts'
-    if (-not (Test-Path -LiteralPath $accounts)) { continue }
-    foreach ($account in @(Get-ChildItem -LiteralPath $accounts -ErrorAction SilentlyContinue)) {
-        $accountState = $null
-        try { $accountState = Get-RegistryEntryState -Path $account.PSPath -Name 'UserFolder' } catch { $accountState = $null }
-        if ($null -ne $accountState -and $accountState.ValueExists -and $accountState.Value) {
-            $null = $syncRoots.Add([string]$accountState.Value)
+$inventoryOk = $true
+try {
+    foreach ($hive in @(Get-ChildItem -LiteralPath 'Registry::HKEY_USERS' -ErrorAction Stop)) {
+        $accounts = $hive.PSPath + '\SOFTWARE\Microsoft\OneDrive\Accounts'
+        if (-not (Test-Path -LiteralPath $accounts)) { continue }
+        foreach ($account in @(Get-ChildItem -LiteralPath $accounts -ErrorAction Stop)) {
+            $accountState = Get-RegistryEntryState -Path $account.PSPath -Name 'UserFolder'
+            if ($accountState.ValueExists -and $accountState.Value) {
+                $null = $syncRoots.Add([string]$accountState.Value)
+            }
         }
     }
+} catch {
+    $inventoryOk = $false
+    Write-Log "OneDrive sync-root protection inventory is incomplete; remnant deletion is deferred."
 }
+$script:OneDriveProtectionReady = $inventoryOk
 if ($userProfilePath) { $null = $syncRoots.Add((Join-Path $userProfilePath 'OneDrive')) }
-if ($env:USERPROFILE) { $null = $syncRoots.Add((Join-Path $env:USERPROFILE 'OneDrive')) }
 
 # Exact allowlist of OneDrive software remnants this script may delete. Content
 # under %USERPROFILE%\OneDrive is NEVER a deletion target.
@@ -1401,109 +2483,152 @@ if ($userProfilePath) {
     $null = $remnantRoots.Add((Join-Path $userProfilePath 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk'))
 }
 
-# Resolve the user registry hive path (provider-qualified) once; it is used by
-# the uninstaller allowlist and by the user-specific key cleanup.
-$userRegistryHive = $null
-if ($userProfilePath -and $targetUser) {
-    $userSID = Get-UserSID -Username $targetUser
-    if ($userSID) {
-        $userRegistryHive = "Registry::HKEY_USERS\$userSID"
-    } else {
-        Write-Log "Could not resolve the target user registry hive; user-specific cleanup and user-scope uninstall are deferred"
-    }
-}
-
-# Step 1: Remove OneDrive AppxPackage and check registry for OneDrive installation
-Write-Log "Removing OneDrive AppxPackage if present"
+# Step 1: runtime state before any mutating OneDrive operation. If OneDrive is
+# running or its state cannot be read reliably, all potential interference is
+# deferred; no process is terminated.
+$oneDriveBusy = $true
+$oneDriveState = 'UNKNOWN'
 try {
-    $oneDriveAppx = @(Get-AppxPackage -AllUsers *OneDriveSync* -ErrorAction SilentlyContinue)
-    if ($oneDriveAppx.Count -gt 0) {
-        $oneDriveAppx | Remove-AppxPackage -AllUsers -ErrorAction Stop
-        Write-Log "OneDrive AppxPackage removal completed"
+    $oneDriveProcesses = @(Get-Process -Name '*OneDrive*' -ErrorAction Stop)
+    if ($oneDriveProcesses.Count -gt 0) {
+        $oneDriveState = 'RUNNING'
     } else {
-        Write-Log "OneDrive AppxPackage not found"
+        $oneDriveState = 'NOT_RUNNING'
+        $oneDriveBusy = $false
     }
+} catch {
+    $oneDriveState = 'UNKNOWN'
+    $oneDriveBusy = $true
 }
-catch {
-    Write-Log "OneDrive AppxPackage removal failed: $($_.Exception.Message)"
-    $script:HadErrors = $true
+if ($oneDriveBusy) {
+    Write-Log "OneDrive runtime state is $oneDriveState; AppX, uninstall, task and remnant work deferred."
+    $script:HadDeferrals = $true
 }
 
-# Step 2: checked uninstallation through the strict verified path.
-# Nothing is force-terminated: OneDrive running with possible pending sync work
-# defers executable and remnant cleanup until the user closes it after checking
-# local files. User-scope uninstall entries are not executed as SYSTEM.
-$oneDriveRunning = @(Get-Process -Name '*OneDrive*' -ErrorAction SilentlyContinue).Count -gt 0
-if ($oneDriveRunning) {
-    Write-Log "OneDrive is running; quit it after verifying local files. Uninstall and remnant cleanup deferred."
-} else {
-    $machineUninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe'
-    $userUninstallKey = $null
-    if ($userRegistryHive) { $userUninstallKey = $userRegistryHive + '\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe' }
+$machineUninstalled = $false
+$userUninstalled = $false
+$machineState = 'NOT_APPLICABLE'
+$userState = $userIdentityState
+$plan = $null
 
-    $machineUninstalled = $false
-    Write-Log "Checking the HKLM OneDrive uninstall entry"
+if (-not $oneDriveBusy) {
+    # Step 2: remove the OneDrive AppX package only after the runtime check.
+    Write-Log "Removing OneDrive AppxPackage if present"
     try {
-        $machineUninstalled = Invoke-OneDriveUninstaller -RegistryPath $machineUninstallKey -Machine
+        $oneDriveAppx = @(Get-AppxPackage -AllUsers *OneDriveSync* -ErrorAction SilentlyContinue)
+        if ($oneDriveAppx.Count -gt 0) {
+            $oneDriveAppx | Remove-AppxPackage -AllUsers -ErrorAction Stop
+            Write-Log "OneDrive AppxPackage removal completed"
+        } else {
+            Write-Log "OneDrive AppxPackage not found"
+        }
     } catch {
-        Write-Log "HKLM OneDrive uninstall failed: $(Get-RegistryErrorReason $_)"
+        Write-Log "OneDrive AppxPackage removal failed: $($_.Exception.Message)"
         $script:HadErrors = $true
     }
-    if ($machineUninstalled) { Write-Log "HKLM registry-based uninstaller completed" }
 
-    # Positive absence requires a successful read that says the entry does not
-    # exist; a denied read never authorizes assuming absence.
-    $machineAbsent = $false
-    $machineState = $null
-    try { $machineState = Get-RegistryEntryState -Path $machineUninstallKey -Name $null } catch { $machineState = $null }
-    if ($null -ne $machineState) { $machineAbsent = -not $machineState.PathExists }
-
-    $userScopedPresent = $true
-    if ($userUninstallKey) {
-        $userState = $null
-        try { $userState = Get-RegistryEntryState -Path $userUninstallKey -Name $null } catch { $userState = $null }
-        if ($null -ne $userState) { $userScopedPresent = [bool]$userState.PathExists }
-    } else {
-        $userScopedPresent = $false
-    }
-    if ($userScopedPresent) {
-        Write-Log "A user-scope OneDrive installation is registered for the target profile; user-scope uninstall and user remnants are deferred to the interactive account"
-    }
-
-    # Remove only a positively uninstalled entry. A failed or unrecognized
-    # uninstall keeps its evidence for manual review.
-    if ($machineUninstalled) {
+    # Step 3: machine uninstall through the strict verified path. User-scope
+    # uninstallers are never executed as SYSTEM.
+    $machineUninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe'
+    $machineState = Get-TMPCOneDriveRegistrationState -Path $machineUninstallKey
+    if ($machineState -eq 'PRESENT') {
+        Write-Log "Checking the HKLM OneDrive uninstall entry"
         try {
-            $entryState = Remove-RegistryEntryIfPresent -Path $machineUninstallKey
-            Write-Log "HKLM uninstall entry cleanup: $entryState"
+            $machineUninstalled = Invoke-OneDriveUninstaller -RegistryPath $machineUninstallKey -Machine
         } catch {
-            Write-Log "HKLM uninstall entry cleanup failed: $(Get-RegistryErrorReason $_)"
+            Write-Log "HKLM OneDrive uninstall failed: $(Get-RegistryErrorReason $_)"
             $script:HadErrors = $true
+        }
+        if ($machineUninstalled) {
+            Write-Log "HKLM registry-based uninstaller completed"
+            try {
+                $entryState = Remove-RegistryEntryIfPresent -Path $machineUninstallKey
+                Write-Log "HKLM uninstall entry cleanup: $entryState"
+            } catch {
+                Write-Log "HKLM uninstall entry cleanup failed: $(Get-RegistryErrorReason $_)"
+                $script:HadErrors = $true
+            }
+        } else {
+            Write-Log "HKLM OneDrive uninstall was not verified; machine cleanup is deferred."
+            $script:HadDeferrals = $true
+        }
+    } elseif ($machineState -eq 'UNKNOWN') {
+        Write-Log "Machine OneDrive registration state is UNKNOWN; machine cleanup is deferred."
+        $script:HadDeferrals = $true
+    } else {
+        Write-Log "Machine OneDrive registration is absent or not applicable."
+    }
+
+    # Re-read machine state after a positive uninstall; removal must be verified.
+    if ($machineUninstalled) {
+        $machineState = Get-TMPCOneDriveRegistrationState -Path $machineUninstallKey
+        if ($machineState -eq 'UNKNOWN') {
+            Write-Log "Machine OneDrive registration state became UNKNOWN after uninstall; machine cleanup is deferred."
+            $script:HadDeferrals = $true
         }
     }
 
-    if (-not $machineUninstalled -and -not $machineAbsent) {
-        Write-Log "OneDrive uninstall not confirmed; configuration keys and remnants preserved. Manual review needed."
+    # User scope requires a verified identity. A present user installation is
+    # preserved and deferred; a denied read is UNKNOWN, never absence.
+    if ($canApplyUser) {
+        $userUninstallKey = $userRegistryHive + '\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe'
+        $userState = Get-TMPCOneDriveRegistrationState -Path $userUninstallKey
+        if ($userState -eq 'PRESENT') {
+            Write-Log "A user-scope OneDrive installation is registered; user-scope work is deferred."
+            $script:HadDeferrals = $true
+        } elseif ($userState -eq 'UNKNOWN') {
+            Write-Log "User OneDrive registration state is UNKNOWN; user cleanup is deferred."
+            $script:HadDeferrals = $true
+        }
     } else {
+        Write-Log "User OneDrive registration state is $userState; user cleanup is deferred."
+    }
+
+    $plan = Get-TMPCOneDriveCleanupPlan `
+        -MachineUninstalled ([bool]$machineUninstalled) `
+        -UserUninstalled ([bool]$userUninstalled) `
+        -MachineAbsentVerified ($machineState -eq 'ABSENT_VERIFIED') `
+        -UserAbsentVerified ($userState -eq 'ABSENT_VERIFIED') `
+        -CanApplyUser ([bool]$canApplyUser)
+
+    $allowMachineCleanup = [bool]($plan.RemoveMachineConfiguration -and $script:OneDriveProtectionReady)
+    $allowUserCleanup = [bool]($plan.RemoveUserConfiguration -and $script:OneDriveProtectionReady)
+    if (-not $script:OneDriveProtectionReady -and ($plan.RemoveMachineConfiguration -or $plan.RemoveUserConfiguration -or $plan.RemoveMachineRemnants -or $plan.RemoveUserRemnants)) {
+        Write-Log "Sync-root protection inventory is incomplete; configuration and remnant deletion deferred."
+        $script:HadDeferrals = $true
+    }
+
+    if ($allowMachineCleanup) {
         foreach ($path in @('HKLM:\SOFTWARE\Microsoft\OneDrive','HKLM:\SOFTWARE\WOW6432Node\Microsoft\OneDrive')) {
             try {
                 $keyState = Remove-RegistryEntryIfPresent -Path $path
-                Write-Log "OneDrive configuration key removal: $keyState"
+                Write-Log "Machine OneDrive configuration key removal: $keyState"
             } catch {
-                Write-Log "OneDrive configuration key removal failed: $(Get-RegistryErrorReason $_)"
+                Write-Log "Machine OneDrive configuration key removal failed: $(Get-RegistryErrorReason $_)"
                 $script:HadErrors = $true
             }
         }
+    } else {
+        Write-Log "Machine OneDrive configuration preserved: no positive machine evidence or incomplete protection."
     }
-}
 
-# Step 3: allowlisted remnant cleanup (no ownership or ACL changes, no
-# deletion-on-reboot entries). Content under %USERPROFILE%\OneDrive and every
-# custom sync root are protected by Remove-OneDriveRemnant.
-if (-not $oneDriveRunning) {
-    Write-Log "Starting allowlisted remnant cleanup"
+    if ($allowUserCleanup) {
+        foreach ($path in @(($userRegistryHive + '\SOFTWARE\Microsoft\OneDrive'), ($userRegistryHive + '\SOFTWARE\WOW6432Node\Microsoft\OneDrive'))) {
+            try {
+                $keyState = Remove-RegistryEntryIfPresent -Path $path
+                Write-Log "User OneDrive configuration key removal: $keyState"
+            } catch {
+                Write-Log "User OneDrive configuration key removal failed: $(Get-RegistryErrorReason $_)"
+                $script:HadErrors = $true
+            }
+        }
+    } else {
+        Write-Log "User OneDrive configuration preserved: no verified user absence or incomplete protection."
+    }
 
-    if ($machineUninstalled -or $machineAbsent) {
+    # Step 4: allowlisted remnant cleanup, only with positive scope evidence and
+    # a complete sync-root protection inventory.
+    if ($plan.RemoveMachineRemnants -and $allowMachineCleanup) {
         foreach ($path in @((Join-Path $env:ProgramFiles 'Microsoft OneDrive'), (Join-Path $env:ProgramData 'Microsoft OneDrive'), (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\OneDrive.lnk'))) {
             try {
                 $remnantState = Remove-OneDriveRemnant -Path $path -AllowedRoots @($remnantRoots) -ProtectedRoots @($syncRoots)
@@ -1514,35 +2639,23 @@ if (-not $oneDriveRunning) {
             }
         }
     }
-
-    if (-not $userScopedPresent) {
-        if ($userRegistryHive) {
-            foreach ($path in @(($userRegistryHive + '\SOFTWARE\Microsoft\OneDrive'), ($userRegistryHive + '\SOFTWARE\WOW6432Node\Microsoft\OneDrive'))) {
-                try {
-                    $keyState = Remove-RegistryEntryIfPresent -Path $path
-                    Write-Log "User OneDrive configuration key removal: $keyState"
-                } catch {
-                    Write-Log "User OneDrive configuration key removal failed: $(Get-RegistryErrorReason $_)"
-                    $script:HadErrors = $true
-                }
+    if ($plan.RemoveUserRemnants -and $allowUserCleanup) {
+        foreach ($path in @((Join-Path $userProfilePath 'AppData\Local\Microsoft\OneDrive'), (Join-Path $userProfilePath 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk'))) {
+            try {
+                $remnantState = Remove-OneDriveRemnant -Path $path -AllowedRoots @($remnantRoots) -ProtectedRoots @($syncRoots)
+                Write-Log "OneDrive allowlisted user path: $remnantState"
+            } catch {
+                Write-Log "OneDrive user remnant preserved: $(Get-RegistryErrorReason $_)"
+                $script:HadErrors = $true
             }
         }
-        if ($userProfilePath) {
-            foreach ($path in @((Join-Path $userProfilePath 'AppData\Local\Microsoft\OneDrive'), (Join-Path $userProfilePath 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\OneDrive.lnk'))) {
-                try {
-                    $remnantState = Remove-OneDriveRemnant -Path $path -AllowedRoots @($remnantRoots) -ProtectedRoots @($syncRoots)
-                    Write-Log "OneDrive allowlisted user path: $remnantState"
-                } catch {
-                    Write-Log "OneDrive user remnant preserved: $(Get-RegistryErrorReason $_)"
-                    $script:HadErrors = $true
-                }
-            }
-        }
-    } else {
-        Write-Log "User-scope OneDrive remnants are preserved while a user-scope installation is registered"
+    }
+    if (-not ($plan.RemoveMachineRemnants -or $plan.RemoveUserRemnants)) {
+        Write-Log "OneDrive remnants preserved: no positive same-scope evidence."
     }
 }
 
+if (-not $oneDriveBusy -and $null -ne $plan -and $allowMachineCleanup) {
 # OneDrive Explorer navigation pane entry: idempotent and verified.
 $oneDriveClsid = "{018D5C66-4533-4307-9B53-224DE2ED1FE6}"
 foreach ($key in @(
@@ -1593,86 +2706,46 @@ catch {
     Write-Log "Failed to check scheduled tasks: $($_.Exception.Message)"
     $script:HadErrors = $true
 }
+} else {
+    Write-Log "OneDrive Explorer namespace and scheduled tasks preserved: no positive machine evidence or OneDrive is busy."
+}
 
 # Configure the Default user registry to prevent OneDrive auto-install on new
-# profiles. Unique mount name, no regedit termination, always unloaded, and the
-# marker is written only after verified success.
-$markerKey = 'HKLM:\SOFTWARE\Autounattend\OneDriveRemoval'
-$markerState = $null
-try { $markerState = Get-RegistryEntryState -Path $markerKey -Name 'DefaultUserConfigured' } catch { $markerState = $null }
-if ($null -eq $markerState) {
-    Write-Log "Default user marker could not be read; step deferred to avoid repeating an unverified configuration"
-    $script:HadErrors = $true
-} elseif ($markerState.ValueExists) {
-    Write-Log "Default user already configured on this machine, skipping this step."
-} else {
-    Write-Log "Configuring registry to prevent OneDrive auto-install for new users"
-    $defaultHivePath = 'C:\Users\Default\NTUSER.DAT'
-    if (-not (Test-Path -LiteralPath $defaultHivePath)) {
-        Write-Log "Default user hive not found; step skipped"
-    } else {
-        $mountName = 'TMPC_Default_' + [Guid]::NewGuid().ToString('N')
-        $mounted = $false
-        $configured = $false
-        try {
-            reg.exe load ("HKEY_USERS\$mountName") $defaultHivePath 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw 'READ_DENIED' }
-            $mounted = $true
-
-            $runKey = "Registry::HKEY_USERS\$mountName\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
-            $runState = Get-RegistryEntryState -Path $runKey -Name 'OneDriveSetup'
-            if ($runState.ValueExists) {
-                $null = Remove-RegistryEntryIfPresent -Path $runKey -Name 'OneDriveSetup'
-                Write-Log "Removed the default user OneDriveSetup Run entry"
-            }
-
-            $thdfKey = "Registry::HKEY_USERS\$mountName\SOFTWARE\Microsoft\OneDrive"
-            $thdfState = Get-RegistryEntryState -Path $thdfKey -Name 'EnableTHDFFeatures'
-            if ($thdfState.ValueExists -and $thdfState.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $thdfState.Value -eq 0) {
-                $configured = $true
-                Write-Log "Default user OneDrive policy already compliant"
-            } else {
-                if (-not $thdfState.PathExists) { New-Item -Path $thdfKey -Force -ErrorAction Stop | Out-Null }
-                Set-ItemProperty -Path $thdfKey -Name 'EnableTHDFFeatures' -Type DWord -Value 0 -Force -ErrorAction Stop
-                $thdfAfter = Get-RegistryEntryState -Path $thdfKey -Name 'EnableTHDFFeatures'
-                if ($thdfAfter.ValueExists -and $thdfAfter.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $thdfAfter.Value -eq 0) {
-                    $configured = $true
-                    Write-Log "Default user OneDrive policy staged and verified"
-                } else {
-                    throw 'VERIFY_FAILED'
-                }
-            }
-        } catch {
-            Write-Log "Default user configuration failed: $(Get-RegistryErrorReason $_)"
-            $script:HadErrors = $true
-        } finally {
-            if ($mounted) {
-                [GC]::Collect()
-                [GC]::WaitForPendingFinalizers()
-                reg.exe unload ("HKEY_USERS\$mountName") 2>&1 | Out-Null
-            }
+# profiles. The helper verifies unload and writes the marker only afterwards.
+if (-not $oneDriveBusy) {
+    try {
+        $defaultPolicy = Invoke-DefaultOneDrivePolicy
+    } catch {
+        $defaultPolicy = 'FAILED'
+        Write-Log "Default user OneDrive configuration raised an unexpected error; marker not written"
+    }
+    switch ($defaultPolicy) {
+        'APPLIED' { Write-Log "Default user OneDrive configuration applied and marked" }
+        'ALREADY_COMPLIANT' { Write-Log "Default user OneDrive configuration already compliant" }
+        'DEFERRED' {
+            Write-Log "Default user OneDrive configuration deferred without declaring success"
+            $script:HadDeferrals = $true
         }
-
-        if ($configured) {
-            try {
-                if (-not (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Autounattend')) { New-Item -Path 'HKLM:\SOFTWARE\Autounattend' -Force -ErrorAction Stop | Out-Null }
-                if (-not (Test-Path -LiteralPath $markerKey)) { New-Item -Path $markerKey -Force -ErrorAction Stop | Out-Null }
-                Set-ItemProperty -Path $markerKey -Name 'DefaultUserConfigured' -Type String -Value (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Force -ErrorAction Stop
-                $markerAfter = Get-RegistryEntryState -Path $markerKey -Name 'DefaultUserConfigured'
-                if (-not $markerAfter.ValueExists) { throw 'VERIFY_FAILED' }
-                Write-Log "Default user configuration completed and marked"
-            } catch {
-                Write-Log "Default user configuration completed but the marker could not be written: $(Get-RegistryErrorReason $_)"
-                $script:HadErrors = $true
-            }
+        default {
+            Write-Log "Default user OneDrive configuration failed; marker not written"
+            $script:HadErrors = $true
         }
     }
+} else {
+    Write-Log "Default user OneDrive configuration deferred because OneDrive is running or its state is unknown."
+    $script:HadDeferrals = $true
 }
 
 if ($script:HadErrors) {
     Write-Log "OneDrive removal completed with one or more real operation failures"
     Write-Host "OneDrive removal completed with errors. See $logFile for details."
     exit 1
+}
+
+if ($script:HadDeferrals) {
+    Write-Log "OneDrive removal completed with deferred operations; no success is claimed"
+    Write-Host "OneDrive removal deferred. See $logFile for details."
+    exit 2
 }
 
 Write-Log "OneDrive removal completed successfully"
@@ -1697,12 +2770,18 @@ exit 0
     )
 
     foreach ($script in $scriptsToExecute) {
+        $scriptStatus = 'FAILED'
         if (Test-Path $script.Path) {
             Write-Log "Executing $($script.Name) script once..." "INFO"
             try {
                 $process = Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass -NoProfile -File `"$($script.Path)`"" -Wait -NoNewWindow -PassThru -ErrorAction Stop
                 if ($process.ExitCode -eq 0) {
+                    $scriptStatus = 'SUCCESS'
                     Write-Log "$($script.Name) execution completed with exit code 0" "SUCCESS"
+                } elseif ($process.ExitCode -eq 2) {
+                    $scriptStatus = 'DEFERRED'
+                    $script:CustomizationDeferred = $true
+                    Write-Log "$($script.Name) execution completed with deferred operations (exit code 2)" "WARNING"
                 } else {
                     $script:CustomizationHadErrors = $true
                     Write-Log "$($script.Name) execution failed with exit code $($process.ExitCode)" "ERROR"
@@ -1711,7 +2790,11 @@ exit 0
                 $script:CustomizationHadErrors = $true
                 Write-Log "$($script.Name) execution failed: $($_.Exception.Message)" "ERROR"
             }
+        } else {
+            $script:CustomizationHadErrors = $true
+            Write-Log "$($script.Name) script is missing; execution not possible" "ERROR"
         }
+        if ($script.Name -eq 'BloatRemoval') { $script:BloatStatus = $scriptStatus } else { $script:OneDriveStatus = $scriptStatus }
     }
 
     Write-Log "Windows Apps removal configuration completed" "SUCCESS"
@@ -2093,6 +3176,73 @@ Windows Registry Editor Version 5.00
         Write-Log "UserCustomizations scheduled task could not be registered after 3 attempts; the initial HKCU bridge is not guaranteed" "ERROR"
     }
 
+    # Execution identity is written to the protected HKLM state before the
+    # final SYSTEM status is calculated. It is setup metadata, not a profile
+    # inventory value, so it is written and verified explicitly. A failure here
+    # makes the phase non-successful and prevents cleanup authorization.
+    $setupExecutionId = [Guid]::NewGuid().ToString('N')
+    try {
+        $executionKey = 'HKLM:\SOFTWARE\Autounattend'
+        if (-not (Test-Path -LiteralPath $executionKey)) { New-Item -Path $executionKey -Force -ErrorAction Stop | Out-Null }
+        Set-ItemProperty -LiteralPath $executionKey -Name 'SetupExecutionId' -Type String -Value $setupExecutionId -Force -ErrorAction Stop
+        $executionState = Get-RegistryEntryState -Path $executionKey -Name 'SetupExecutionId'
+        if (-not ($executionState.ValueExists -and $executionState.Kind -eq [Microsoft.Win32.RegistryValueKind]::String -and [string]$executionState.Value -eq $setupExecutionId)) {
+            throw 'VERIFY_FAILED'
+        }
+    } catch {
+        $script:CustomizationHadErrors = $true
+        Write-Log "Setup execution identity could not be persisted: $(Get-RegistryErrorReason $_)" "ERROR"
+    }
+
+    $systemPhaseStatus = 'SUCCESS'
+    if ($script:CustomizationHadErrors) {
+        if ($script:BloatStatus -eq 'FAILED' -and $script:OneDriveStatus -eq 'FAILED') {
+            $systemPhaseStatus = 'FAILED'
+        } else {
+            $systemPhaseStatus = 'PARTIAL_SUCCESS'
+        }
+    } elseif ($script:CustomizationDeferred -or $script:BloatStatus -eq 'DEFERRED' -or $script:OneDriveStatus -eq 'DEFERRED') {
+        $systemPhaseStatus = 'DEFERRED'
+    }
+
+    try {
+        $null = Write-TMPCSetupSummary -Reset -Values @{
+            SchemaVersion       = 1
+            Profile             = 'TMPC-Windows-11-Optimization'
+            Revision            = 'R2-local'
+            ExecutionId         = $setupExecutionId
+            SystemPhase         = $systemPhaseStatus
+            SystemHadErrors     = [bool]$script:CustomizationHadErrors
+            SystemDeferred      = [bool]$script:CustomizationDeferred
+            BloatStatus         = [string]$script:BloatStatus
+            OneDriveStatus      = [string]$script:OneDriveStatus
+            UserTaskRegistration = if ($taskRegistrationSucceeded) { 'SUCCESS' } else { 'FAILED' }
+            HkcUserPhase        = 'PENDING'
+            HkcHadErrors        = $false
+            HkcDeferred         = $false
+            HkcAttempts         = 0
+            HkcOutcome          = 'PENDING'
+            HkcRetryExhausted   = $false
+            HkcReason           = ''
+            CleanupStatus       = 'PENDING'
+            CleanupAttempts     = 0
+            CleanupReason       = ''
+            CleanupTimestampUtc = ''
+            OverallStatus       = 'UNKNOWN_OR_INTERRUPTED'
+        }
+        Write-Log "Setup result summary persisted for the SYSTEM phase" "SUCCESS"
+    } catch {
+        $script:CustomizationHadErrors = $true
+        try {
+            Remove-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Autounattend' -Name 'SetupExecutionId' -ErrorAction Stop
+        } catch {
+            try {
+                Set-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Autounattend' -Name 'SetupExecutionId' -Type String -Value 'INVALID' -Force -ErrorAction Stop
+            } catch { }
+        }
+        Write-Log "Setup result summary could not be persisted; execution identity invalidated and cleanup will not be registered" "ERROR"
+    }
+
 
     # ============================================================================
     # ADD YOUR SYSTEM WIDE POWERSHELL SCRIPT CONTENTS BELOW
@@ -2106,7 +3256,17 @@ Windows Registry Editor Version 5.00
 
 if ($UserCustomizations) {
 
-    $runningAsSystem = ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18')
+    $currentSid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+    if ($ExpectedSid) {
+        if (-not (Test-TMPCIdentityMatch -ExpectedSid $ExpectedSid -ActualSid $currentSid)) {
+            Write-Log "User phase identity mismatch; no HKCU changes were made" "ERROR"
+            exit 3
+        }
+    } else {
+        Write-Log "User phase started without an expected SID; using the current process identity" "INFO"
+    }
+
+    $runningAsSystem = ($currentSid -eq 'S-1-5-18')
 
     if ($runningAsSystem) {
         # ================================================================
@@ -2120,26 +3280,50 @@ if ($UserCustomizations) {
             New-PSDrive -PSProvider Registry -Name HKU -Root HKEY_USERS -ErrorAction SilentlyContinue | Out-Null
         }
 
-        # Waits up to 2 minutes for an interactive session; failure exits without marking.
-        $targetUser = $null
+        # Waits up to 2 minutes for one unambiguous interactive identity. No
+        # fallback to the first account, profile or path is allowed.
+        $identity = $null
         for ($attempt = 1; $attempt -le 12; $attempt++) {
-            $targetUser = Get-TargetUser
-            if ($targetUser) { break }
-            Write-Log "Waiting for user login (attempt $attempt/12)..." "INFO"
+            $identity = Get-TMPCInteractiveIdentity
+            if ($identity.Status -eq 'OK') { break }
+            Write-Log "Waiting for an unambiguous interactive identity (attempt $attempt/12): $($identity.Status)" "INFO"
             Start-Sleep -Seconds 10
         }
-        if (-not $targetUser) {
-            Write-Log "No logged-in user detected after 2 minutes, will retry at next logon" "WARNING"
+
+        if (-not $identity -or $identity.Status -ne 'OK') {
+            $identityStatus = if ($identity) { $identity.Status } else { 'UNKNOWN_OR_INTERRUPTED' }
+            Write-Log "User customizations deferred: interactive identity status $identityStatus" "WARNING"
+            $phaseState = Get-TMPCUserPhaseState
+            if (-not $phaseState.Available) {
+                try {
+                    $null = Update-TMPCUserPhaseSummary -Phase 'FAILED' -HadErrors $true -Deferred $false -Attempts $phaseState.Attempts -Outcome 'UNKNOWN' -RetryExhausted $true -Reason 'STATE_UNAVAILABLE'
+                } catch { Write-Log "Could not persist the unavailable user-phase state." "ERROR" }
+                $null = Remove-TMPCAutounattendUserCustomizationsTask
+                exit 1
+            }
+            $nextAttempt = $phaseState.Attempts + 1
+            $exhausted = ($nextAttempt -ge 3)
+            try {
+                Set-TMPCUserPhaseState -Attempts ([Math]::Min($nextAttempt, 3)) -Outcome 'DEFERRED' -ExitCode 1
+            } catch {
+                Write-Log "Could not persist the deferred user-phase attempt." "ERROR"
+            }
+            try {
+                $phase = if ($exhausted) { 'FAILED' } else { 'DEFERRED' }
+                $null = Update-TMPCUserPhaseSummary -Phase $phase -HadErrors $exhausted -Deferred (-not $exhausted) -Attempts ([Math]::Min($nextAttempt, 3)) -Outcome 'DEFERRED' -RetryExhausted $exhausted -Reason 'DEFERRED_IDENTITY'
+            } catch {
+                Write-Log "Could not update the setup summary for the deferred user phase." "WARNING"
+            }
+            if ($exhausted) {
+                Write-Log "User phase retry limit reached while waiting for an interactive identity; no further automatic attempts will run." "ERROR"
+                $null = Remove-TMPCAutounattendUserCustomizationsTask
+            }
             exit 1
         }
 
-        $targetUserSID = Get-UserSID -Username $targetUser
-        if (-not $targetUserSID) {
-            Write-Log "Failed to get SID for user: $targetUser" "ERROR"
-            exit 1
-        }
-
-        Write-Log "Target user: $targetUser (SID: $targetUserSID)" "INFO"
+        $targetUserSid = $identity.Sid
+        $targetSessionId = $identity.SessionId
+        Write-Log "Interactive identity verified for session $targetSessionId" "INFO"
 
         # Check completion marker via HKU (no PSDrive remap needed)
         $markerPath = "HKU:\$targetUserSID\Software\Autounattend"
@@ -2158,7 +3342,24 @@ if ($UserCustomizations) {
         # Startup cleanup (SYSTEM): unregisters itself, deletes C:\ProgramData\Autounattend and
         # HKLM\SOFTWARE\Autounattend. Registered and verified only after a successful pass.
         function Register-AutounattendCleanupTask {
-            $cleanupCommand = "Unregister-ScheduledTask -TaskName 'AutounattendCleanup' -TaskPath '\Autounattend\' -Confirm:`$false -ErrorAction SilentlyContinue; Start-Sleep -Seconds 5; Remove-Item -LiteralPath 'C:\ProgramData\Autounattend' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath 'HKLM:\SOFTWARE\Autounattend' -Recurse -Force -ErrorAction SilentlyContinue"
+            $summary = Read-TMPCSetupSummary
+            if ($null -eq $summary) { throw "Setup summary is missing or invalid; cleanup cannot be registered." }
+            if (-not (Test-TMPCSetupSummarySchema -Summary $summary -ExpectedRevision 'R2-local')) {
+                throw "Setup summary schema or phase state is invalid; cleanup cannot be registered."
+            }
+            if (-not (Test-TMPCSetupExecutionIdentity -Summary $summary -RegistryExecutionId (Get-TMPCSetupExecutionId))) {
+                throw "Setup summary does not belong to this execution; cleanup cannot be registered."
+            }
+            if ([string]$summary.HkcUserPhase -ne 'SUCCESS') {
+                throw "HKCU phase is not verified as successful; cleanup cannot be registered."
+            }
+            $summaryPath = Get-TMPCSetupSummaryPath
+            $directoryAcl = Get-TMPCAclSnapshot -Path (Split-Path -Parent $summaryPath)
+            $fileAcl = Get-TMPCAclSnapshot -Path $summaryPath
+            if (-not (Test-TMPCDiagnosticAclSnapshot -DirectorySnapshot $directoryAcl -FileSnapshot $fileAcl)) {
+                throw "Diagnostic ACL is not trusted; cleanup cannot be registered."
+            }
+            $cleanupCommand = Get-TMPCCleanupCommand
             $cleanupAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -Command `"$cleanupCommand`""
             $cleanupTrigger = New-ScheduledTaskTrigger -AtStartup
             $cleanupSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
@@ -2172,6 +3373,42 @@ if ($UserCustomizations) {
             Write-Log "User customizations have already been applied for this user" "INFO"
             Write-Log "To re-apply, delete: HKCU\Software\Autounattend\$markerName" "INFO"
             Write-Log "No restart needed - customizations were already applied" "INFO"
+
+            $phaseState = Get-TMPCUserPhaseState
+            $verifiedAttempts = [Math]::Max(1, [int]$phaseState.Attempts)
+            try {
+                Set-TMPCUserPhaseState -Attempts ([Math]::Min($verifiedAttempts, 3)) -Outcome 'SUCCESS' -ExitCode 0
+            } catch {
+                Write-Log "Could not persist the verified success state; the marker remains authoritative." "WARNING"
+            }
+            try {
+                $null = Update-TMPCUserPhaseSummary -Phase 'SUCCESS' -HadErrors $false -Deferred $false -Attempts ([Math]::Min($verifiedAttempts, 3)) -Outcome 'SUCCESS' -RetryExhausted $false -Reason 'MARKER_VERIFIED'
+            } catch {
+                $script:CustomizationHadErrors = $true
+                Write-Log "Could not persist the HKCU success phase; cleanup was not registered" "ERROR"
+                exit 1
+            }
+
+            # Register cleanup while the one-shot task still exists; the
+            # cleanup command defers if the one-shot task remains after an
+            # interruption.
+            $cleanupTaskVerified = $false
+            try {
+                Register-AutounattendCleanupTask
+                $cleanupTask = Get-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -ErrorAction Stop
+                if (-not $cleanupTask) {
+                    throw "AutounattendCleanup was not found after registration."
+                }
+                $cleanupTaskVerified = $true
+                Write-Log "Registered and verified setup cleanup task during recovery" "SUCCESS"
+            } catch {
+                $script:CustomizationHadErrors = $true
+                Write-Log "Could not register or verify the cleanup task during recovery: $($_.Exception.Message)" "ERROR"
+            }
+
+            if (-not $cleanupTaskVerified) {
+                exit 1
+            }
 
             $userTaskRemoved = $false
             try {
@@ -2187,7 +3424,82 @@ if ($UserCustomizations) {
                 Write-Log "Could not safely remove the one-shot user customization task during recovery: $($_.Exception.Message)" "ERROR"
             }
 
-            if ($userTaskRemoved) {
+            if (-not $userTaskRemoved) {
+                try {
+                    $cleanupTask = Get-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -ErrorAction SilentlyContinue
+                    if ($cleanupTask) {
+                        Unregister-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -Confirm:$false -ErrorAction Stop
+                    }
+                } catch {
+                    Write-Log "Could not remove the cleanup task after the recovery one-shot removal failure" "WARNING"
+                }
+                exit 1
+            }
+        } else {
+            # Success path: the child applies HKCU. The one-shot task is removed and verified
+            # while the marker is kept; cleanup is registered and verified before the marker is
+            # removed. Any failure keeps or restores a coherent retry state and exits without
+            # rebooting.
+            $phaseState = Get-TMPCUserPhaseState
+            if (-not $phaseState.Available) {
+                try {
+                    $null = Update-TMPCUserPhaseSummary -Phase 'FAILED' -HadErrors $true -Deferred $false -Attempts $phaseState.Attempts -Outcome 'UNKNOWN' -RetryExhausted $true -Reason 'STATE_UNAVAILABLE'
+                } catch { Write-Log "Could not persist the unavailable user-phase state." "ERROR" }
+                $null = Remove-TMPCAutounattendUserCustomizationsTask
+                Write-Log "User phase state is unavailable; no HKCU child was launched and retries are stopped." "ERROR"
+                exit 1
+            }
+            $retryDecision = Get-TMPCUserRetryDecision -MarkerApplied $false -Attempts $phaseState.Attempts -LastOutcome $phaseState.Outcome -MaxAttempts 3
+            if ($retryDecision -ne 'RUN') {
+                $retryReason = if ($retryDecision -eq 'EXHAUSTED') { 'RETRY_LIMIT_REACHED' } else { 'PERMANENT_PREVIOUS_OUTCOME' }
+                try {
+                    $null = Update-TMPCUserPhaseSummary -Phase 'FAILED' -HadErrors $true -Deferred $false -Attempts $phaseState.Attempts -Outcome $phaseState.Outcome -RetryExhausted $true -Reason $retryReason
+                } catch { Write-Log "Could not persist the terminal user-phase state." "ERROR" }
+                $null = Remove-TMPCAutounattendUserCustomizationsTask
+                Write-Log ("User phase will not retry: {0} (attempts {1}, outcome {2})." -f $retryReason, $phaseState.Attempts, $phaseState.Outcome) "ERROR"
+                exit 1
+            }
+            $userPhaseAttempt = $phaseState.Attempts + 1
+            try {
+                Set-TMPCUserPhaseState -Attempts $userPhaseAttempt -Outcome 'PENDING' -ExitCode 0
+            } catch {
+                try {
+                    $null = Update-TMPCUserPhaseSummary -Phase 'FAILED' -HadErrors $true -Deferred $false -Attempts $phaseState.Attempts -Outcome 'UNKNOWN' -RetryExhausted $true -Reason 'STATE_WRITE_FAILED'
+                } catch { Write-Log "Could not persist the user-phase state failure." "ERROR" }
+                $null = Remove-TMPCAutounattendUserCustomizationsTask
+                Write-Log "User phase attempt state could not be persisted; no HKCU child was launched." "ERROR"
+                exit 1
+            }
+            Write-Log "Launching child process as interactive user to apply customizations (attempt $userPhaseAttempt/3)..." "INFO"
+            # Grant the verified SID write access to the log; the account name is
+            # not used as an identity.
+            icacls $LogPath /grant "*${targetUserSid}:(M)" 2>&1 | Out-Null
+            $scriptPath = $MyInvocation.MyCommand.Path
+            $cmdLine = "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"$scriptPath`" -UserCustomizations -ExpectedSid $targetUserSid"
+            $success = Start-ProcessAsUser -CommandLine $cmdLine -TargetSessionId $targetSessionId -ExpectedSid $targetUserSid
+            $childExitCode = if ($success) { 0 } elseif ($script:LastChildExitCode -ne 0) { [int]$script:LastChildExitCode } else { -1 }
+            $childOutcome = Get-TMPCUserPhaseOutcome -ExitCode $childExitCode -HadErrors (-not $success) -Deferred $false
+            try {
+                Set-TMPCUserPhaseState -Attempts $userPhaseAttempt -Outcome $childOutcome -ExitCode $childExitCode
+            } catch {
+                Write-Log "Could not persist the final user-phase attempt state." "ERROR"
+            }
+
+            if ($success -and $childOutcome -eq 'SUCCESS') {
+                Write-Log "Child process completed successfully" "SUCCESS"
+
+                try {
+                    $null = Update-TMPCUserPhaseSummary -Phase 'SUCCESS' -HadErrors $false -Deferred $false -Attempts $userPhaseAttempt -Outcome 'SUCCESS' -RetryExhausted $false -Reason 'CHILD_SUCCESS'
+                } catch {
+                    $script:CustomizationHadErrors = $true
+                    Write-Log "Could not persist the HKCU success phase; cleanup was not registered" "ERROR"
+                    exit 1
+                }
+
+                # Register cleanup while the one-shot task still exists. If the
+                # process is interrupted after this point, the cleanup task
+                # detects the remaining one-shot task and defers instead of
+                # deleting the scripts it needs.
                 $cleanupTaskVerified = $false
                 try {
                     Register-AutounattendCleanupTask
@@ -2196,42 +3508,20 @@ if ($UserCustomizations) {
                         throw "AutounattendCleanup was not found after registration."
                     }
                     $cleanupTaskVerified = $true
-                    Write-Log "Registered and verified one-shot setup cleanup task" "SUCCESS"
+                    Write-Log "Registered and verified setup cleanup task before removing the one-shot task" "SUCCESS"
                 } catch {
-                    $script:CustomizationHadErrors = $true
-                    Write-Log "Could not register or verify the cleanup task during recovery: $($_.Exception.Message)" "ERROR"
+                    Write-Log "Could not register or verify the cleanup task: $($_.Exception.Message)" "ERROR"
                 }
 
                 if (-not $cleanupTaskVerified) {
-                    try {
-                        Register-AutounattendUserCustomizationsTask
-                        $restoredTask = Get-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -ErrorAction Stop
-                        if (-not $restoredTask) {
-                            throw "AutounattendUserCustomizations was not found after the restore attempt."
-                        }
-                        Write-Log "Restored and verified one-shot user customization task so recovery can retry at next logon" "SUCCESS"
-                    } catch {
-                        Write-Log "Could not restore the one-shot user customization task after cleanup failure: $($_.Exception.Message)" "ERROR"
-                    }
+                    # The one-shot task is still registered and the marker stays
+                    # at 1, so the next logon can retry. No cleanup was accepted.
+                    $script:CustomizationHadErrors = $true
+                    Write-Log "Cleanup task was not registered and verified; one-shot retry remains and no reboot will happen" "ERROR"
+                    exit 1
                 }
-            }
-        } else {
-            # Success path: the child applies HKCU. The one-shot task is removed and verified
-            # while the marker is kept; cleanup is registered and verified before the marker is
-            # removed. Any failure keeps or restores a coherent retry state and exits without
-            # rebooting.
-            Write-Log "Launching child process as interactive user to apply customizations..." "INFO"
-            # Grant user write access to log file so child process can log
-            icacls $LogPath /grant "${targetUser}:(M)" 2>&1 | Out-Null
-            $scriptPath = $MyInvocation.MyCommand.Path
-            $cmdLine = "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"$scriptPath`" -UserCustomizations"
-            $success = Start-ProcessAsUser -CommandLine $cmdLine
 
-            if ($success) {
-                Write-Log "Child process completed successfully" "SUCCESS"
-
-                # This task is intentionally one-shot. Remove and verify it first; the marker is
-                # kept until the cleanup task is registered and verified.
+                # Remove and verify the one-shot task only after cleanup exists.
                 $userTaskRemoved = $false
                 try {
                     Unregister-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -Confirm:$false -ErrorAction Stop
@@ -2246,58 +3536,19 @@ if ($UserCustomizations) {
                 }
 
                 if (-not $userTaskRemoved) {
-                    # The marker stays at 1 and the still-registered one-shot retries at next logon.
+                    # Keep the one-shot retry coherent: remove the cleanup task
+                    # (best effort) so it cannot delete the script first. The
+                    # cleanup command also checks for the one-shot task.
                     $script:CustomizationHadErrors = $true
-                    Write-Log "One-shot user customization task was not safely removed; no cleanup was registered and no reboot will happen" "ERROR"
-                    exit 1
-                }
-
-                # Clean the temporary setup scripts/logs on next startup as SYSTEM, then delete the
-                # cleanup task itself. The marker is still present, so cleanup must be registered
-                # and verified before the marker is removed; on failure the one-shot task is
-                # restored so the next logon retries.
-                $cleanupTaskVerified = $false
-                try {
-                    Register-AutounattendCleanupTask
-                    $cleanupTask = Get-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -ErrorAction Stop
-                    if (-not $cleanupTask) {
-                        throw "AutounattendCleanup was not found after registration."
-                    }
-                    $cleanupTaskVerified = $true
-                    Write-Log "Registered and verified one-shot setup cleanup task" "SUCCESS"
-                } catch {
-                    Write-Log "Could not register or verify the cleanup task: $($_.Exception.Message)" "ERROR"
-                }
-
-                if (-not $cleanupTaskVerified) {
-                    # Restore a coherent retry state: remove any unverified cleanup task, keep the
-                    # marker at 1 and register the one-shot task again. No reboot.
-                    $script:CustomizationHadErrors = $true
-                    $retryRestored = $false
                     try {
-                        $dubiousCleanup = Get-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -ErrorAction SilentlyContinue
-                        if ($dubiousCleanup) {
+                        $cleanupTask = Get-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -ErrorAction SilentlyContinue
+                        if ($cleanupTask) {
                             Unregister-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -Confirm:$false -ErrorAction Stop
-                            $dubiousCleanup = Get-ScheduledTask -TaskName "AutounattendCleanup" -TaskPath "\Autounattend\" -ErrorAction SilentlyContinue
-                            if ($dubiousCleanup) {
-                                throw "AutounattendCleanup is still registered after the unregister attempt."
-                            }
-                            Write-Log "Removed unverified cleanup task before restoring the one-shot task" "WARNING"
                         }
-                        Register-AutounattendUserCustomizationsTask
-                        $restoredTask = Get-ScheduledTask -TaskName "AutounattendUserCustomizations" -TaskPath "\Autounattend\" -ErrorAction Stop
-                        if (-not $restoredTask) {
-                            throw "AutounattendUserCustomizations was not found after the restore attempt."
-                        }
-                        $retryRestored = $true
-                        Write-Log "Restored and verified one-shot user customization task so retry can happen at next logon" "SUCCESS"
                     } catch {
-                        Write-Log "Could not restore a coherent retry state after the cleanup failure: $($_.Exception.Message)" "ERROR"
+                        Write-Log "Could not remove the cleanup task after the one-shot removal failure" "WARNING"
                     }
-                    if (-not $retryRestored) {
-                        Write-Log "Cleanup failure recovery could not be verified; no automatic recovery can be claimed" "ERROR"
-                    }
-                    Write-Log "Cleanup task was not registered and verified; no reboot will happen" "ERROR"
+                    Write-Log "One-shot user customization task remains registered; cleanup was withdrawn and no reboot will happen" "ERROR"
                     exit 1
                 }
 
@@ -2356,7 +3607,29 @@ if ($UserCustomizations) {
                 Write-Log "Rebooting system to apply user customizations..." "INFO"
                 shutdown.exe /r /t 20
             } else {
-                Write-Log "Child process failed or timed out - will retry at next logon" "ERROR"
+                $retryExhausted = ($userPhaseAttempt -ge 3 -or $childOutcome -in @('PERMANENT', 'NOT_APPLICABLE'))
+                $failureReason = switch ($childOutcome) {
+                    'PERMANENT' { 'PERMANENT_ERROR' }
+                    'NOT_APPLICABLE' { 'NOT_APPLICABLE' }
+                    'DEFERRED' { 'DEFERRED_IDENTITY' }
+                    'TRANSIENT' { 'TRANSIENT_ERROR' }
+                    default { 'UNKNOWN_OUTCOME' }
+                }
+                if ($retryExhausted -and $childOutcome -notin @('PERMANENT', 'NOT_APPLICABLE')) { $failureReason = 'RETRY_LIMIT_REACHED' }
+                Write-Log ("Child process outcome {0} (exit {1}); retryExhausted={2}." -f $childOutcome, $childExitCode, $retryExhausted) "ERROR"
+                try {
+                    $failurePhase = if ($childOutcome -eq 'DEFERRED') { 'DEFERRED' } else { 'FAILED' }
+                    $failureDeferred = ($failurePhase -eq 'DEFERRED')
+                    $null = Update-TMPCUserPhaseSummary -Phase $failurePhase -HadErrors (-not $failureDeferred) -Deferred $failureDeferred -Attempts $userPhaseAttempt -Outcome $childOutcome -RetryExhausted $retryExhausted -Reason $failureReason
+                } catch {
+                    Write-Log "Could not persist the HKCU failure phase" "ERROR"
+                }
+                if ($retryExhausted) {
+                    Write-Log "No further automatic HKCU attempts will run; the one-shot task is removed and the failure stays visible in the setup summary." "ERROR"
+                    $null = Remove-TMPCAutounattendUserCustomizationsTask
+                } else {
+                    Write-Log "A bounded automatic retry remains available at the next logon." "WARNING"
+                }
                 exit 1
             }
         }
@@ -2365,6 +3638,15 @@ if ($UserCustomizations) {
         # User path: apply HKCU entries (natural resolution, no remap)
         # ================================================================
         Write-Log "UserCustomizations running as user" "INFO"
+        $script:TrackAppliedOperations = $true
+        try {
+            Initialize-TMPCAppliedOperations
+        } catch {
+            $script:CustomizationHadErrors = $true
+            $script:PermanentErrorCount++
+            Write-Log "Completed-operation state could not be loaded safely; no HKCU changes were made" "ERROR"
+            exit 3
+        }
 
         $markerPath = "HKCU:\Software\Autounattend"
         $markerName = "UserCustomizationsApplied"
@@ -2661,6 +3943,22 @@ namespace Autounattend
             }
 
             $quietHoursPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current\default$windows.data.donotdisturb.quiethourssettings\windows.data.donotdisturb.quiethourssettings'
+            $quietHoursCheckpoint = 'QuietHoursApplied'
+            $quietHoursSkip = $false
+            try {
+                $quietHoursState = Get-RegistryEntryState -Path $markerPath -Name $quietHoursCheckpoint
+                if ($quietHoursState.ValueExists -and $quietHoursState.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and [int]$quietHoursState.Value -eq 1) {
+                    $quietHoursSkip = $true
+                }
+            } catch {
+                $script:CustomizationHadErrors = $true
+                $script:PermanentErrorCount++
+                $quietHoursSkip = $true
+                Write-Log "Quiet Hours completion state could not be read safely; the existing preference was preserved" "ERROR"
+            }
+            if ($quietHoursSkip) {
+                Write-Log "Quiet Hours was already completed by TMPC; the existing preference is preserved on this retry" "INFO"
+            } else {
             try {
                 $quietHoursProvenOff = $false
                 $nativeResult = Disable-QuietHoursNative
@@ -2699,10 +3997,13 @@ namespace Autounattend
 
                 if (-not $quietHoursProvenOff) {
                     $script:CustomizationHadErrors = $true
+                } else {
+                    Set-RegistryValue -Path $markerPath -Name $quietHoursCheckpoint -Type 'DWord' -Value 1 -Description 'Quiet Hours completed by TMPC; preserve the user preference on retries'
                 }
             } catch {
                 $script:CustomizationHadErrors = $true
                 Write-Log "Failed to disable Windows Do Not Disturb: $($_.Exception.Message)" "ERROR"
+            }
             }
 
             # ============================================================================
@@ -2846,7 +4147,22 @@ namespace Autounattend
             $downloadsTopViewHkcu = "$downloadsHkcu\TopViews\$downloadsTopViewId"
             $downloadsHklmRegPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes\$downloadsFolderTypeId"
             $downloadsHkcuRegPath = "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes\$downloadsFolderTypeId"
-
+            $downloadsCheckpoint = 'DownloadsViewApplied'
+            $downloadsSkip = $false
+            try {
+                $downloadsState = Get-RegistryEntryState -Path $markerPath -Name $downloadsCheckpoint
+                if ($downloadsState.ValueExists -and $downloadsState.Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and [int]$downloadsState.Value -eq 1) {
+                    $downloadsSkip = $true
+                }
+            } catch {
+                $script:CustomizationHadErrors = $true
+                $script:PermanentErrorCount++
+                $downloadsSkip = $true
+                Write-Log "Downloads view completion state could not be read safely; existing views were preserved" "ERROR"
+            }
+            if ($downloadsSkip) {
+                Write-Log "Downloads folder view was already completed by TMPC; existing saved views are preserved on this retry" "INFO"
+            } else {
             try {
                 if (-not (Test-Path -Path $downloadsHklm)) {
                     throw "Windows Downloads FolderType was not found: $downloadsHklm"
@@ -2894,9 +4210,11 @@ namespace Autounattend
                 }
 
                 Write-Log "Configured the per-user Downloads folder view default without grouping (FolderType override, GroupBy empty)" "SUCCESS"
+                Set-RegistryValue -Path $markerPath -Name $downloadsCheckpoint -Type 'DWord' -Value 1 -Description 'Downloads folder view completed by TMPC; preserve saved views on retries'
             } catch {
                 $script:CustomizationHadErrors = $true
                 Write-Log "Failed to configure the per-user Downloads folder view default: $($_.Exception.Message)" "ERROR"
+            }
             }
 
             # ============================================================================
@@ -3045,6 +4363,7 @@ namespace Autounattend
                     Write-Log "Note: User customizations will not run again unless $markerPath\$markerName is deleted" "INFO"
                 } catch {
                     $script:CustomizationHadErrors = $true
+                    $script:PermanentErrorCount++
                     Write-Log "Failed to create completion marker: $($_.Exception.Message)" "ERROR"
                 }
             }
@@ -3062,8 +4381,761 @@ if ($script:CustomizationHadErrors) {
 Write-Log "================================================================================" "INFO"
 
 if ($script:CustomizationHadErrors -and $UserCustomizations) {
+    if ($script:PermanentErrorCount -gt 0) { exit 3 }
     exit 1
 }
 ]]></File>
+    <File path="C:\ProgramData\Autounattend\Unattend\Scripts\NetworkGuard.ps1"><![CDATA[#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Temporarily disables network adapters during OOBE and restores only the
+    adapters that TMPC disabled, after OOBE has completed.
+.DESCRIPTION
+    The previous administrative state is persisted in a machine registry key
+    before any adapter is changed. Adapters are identified by InterfaceGuid and
+    the restore plan never enables an adapter that was not disabled by TMPC.
+    A recovery task is registered only when the first restore attempt leaves
+    present adapters disabled; it runs at logon, requires OOBE to be complete,
+    is bounded and unregisters itself after success. No AtStartup task and no
+    indiscriminate enable-all path is used.
+.NOTES
+    Windows PowerShell 5.1. No downloads, no reboots, no personal data.
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('Disable', 'Restore', 'Recover')]
+    [string]$Mode
+)
+
+$ErrorActionPreference = 'Stop'
+$script:StateKey = 'HKLM:\SOFTWARE\TMPC-Windows-11-Optimization\NetworkRestore'
+$script:RecoveryDir = 'C:\ProgramData\TMPC-Windows-11-Optimization'
+$script:RecoveryScript = 'C:\ProgramData\TMPC-Windows-11-Optimization\NetworkGuard.ps1'
+$script:RecoveryTaskName = 'TMPCNetworkRestoreRecovery'
+$script:RecoveryTaskPath = '\TMPC\'
+$script:MaxRecoveryAttempts = 5
+$script:LogPath = 'C:\ProgramData\TMPC-Windows-11-Optimization\Logs\NetworkGuard.log'
+
+function Write-NetworkLog {
+    param([string]$Message, [ValidateSet('INFO', 'SUCCESS', 'WARNING', 'ERROR')][string]$Level = 'INFO')
+    try {
+        $directory = Split-Path -Parent $script:LogPath
+        if (-not (Test-Path -LiteralPath $directory)) { New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop | Out-Null }
+        $line = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+        Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 -ErrorAction Stop
+    } catch { }
+}
+
+function Test-TMPCPrivilegedSid {
+    param([string]$Sid)
+    if ([string]::IsNullOrWhiteSpace($Sid)) { return $false }
+    if ($Sid -in @('S-1-5-18', 'S-1-5-32-544', 'S-1-3-0', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')) { return $true }
+    if ($Sid -match '^S-1-5-21-\d+-\d+-\d+-(512|519)$') { return $true }
+    return $false
+}
+
+function Get-TMPCNetworkStateAclSnapshot {
+    param([string]$Path)
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $ownerSid = [string]$acl.Owner
+    try { $ownerSid = ([System.Security.Principal.NTAccount]::new([string]$acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { }
+    $rules = @()
+    foreach ($rule in @($acl.Access)) {
+        $identity = [string]$rule.IdentityReference
+        try { $identity = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { }
+        $rules += [pscustomobject]@{
+            Identity = [string]$identity
+            Rights   = [int]$rule.RegistryRights
+            Type     = [string]$rule.AccessControlType
+        }
+    }
+    return [pscustomobject]@{ OwnerSid = [string]$ownerSid; Rules = @($rules) }
+}
+
+function Test-TMPCNetworkStateAclSnapshot {
+    param($Snapshot)
+    if ($null -eq $Snapshot) { return $false }
+    if (-not (Test-TMPCPrivilegedSid -Sid ([string]$Snapshot.OwnerSid))) { return $false }
+    $unsafe = [int]([System.Security.AccessControl.RegistryRights]::SetValue -bor
+        [System.Security.AccessControl.RegistryRights]::CreateSubKey -bor
+        [System.Security.AccessControl.RegistryRights]::Delete -bor
+        [System.Security.AccessControl.RegistryRights]::ChangePermissions -bor
+        [System.Security.AccessControl.RegistryRights]::TakeOwnership)
+    foreach ($rule in @($Snapshot.Rules)) {
+        if ([string]$rule.Type -ne 'Allow') { continue }
+        if (Test-TMPCPrivilegedSid -Sid ([string]$rule.Identity)) { continue }
+        if (([int]$rule.Rights -band $unsafe) -ne 0) { return $false }
+    }
+    return $true
+}
+
+# File-system ACL controls for the recovery script. They mirror the summary
+# controls in SystemCustomizations.ps1: effective Allow rules are evaluated with
+# numeric FileSystemRights masks, the owner must be privileged and reparse
+# points are rejected. Ancestors may grant the standard create-folder right;
+# the recovery directory and script must not grant any non-privileged write,
+# append, delete, permission or ownership change.
+function Get-TMPCNetworkFileAclSnapshot {
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $ownerSid = [string]$acl.Owner
+    try { $ownerSid = ([System.Security.Principal.NTAccount]::new([string]$acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { }
+    $rules = @()
+    foreach ($rule in @($acl.Access)) {
+        $identity = [string]$rule.IdentityReference
+        try { $identity = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { }
+        $rules += [pscustomobject]@{
+            Identity  = [string]$identity
+            Rights    = [int]$rule.FileSystemRights
+            Type      = [string]$rule.AccessControlType
+            Inherited = [bool]$rule.IsInherited
+        }
+    }
+    return [pscustomobject]@{
+        Path        = [string]$item.FullName
+        Exists      = $true
+        IsContainer = [bool]$item.PSIsContainer
+        IsReparse   = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+        OwnerSid    = [string]$ownerSid
+        Rules       = @($rules)
+    }
+}
+
+function Test-TMPCNetworkPathAclSnapshot {
+    param($Snapshot, [ValidateSet('Ancestor', 'Directory', 'File')][string]$Kind)
+    if ($null -eq $Snapshot -or -not $Snapshot.Exists) { return $false }
+    if ([bool]$Snapshot.IsReparse) { return $false }
+    if ($Kind -eq 'Directory' -and -not [bool]$Snapshot.IsContainer) { return $false }
+    if ($Kind -eq 'File' -and [bool]$Snapshot.IsContainer) { return $false }
+    if (-not (Test-TMPCPrivilegedSid -Sid ([string]$Snapshot.OwnerSid))) { return $false }
+    $rights = [System.Security.AccessControl.FileSystemRights]
+    $unsafe = switch ($Kind) {
+        'Ancestor' {
+            [int]($rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor
+                $rights::ChangePermissions -bor $rights::TakeOwnership -bor
+                $rights::WriteData -bor $rights::WriteAttributes -bor
+                $rights::WriteExtendedAttributes)
+        }
+        'Directory' {
+            [int]($rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor
+                $rights::ChangePermissions -bor $rights::TakeOwnership -bor
+                $rights::WriteData -bor $rights::AppendData -bor
+                $rights::WriteAttributes -bor $rights::WriteExtendedAttributes)
+        }
+        default {
+            [int]($rights::WriteData -bor $rights::AppendData -bor
+                $rights::WriteAttributes -bor $rights::WriteExtendedAttributes -bor
+                $rights::Delete -bor $rights::ChangePermissions -bor $rights::TakeOwnership)
+        }
+    }
+    foreach ($rule in @($Snapshot.Rules)) {
+        if ([string]$rule.Type -ne 'Allow') { continue }
+        if (Test-TMPCPrivilegedSid -Sid ([string]$rule.Identity)) { continue }
+        if (@($rule.PSObject.Properties.Name) -notcontains 'Rights') { return $false }
+        if (([int]$rule.Rights -band $unsafe) -ne 0) { return $false }
+    }
+    return $true
+}
+
+function Test-TMPCNetworkRecoveryLocationDecision {
+    param(
+        [object[]]$AncestorSnapshots,
+        $DirectorySnapshot,
+        $SourceDirectorySnapshot,
+        $SourceSnapshot,
+        $TargetSnapshot
+    )
+    foreach ($snapshot in @($AncestorSnapshots)) {
+        if (-not (Test-TMPCNetworkPathAclSnapshot -Snapshot $snapshot -Kind 'Ancestor')) {
+            return [pscustomobject]@{ Safe = $false; Reason = 'ANCESTOR_ACL_UNTRUSTED' }
+        }
+    }
+    if (-not (Test-TMPCNetworkPathAclSnapshot -Snapshot $DirectorySnapshot -Kind 'Directory')) {
+        return [pscustomobject]@{ Safe = $false; Reason = 'DESTINATION_DIRECTORY_UNTRUSTED' }
+    }
+    if (-not (Test-TMPCNetworkPathAclSnapshot -Snapshot $SourceDirectorySnapshot -Kind 'Directory')) {
+        return [pscustomobject]@{ Safe = $false; Reason = 'SOURCE_DIRECTORY_UNTRUSTED' }
+    }
+    if (-not (Test-TMPCNetworkPathAclSnapshot -Snapshot $SourceSnapshot -Kind 'File')) {
+        return [pscustomobject]@{ Safe = $false; Reason = 'SOURCE_SCRIPT_UNTRUSTED' }
+    }
+    if ($null -ne $TargetSnapshot -and -not (Test-TMPCNetworkPathAclSnapshot -Snapshot $TargetSnapshot -Kind 'File')) {
+        return [pscustomobject]@{ Safe = $false; Reason = 'DESTINATION_SCRIPT_UNTRUSTED' }
+    }
+    return [pscustomobject]@{ Safe = $true; Reason = 'TRUSTED' }
+}
+
+function Test-TMPCNetworkRecoveryLocation {
+    param([string]$SourcePath, [string]$RecoveryDirectory, [string]$RecoveryScript)
+    try {
+        if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) {
+            return [pscustomobject]@{ Safe = $false; Reason = 'SOURCE_SCRIPT_MISSING' }
+        }
+        if (-not (Test-Path -LiteralPath $RecoveryDirectory -PathType Container)) {
+            return [pscustomobject]@{ Safe = $false; Reason = 'DESTINATION_DIRECTORY_MISSING' }
+        }
+        $components = @()
+        $current = $RecoveryDirectory
+        while ($current) {
+            $components = @($current) + $components
+            $parent = Split-Path -Parent $current
+            if (-not $parent -or [string]::Equals($parent, $current, [StringComparison]::OrdinalIgnoreCase)) { break }
+            $current = $parent
+        }
+        $ancestors = @()
+        for ($i = 0; $i -lt $components.Count; $i++) {
+            $snapshot = Get-TMPCNetworkFileAclSnapshot -Path $components[$i]
+            if ($i -eq ($components.Count - 1)) { $directorySnapshot = $snapshot }
+            else { $ancestors += $snapshot }
+        }
+        $sourceDirectorySnapshot = Get-TMPCNetworkFileAclSnapshot -Path (Split-Path -Parent $SourcePath)
+        $sourceSnapshot = Get-TMPCNetworkFileAclSnapshot -Path $SourcePath
+        $targetSnapshot = $null
+        if (Test-Path -LiteralPath $RecoveryScript) { $targetSnapshot = Get-TMPCNetworkFileAclSnapshot -Path $RecoveryScript }
+        return Test-TMPCNetworkRecoveryLocationDecision -AncestorSnapshots @($ancestors) -DirectorySnapshot $directorySnapshot -SourceDirectorySnapshot $sourceDirectorySnapshot -SourceSnapshot $sourceSnapshot -TargetSnapshot $targetSnapshot
+    } catch {
+        return [pscustomobject]@{ Safe = $false; Reason = 'SECURITY_CHECK_FAILED' }
+    }
+}
+
+function Test-TMPCNetworkOobeComplete {
+    try {
+        $state = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' -Name 'ImageState' -ErrorAction Stop).ImageState
+        return ([string]$state -eq 'IMAGE_STATE_COMPLETE')
+    } catch { return $false }
+}
+
+function Test-TMPCNetworkStateSchema {
+    param($State)
+    if ($null -eq $State) { return $false }
+    foreach ($name in @('SchemaVersion', 'RequestId', 'Phase', 'CreatedUtc', 'UpdatedUtc', 'Adapters')) {
+        if (@($State.PSObject.Properties.Name) -notcontains $name) { return $false }
+    }
+    if ([int]$State.SchemaVersion -ne 1) { return $false }
+    $requestGuid = [Guid]::Empty
+    if (-not [Guid]::TryParse([string]$State.RequestId, [ref]$requestGuid) -or $requestGuid -eq [Guid]::Empty) { return $false }
+    if ([string]$State.Phase -notin @('PENDING_DISABLE', 'DISABLED', 'PARTIAL_DISABLE', 'RESTORE_PENDING', 'RESTORED', 'RESTORED_WITH_ABSENT')) { return $false }
+    $created = [DateTime]::MinValue
+    if (-not [DateTime]::TryParse([string]$State.CreatedUtc, [ref]$created)) { return $false }
+    foreach ($entry in @($State.Adapters)) {
+        if ($null -eq $entry) { return $false }
+        foreach ($name in @('InterfaceGuid', 'Description', 'PreviousStatus', 'DisableAttempted', 'DisabledByTmpc', 'RestoreStatus')) {
+            if (@($entry.PSObject.Properties.Name) -notcontains $name) { return $false }
+        }
+        $adapterGuid = [Guid]::Empty
+        if (-not [Guid]::TryParse([string]$entry.InterfaceGuid, [ref]$adapterGuid) -or $adapterGuid -eq [Guid]::Empty) { return $false }
+        if ($entry.DisableAttempted -isnot [bool] -or $entry.DisabledByTmpc -isnot [bool]) { return $false }
+        if ([string]$entry.RestoreStatus -notin @('PENDING', 'NOT_APPLIED', 'NOT_DISABLED', 'RESTORED_VERIFIED', 'ALREADY_ENABLED', 'ABSENT_NOT_RESTORED', 'RESTORE_FAILED')) { return $false }
+    }
+    return $true
+}
+
+function Get-TMPCNetworkAdapterGuid {
+    param($Adapter)
+    if ($null -eq $Adapter) { return $null }
+    $guid = [Guid]::Empty
+    if (-not [Guid]::TryParse([string]$Adapter.InterfaceGuid, [ref]$guid) -or $guid -eq [Guid]::Empty) { return $null }
+    return $guid.ToString()
+}
+
+function Get-TMPCNetworkDisablePlan {
+    param([object[]]$Adapters)
+    $selected = @()
+    $skipped = @()
+    foreach ($adapter in @($Adapters)) {
+        $guid = Get-TMPCNetworkAdapterGuid -Adapter $adapter
+        if (-not $guid) { $skipped += [pscustomobject]@{ InterfaceGuid = $null; Reason = 'INVALID_GUID' }; continue }
+        $status = [string]$adapter.Status
+        if ($status -eq 'Disabled') { $skipped += [pscustomobject]@{ InterfaceGuid = $guid; Reason = 'ALREADY_DISABLED' }; continue }
+        if ($status -eq 'Not Present') { $skipped += [pscustomobject]@{ InterfaceGuid = $guid; Reason = 'NOT_PRESENT' }; continue }
+        $selected += [pscustomobject]@{
+            InterfaceGuid   = $guid
+            Description       = [string]$adapter.InterfaceDescription
+            PreviousStatus    = $status
+            DisableAttempted  = $false
+            DisabledByTmpc    = $false
+            RestoreStatus     = 'PENDING'
+        }
+    }
+    return [pscustomobject]@{ Selected = @($selected); Skipped = @($skipped) }
+}
+
+function Get-TMPCNetworkRestorePlan {
+    param([object[]]$PersistedAdapters, [object[]]$CurrentAdapters, [bool]$OobeComplete)
+    if (-not $OobeComplete) {
+        return [pscustomobject]@{ Decision = 'DEFER'; Reason = 'OOBE_NOT_COMPLETE'; Actions = @() }
+    }
+    $actions = @()
+    foreach ($entry in @($PersistedAdapters)) {
+        if ($null -eq $entry) { continue }
+        $eligible = ($entry.DisabledByTmpc -eq $true) -or ($entry.DisableAttempted -eq $true)
+        if (-not $eligible) { continue }
+        $guid = Get-TMPCNetworkAdapterGuid -Adapter $entry
+        if (-not $guid) { $actions += [pscustomobject]@{ Action = 'INVALID'; InterfaceGuid = $null; Reason = 'INVALID_GUID' }; continue }
+        $current = @($CurrentAdapters | Where-Object { $_ -and [string]::Equals((Get-TMPCNetworkAdapterGuid -Adapter $_), $guid, [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1)
+        if ($current.Count -eq 0) {
+            $actions += [pscustomobject]@{ Action = 'ABSENT'; InterfaceGuid = $guid; Reason = 'ADAPTER_NOT_PRESENT' }
+            continue
+        }
+        $status = [string]$current[0].Status
+        if ($status -eq 'Disabled') {
+            $actions += [pscustomobject]@{ Action = 'ENABLE'; InterfaceGuid = $guid; Reason = 'DISABLED_BY_TMPC' }
+        } elseif ($status -eq 'Not Present') {
+            $actions += [pscustomobject]@{ Action = 'ABSENT'; InterfaceGuid = $guid; Reason = 'ADAPTER_NOT_PRESENT' }
+        } else {
+            $actions += [pscustomobject]@{ Action = 'ALREADY_ENABLED'; InterfaceGuid = $guid; Reason = 'STATE_PRESERVED' }
+        }
+    }
+    if ($actions.Count -eq 0) { return [pscustomobject]@{ Decision = 'NO_ACTION'; Reason = 'NOTHING_TO_RESTORE'; Actions = @() } }
+    return [pscustomobject]@{ Decision = 'RESTORE'; Reason = 'TMPC_ADAPTERS_PENDING'; Actions = @($actions) }
+}
+
+function Read-TMPCNetworkState {
+    if (-not (Test-Path -LiteralPath $script:StateKey)) { return $null }
+    $acl = $null
+    try { $acl = Get-TMPCNetworkStateAclSnapshot -Path $script:StateKey } catch { throw 'STATE_ACL_UNREADABLE' }
+    if (-not (Test-TMPCNetworkStateAclSnapshot -Snapshot $acl)) { throw 'STATE_ACL_UNTRUSTED' }
+    $json = $null
+    try { $json = [string](Get-ItemProperty -LiteralPath $script:StateKey -Name 'State' -ErrorAction Stop).State } catch { throw 'STATE_READ_FAILED' }
+    try { $state = $json | ConvertFrom-Json } catch { throw 'STATE_INVALID' }
+    if (-not (Test-TMPCNetworkStateSchema -State $state)) { throw 'STATE_INVALID' }
+    return $state
+}
+
+function Write-TMPCNetworkState {
+    param($State)
+    if (-not (Test-TMPCNetworkStateSchema -State $State)) { throw 'STATE_INVALID' }
+    $State.UpdatedUtc = (Get-Date).ToUniversalTime().ToString('o')
+    $json = $State | ConvertTo-Json -Depth 8 -Compress
+    if (-not (Test-Path -LiteralPath $script:StateKey)) {
+        New-Item -Path $script:StateKey -Force -ErrorAction Stop | Out-Null
+    }
+    $acl = Get-TMPCNetworkStateAclSnapshot -Path $script:StateKey
+    if (-not (Test-TMPCNetworkStateAclSnapshot -Snapshot $acl)) { throw 'STATE_ACL_UNTRUSTED' }
+    Set-ItemProperty -LiteralPath $script:StateKey -Name 'State' -Type String -Value $json -Force -ErrorAction Stop
+    $persisted = [string](Get-ItemProperty -LiteralPath $script:StateKey -Name 'State' -ErrorAction Stop).State
+    if (-not [string]::Equals($persisted, $json, [StringComparison]::Ordinal)) { throw 'STATE_VERIFY_FAILED' }
+    $parsed = $null
+    try { $parsed = $persisted | ConvertFrom-Json } catch { throw 'STATE_VERIFY_FAILED' }
+    if (-not (Test-TMPCNetworkStateSchema -State $parsed)) { throw 'STATE_VERIFY_FAILED' }
+}
+
+function Get-TMPCNetworkAdapterByGuid {
+    param([string]$InterfaceGuid)
+    try {
+        $match = @(Get-NetAdapter -InterfaceGuid $InterfaceGuid -ErrorAction Stop)
+        if ($match.Count -eq 0) { return $null }
+        return $match[0]
+    } catch { return $null }
+}
+
+function Update-TMPCNetworkEntry {
+    param($State, [string]$InterfaceGuid, [string]$RestoreStatus, [string]$ErrorCode)
+    foreach ($entry in @($State.Adapters)) {
+        if ([string]::Equals([string]$entry.InterfaceGuid, $InterfaceGuid, [StringComparison]::OrdinalIgnoreCase)) {
+            $entry.RestoreStatus = $RestoreStatus
+            if ($ErrorCode) { $entry | Add-Member -NotePropertyName 'Error' -NotePropertyValue $ErrorCode -Force }
+            return
+        }
+    }
+}
+
+function Invoke-TMPCNetworkDisable {
+    $adapters = @(Get-NetAdapter -ErrorAction Stop)
+    $plan = Get-TMPCNetworkDisablePlan -Adapters $adapters
+    $state = [pscustomobject]@{
+        SchemaVersion = 1
+        RequestId     = [Guid]::NewGuid().ToString('D')
+        Phase         = 'PENDING_DISABLE'
+        CreatedUtc    = (Get-Date).ToUniversalTime().ToString('o')
+        UpdatedUtc    = (Get-Date).ToUniversalTime().ToString('o')
+        Adapters      = @($plan.Selected)
+    }
+    try {
+        Write-TMPCNetworkState -State $state
+    } catch {
+        Write-NetworkLog ("Network state could not be persisted before disabling ($($_.Exception.Message)); no adapter was changed.") 'ERROR'
+        return 0
+    }
+    Write-NetworkLog ("Network disable plan: {0} adapter(s) selected, {1} preserved." -f @($plan.Selected).Count, @($plan.Skipped).Count) 'INFO'
+    foreach ($entry in @($state.Adapters)) {
+        $adapter = Get-TMPCNetworkAdapterByGuid -InterfaceGuid $entry.InterfaceGuid
+        if ($null -eq $adapter) {
+            Update-TMPCNetworkEntry -State $state -InterfaceGuid $entry.InterfaceGuid -RestoreStatus 'NOT_APPLIED' -ErrorCode 'ADAPTER_NOT_FOUND'
+        } elseif ([string]$adapter.Status -eq 'Disabled') {
+            Update-TMPCNetworkEntry -State $state -InterfaceGuid $entry.InterfaceGuid -RestoreStatus 'NOT_DISABLED'
+        } else {
+            $entry.DisableAttempted = $true
+            try { Write-TMPCNetworkState -State $state } catch { Write-NetworkLog 'Network state could not be persisted before a disable attempt.' 'ERROR' }
+            try {
+                Disable-NetAdapter -InputObject $adapter -Confirm:$false -ErrorAction Stop
+                $after = Get-TMPCNetworkAdapterByGuid -InterfaceGuid $entry.InterfaceGuid
+                if ($null -ne $after -and [string]$after.Status -eq 'Disabled') {
+                    $entry.DisabledByTmpc = $true
+                    Update-TMPCNetworkEntry -State $state -InterfaceGuid $entry.InterfaceGuid -RestoreStatus 'PENDING'
+                } else {
+                    Update-TMPCNetworkEntry -State $state -InterfaceGuid $entry.InterfaceGuid -RestoreStatus 'NOT_APPLIED' -ErrorCode 'DISABLE_NOT_VERIFIED'
+                }
+            } catch {
+                Update-TMPCNetworkEntry -State $state -InterfaceGuid $entry.InterfaceGuid -RestoreStatus 'NOT_APPLIED' -ErrorCode 'DISABLE_FAILED'
+            }
+        }
+        try { Write-TMPCNetworkState -State $state } catch { Write-NetworkLog ("Network state update failed after an adapter attempt ($($_.Exception.Message)).") 'ERROR' }
+    }
+    $disabled = @($state.Adapters | Where-Object { $_.DisabledByTmpc -eq $true }).Count
+    $state.Phase = if ($disabled -eq @($state.Adapters).Count -and $disabled -gt 0) { 'DISABLED' } else { 'PARTIAL_DISABLE' }
+    try { Write-TMPCNetworkState -State $state } catch { Write-NetworkLog 'Final network disable state could not be verified.' 'ERROR' }
+    Write-NetworkLog ("Network adapters disabled by TMPC: {0}. Restoration is deferred until OOBE completes." -f $disabled) 'SUCCESS'
+    return 0
+}
+
+function Register-TMPCNetworkRecoveryTask {
+    try {
+        $location = Test-TMPCNetworkRecoveryLocation -SourcePath $PSCommandPath -RecoveryDirectory $script:RecoveryDir -RecoveryScript $script:RecoveryScript
+        if (-not $location.Safe) { throw "Recovery location is not trusted: $($location.Reason)." }
+        $sourceHash = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        Copy-Item -LiteralPath $PSCommandPath -Destination $script:RecoveryScript -Force -ErrorAction Stop
+        $afterCopy = Test-TMPCNetworkRecoveryLocation -SourcePath $PSCommandPath -RecoveryDirectory $script:RecoveryDir -RecoveryScript $script:RecoveryScript
+        if (-not $afterCopy.Safe) { throw "Recovery script destination is not trusted: $($afterCopy.Reason)." }
+        $copyHash = (Get-FileHash -LiteralPath $script:RecoveryScript -Algorithm SHA256 -ErrorAction Stop).Hash
+        if (-not [string]::Equals($sourceHash, $copyHash, [StringComparison]::OrdinalIgnoreCase)) { throw 'Recovery script copy verification failed.' }
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Mode Recover' -f $script:RecoveryScript)
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        Register-ScheduledTask -TaskName $script:RecoveryTaskName -TaskPath $script:RecoveryTaskPath -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null
+        $registered = Get-ScheduledTask -TaskName $script:RecoveryTaskName -TaskPath $script:RecoveryTaskPath -ErrorAction Stop
+        if (-not $registered) { throw 'Recovery task was not found after registration.' }
+        $actionOk = @($registered.Actions | Where-Object {
+            [string]::Equals([string]$_.Execute, 'powershell.exe', [StringComparison]::OrdinalIgnoreCase) -and
+            ([string]$_.Arguments).Contains($script:RecoveryScript)
+        }).Count -gt 0
+        if (-not $actionOk) { throw 'Recovery task action does not reference the verified script copy.' }
+        if (-not ([string]$registered.Principal.UserId -match '^(SYSTEM|S-1-5-18)$')) { throw 'Recovery task principal is not SYSTEM.' }
+        Write-NetworkLog 'Registered the conditional logon recovery task for pending network adapters after verifying the script source, destination, ACL and hash.' 'WARNING'
+        return $true
+    } catch {
+        Write-NetworkLog ("Recovery task could not be registered safely ($($_.Exception.Message)); use manual recovery instructions.") 'ERROR'
+        # Never leave an older task pointing at an unverified copy.
+        try {
+            $unsafeTask = Get-ScheduledTask -TaskName $script:RecoveryTaskName -TaskPath $script:RecoveryTaskPath -ErrorAction SilentlyContinue
+            if ($unsafeTask) { Unregister-ScheduledTask -TaskName $script:RecoveryTaskName -TaskPath $script:RecoveryTaskPath -Confirm:$false -ErrorAction Stop }
+        } catch {
+            Write-NetworkLog ("An existing unverified recovery task could not be removed ($($_.Exception.Message)); remove it manually.") 'WARNING'
+        }
+        return $false
+    }
+}
+
+function Remove-TMPCNetworkRecoveryTask {
+    try {
+        $task = Get-ScheduledTask -TaskName $script:RecoveryTaskName -TaskPath $script:RecoveryTaskPath -ErrorAction SilentlyContinue
+        if ($task) {
+            Unregister-ScheduledTask -TaskName $script:RecoveryTaskName -TaskPath $script:RecoveryTaskPath -Confirm:$false -ErrorAction Stop
+            $remaining = Get-ScheduledTask -TaskName $script:RecoveryTaskName -TaskPath $script:RecoveryTaskPath -ErrorAction SilentlyContinue
+            if ($remaining) { throw 'Recovery task still exists after unregister.' }
+        }
+        if (Test-Path -LiteralPath $script:RecoveryScript) { Remove-Item -LiteralPath $script:RecoveryScript -Force -ErrorAction Stop }
+        Write-NetworkLog 'Removed the network recovery task and its script copy.' 'INFO'
+    } catch {
+        Write-NetworkLog ("Network recovery cleanup did not complete ($($_.Exception.Message)); the task will retry or require manual removal.") 'WARNING'
+    }
+}
+
+function Invoke-TMPCNetworkRestore {
+    param([bool]$Recovery)
+    $state = $null
+    try { $state = Read-TMPCNetworkState } catch {
+        Write-NetworkLog ("Network restore state is not usable ($($_.Exception.Message)); no adapter is enabled automatically.") 'ERROR'
+        Write-NetworkLog 'Manual recovery: enable the required adapters in ncpa.cpl or Device Manager, then remove HKLM\SOFTWARE\TMPC-Windows-11-Optimization\NetworkRestore and the TMPC network recovery task.' 'WARNING'
+        if ($Recovery) {
+            try {
+                $task = Get-ScheduledTask -TaskName $script:RecoveryTaskName -TaskPath $script:RecoveryTaskPath -ErrorAction SilentlyContinue
+                if ($task) { Unregister-ScheduledTask -TaskName $script:RecoveryTaskName -TaskPath $script:RecoveryTaskPath -Confirm:$false -ErrorAction SilentlyContinue }
+            } catch { }
+        }
+        return 1
+    }
+    if ($null -eq $state) {
+        Write-NetworkLog 'No TMPC network restore state exists; nothing was changed.' 'INFO'
+        if ($Recovery) { Remove-TMPCNetworkRecoveryTask }
+        return 0
+    }
+    if ($state.Phase -in @('RESTORED', 'RESTORED_WITH_ABSENT')) {
+        Write-NetworkLog ('Network restore was already completed (phase {0}).' -f $state.Phase) 'INFO'
+        Remove-TMPCNetworkRecoveryTask
+        return 0
+    }
+    $oobeComplete = Test-TMPCNetworkOobeComplete
+    $adapters = @(Get-NetAdapter -ErrorAction Stop)
+    $plan = Get-TMPCNetworkRestorePlan -PersistedAdapters @($state.Adapters) -CurrentAdapters $adapters -OobeComplete $oobeComplete
+    if ($plan.Decision -eq 'DEFER') {
+        Write-NetworkLog 'Network restore is deferred: OOBE is not complete yet.' 'WARNING'
+        if ($Recovery) {
+            $state | Add-Member -NotePropertyName 'RecoveryAttempts' -NotePropertyValue ([int]$state.RecoveryAttempts + 1) -Force
+            try { Write-TMPCNetworkState -State $state } catch { }
+            if ([int]$state.RecoveryAttempts -ge $script:MaxRecoveryAttempts) {
+                Write-NetworkLog 'Network recovery retry limit reached before OOBE completed; manual recovery is required.' 'ERROR'
+                Remove-TMPCNetworkRecoveryTask
+            }
+        } else {
+            $null = Register-TMPCNetworkRecoveryTask
+        }
+        return 2
+    }
+    if ($plan.Decision -eq 'NO_ACTION') {
+        $state.Phase = 'RESTORED'
+        try { Write-TMPCNetworkState -State $state } catch { Write-NetworkLog 'Final network restore state could not be verified.' 'ERROR'; return 1 }
+        Write-NetworkLog 'No TMPC-disabled adapter needs restoration.' 'SUCCESS'
+        Remove-TMPCNetworkRecoveryTask
+        return 0
+    }
+    foreach ($action in @($plan.Actions)) {
+        switch ($action.Action) {
+            'ENABLE' {
+                $adapter = Get-TMPCNetworkAdapterByGuid -InterfaceGuid $action.InterfaceGuid
+                if ($null -eq $adapter) {
+                    Update-TMPCNetworkEntry -State $state -InterfaceGuid $action.InterfaceGuid -RestoreStatus 'ABSENT_NOT_RESTORED' -ErrorCode 'ADAPTER_NOT_FOUND'
+                } else {
+                    try {
+                        Enable-NetAdapter -InputObject $adapter -Confirm:$false -ErrorAction Stop
+                        $after = Get-TMPCNetworkAdapterByGuid -InterfaceGuid $action.InterfaceGuid
+                        if ($null -ne $after -and [string]$after.Status -ne 'Disabled') {
+                            Update-TMPCNetworkEntry -State $state -InterfaceGuid $action.InterfaceGuid -RestoreStatus 'RESTORED_VERIFIED'
+                        } else {
+                            Update-TMPCNetworkEntry -State $state -InterfaceGuid $action.InterfaceGuid -RestoreStatus 'RESTORE_FAILED' -ErrorCode 'ENABLE_NOT_VERIFIED'
+                        }
+                    } catch {
+                        Update-TMPCNetworkEntry -State $state -InterfaceGuid $action.InterfaceGuid -RestoreStatus 'RESTORE_FAILED' -ErrorCode 'ENABLE_FAILED'
+                    }
+                }
+            }
+            'ALREADY_ENABLED' { Update-TMPCNetworkEntry -State $state -InterfaceGuid $action.InterfaceGuid -RestoreStatus 'ALREADY_ENABLED' }
+            'ABSENT' { Update-TMPCNetworkEntry -State $state -InterfaceGuid $action.InterfaceGuid -RestoreStatus 'ABSENT_NOT_RESTORED' -ErrorCode 'ADAPTER_NOT_PRESENT' }
+            default { Update-TMPCNetworkEntry -State $state -InterfaceGuid $action.InterfaceGuid -RestoreStatus 'RESTORE_FAILED' -ErrorCode 'INVALID_ACTION' }
+        }
+        try { Write-TMPCNetworkState -State $state } catch { Write-NetworkLog 'Network state update failed during restore.' 'ERROR' }
+    }
+    $pending = @($state.Adapters | Where-Object { ($_.DisabledByTmpc -eq $true -or $_.DisableAttempted -eq $true) -and $_.RestoreStatus -notin @('RESTORED_VERIFIED', 'ALREADY_ENABLED', 'ABSENT_NOT_RESTORED', 'NOT_APPLIED', 'NOT_DISABLED') })
+    $absent = @($state.Adapters | Where-Object { $_.RestoreStatus -eq 'ABSENT_NOT_RESTORED' }).Count
+    if ($pending.Count -eq 0) {
+        $state.Phase = if ($absent -gt 0) { 'RESTORED_WITH_ABSENT' } else { 'RESTORED' }
+        try { Write-TMPCNetworkState -State $state } catch { Write-NetworkLog 'Final network restore state could not be verified.' 'ERROR'; return 1 }
+        if ($absent -gt 0) {
+            Write-NetworkLog ("Network restore verified for present adapters; {0} adapter(s) were not present and require manual enablement after reconnection." -f $absent) 'WARNING'
+        } else {
+            Write-NetworkLog 'Network adapters disabled by TMPC were restored and verified.' 'SUCCESS'
+        }
+        Remove-TMPCNetworkRecoveryTask
+        return 0
+    }
+    $state.Phase = 'RESTORE_PENDING'
+    try { Write-TMPCNetworkState -State $state } catch { Write-NetworkLog 'Pending network restore state could not be verified.' 'ERROR' }
+    Write-NetworkLog ("Network restore is pending for {0} adapter(s); manual recovery is also documented." -f $pending.Count) 'ERROR'
+    if ($Recovery) {
+        $state | Add-Member -NotePropertyName 'RecoveryAttempts' -NotePropertyValue ([int]$state.RecoveryAttempts + 1) -Force
+        try { Write-TMPCNetworkState -State $state } catch { }
+        if ([int]$state.RecoveryAttempts -ge $script:MaxRecoveryAttempts) {
+            Write-NetworkLog 'Network recovery retry limit reached; the recovery task is removed and manual recovery is required.' 'ERROR'
+            Remove-TMPCNetworkRecoveryTask
+        }
+    } else {
+        $null = Register-TMPCNetworkRecoveryTask
+    }
+    return 1
+}
+
+$exitCode = 1
+try {
+    switch ($Mode) {
+        'Disable' { $exitCode = Invoke-TMPCNetworkDisable }
+        'Restore' { $exitCode = Invoke-TMPCNetworkRestore -Recovery $false }
+        'Recover' { $exitCode = Invoke-TMPCNetworkRestore -Recovery $true }
+    }
+} catch {
+    Write-NetworkLog ("Network guard failed ({0}, HRESULT 0x{1:X8})." -f $_.Exception.GetType().Name, $_.Exception.HResult) 'ERROR'
+    $exitCode = 1
+}
+exit $exitCode]]></File>
+    <File path="C:\ProgramData\Autounattend\Unattend\Scripts\NetFx3.ps1"><![CDATA[#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Enables .NET Framework 3.5 from matching local Windows media without
+    downloads or reboots.
+.DESCRIPTION
+    The feature state is queried before any DISM call, the local sources\sxs
+    directory is validated for the NetFx3 payload, DISM exit code is checked,
+    and the final feature state is verified again. Outcomes distinguish an
+    already enabled feature, an applicable local source, a pending reboot, an
+    unavailable source and a real failure. The process always exits 0 so a
+    missing optional payload cannot block Windows Setup; the explicit status
+    file records the real outcome.
+.NOTES
+    Windows PowerShell 5.1. No Windows Update fallback and no automatic restart.
+#>
+[CmdletBinding()]
+param(
+    [switch]$AutoDetect
+)
+
+$ErrorActionPreference = 'Stop'
+$script:LogPath = 'C:\ProgramData\TMPC-Windows-11-Optimization\Logs\NetFx3.log'
+$script:StatusPath = 'C:\ProgramData\TMPC-Windows-11-Optimization\Logs\NetFx3Status.json'
+
+function Write-NetFx3Log {
+    param([string]$Message, [ValidateSet('INFO', 'SUCCESS', 'WARNING', 'ERROR')][string]$Level = 'INFO')
+    try {
+        $directory = Split-Path -Parent $script:LogPath
+        if (-not (Test-Path -LiteralPath $directory)) { New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop | Out-Null }
+        $line = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+        Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 -ErrorAction Stop
+    } catch { }
+}
+
+function Get-TMPCNetFx3SourceAssessment {
+    param(
+        [string]$Path,
+        [bool]$DirectoryExists,
+        [bool]$IsReparsePoint,
+        [string[]]$FileNames
+    )
+    if (-not $DirectoryExists) { return [pscustomobject]@{ Usable = $false; Status = 'SOURCE_NOT_FOUND'; Detail = 'sources\sxs is not present.' } }
+    if ($IsReparsePoint) { return [pscustomobject]@{ Usable = $false; Status = 'SOURCE_REPARSE'; Detail = 'sources\sxs is a reparse point.' } }
+    $payload = @($FileNames | Where-Object { $_ -and [string]::Equals([System.IO.Path]::GetExtension($_), '.cab', [StringComparison]::OrdinalIgnoreCase) -and $_ -match '^microsoft-windows-netfx3-ondemand-package.*\.cab$' })
+    if ($payload.Count -eq 0) {
+        return [pscustomobject]@{ Usable = $false; Status = 'SOURCE_PAYLOAD_MISSING'; Detail = 'No NetFx3 on-demand package CAB was found.' }
+    }
+    return [pscustomobject]@{ Usable = $true; Status = 'SOURCE_READY'; Detail = ('Found {0} NetFx3 package file(s).' -f $payload.Count) }
+}
+
+function Get-TMPCNetFx3Decision {
+    param(
+        [string]$InitialState,
+        [string]$SourceStatus,
+        [int]$DismExitCode,
+        [string]$FinalState,
+        [bool]$RestartNeeded
+    )
+    if ($InitialState -eq 'Enabled') { return 'ALREADY_ENABLED' }
+    if ($InitialState -eq 'EnablePending') { return 'PENDING_REBOOT' }
+    if ($InitialState -eq 'DisablePending') { return 'NOT_APPLICABLE' }
+    if ($InitialState -eq 'Unknown') { return 'UNKNOWN' }
+    if ($SourceStatus -ne 'SOURCE_READY') { return 'SOURCE_UNAVAILABLE' }
+    if ($FinalState -eq 'Enabled') { return 'APPLIED' }
+    if ($RestartNeeded -or $DismExitCode -eq 3010 -or $FinalState -eq 'EnablePending') { return 'PENDING_REBOOT' }
+    if ($DismExitCode -ne 0) { return 'FAILED' }
+    return 'FAILED'
+}
+
+function Get-TMPCNetFx3FeatureState {
+    try { return [string](Get-WindowsOptionalFeature -Online -FeatureName NetFx3 -ErrorAction Stop).State } catch { return 'Unknown' }
+}
+
+function Find-TMPCNetFx3Source {
+    foreach ($drive in @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+        $root = [string]$drive.Root
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        try {
+            $driveInfo = New-Object System.IO.DriveInfo ($root)
+            if ($driveInfo.DriveType -notin @('Fixed', 'Removable', 'CDRom')) { continue }
+        } catch { continue }
+        $source = Join-Path $root 'sources\sxs'
+        if (-not (Test-Path -LiteralPath $source -PathType Container)) { continue }
+        $isReparse = $false
+        try {
+            $item = Get-Item -LiteralPath $source -Force -ErrorAction Stop
+            $isReparse = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+        } catch { $isReparse = $true }
+        $names = @()
+        try { $names = @(Get-ChildItem -LiteralPath $source -Filter '*.cab' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) } catch { }
+        $assessment = Get-TMPCNetFx3SourceAssessment -Path $source -DirectoryExists $true -IsReparsePoint $isReparse -FileNames $names
+        if ($assessment.Usable) { return [pscustomobject]@{ Path = $source; Status = $assessment.Status; Detail = $assessment.Detail } }
+    }
+    return [pscustomobject]@{ Path = $null; Status = 'SOURCE_NOT_FOUND'; Detail = 'No local sources\sxs directory with the NetFx3 payload was found.' }
+}
+
+function Write-TMPCNetFx3Status {
+    param([hashtable]$Status)
+    try {
+        $directory = Split-Path -Parent $script:StatusPath
+        if (-not (Test-Path -LiteralPath $directory)) { New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop | Out-Null }
+        $json = ([ordered]@{
+            SchemaVersion = 1
+            Feature       = 'NetFx3'
+            Outcome       = [string]$Status.Outcome
+            InitialState  = [string]$Status.InitialState
+            FinalState    = [string]$Status.FinalState
+            SourceStatus  = [string]$Status.SourceStatus
+            SourcePath    = [string]$Status.SourcePath
+            DismExitCode  = [int]$Status.DismExitCode
+            RestartNeeded = [bool]$Status.RestartNeeded
+            TimestampUtc  = (Get-Date).ToUniversalTime().ToString('o')
+        }) | ConvertTo-Json -Depth 4
+        [IO.File]::WriteAllText($script:StatusPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        $persisted = [IO.File]::ReadAllText($script:StatusPath)
+        if (-not [string]::Equals($persisted, $json, [StringComparison]::Ordinal)) { throw 'Status read-back mismatch.' }
+    } catch {
+        Write-NetFx3Log ("NetFx3 status could not be persisted ({0})." -f $_.Exception.GetType().Name) 'ERROR'
+    }
+}
+
+$result = @{
+    Outcome       = 'UNKNOWN'
+    InitialState  = 'Unknown'
+    FinalState    = 'Unknown'
+    SourceStatus  = 'NOT_EVALUATED'
+    SourcePath    = ''
+    DismExitCode  = 0
+    RestartNeeded = $false
+}
+
+try {
+    $initialState = Get-TMPCNetFx3FeatureState
+    $result.InitialState = $initialState
+    Write-NetFx3Log ("NetFx3 initial feature state: {0}." -f $initialState) 'INFO'
+
+    if ($initialState -eq 'Enabled') {
+        $result.Outcome = 'ALREADY_ENABLED'
+        $result.FinalState = 'Enabled'
+        Write-NetFx3Log 'NetFx3 is already enabled; no installation was attempted.' 'SUCCESS'
+    } elseif ($initialState -in @('EnablePending', 'DisablePending')) {
+        $result.Outcome = if ($initialState -eq 'EnablePending') { 'PENDING_REBOOT' } else { 'NOT_APPLICABLE' }
+        $result.FinalState = $initialState
+        Write-NetFx3Log ("NetFx3 is in state {0}; no installation was attempted." -f $initialState) 'WARNING'
+    } elseif ($initialState -eq 'Disabled') {
+        $source = Find-TMPCNetFx3Source
+        $result.SourceStatus = $source.Status
+        $result.SourcePath = [string]$source.Path
+        if (-not $source.Path) {
+            $result.Outcome = 'SOURCE_UNAVAILABLE'
+            $result.FinalState = $initialState
+            Write-NetFx3Log ("A matching local sources\sxs payload was not found ({0}); no download was attempted." -f $source.Status) 'WARNING'
+        } else {
+            Write-NetFx3Log ("Using local NetFx3 source: {0}." -f $source.Path) 'INFO'
+            $dismArgs = @('/Online', '/Enable-Feature', '/FeatureName:NetFx3', '/All', '/LimitAccess', ('/Source:' + $source.Path), '/NoRestart')
+            & dism.exe @dismArgs 2>&1 | Out-Null
+            $dismCode = if ($null -eq $LASTEXITCODE) { -1 } else { [int]$LASTEXITCODE }
+            $result.DismExitCode = $dismCode
+            $finalState = Get-TMPCNetFx3FeatureState
+            $result.FinalState = $finalState
+            $restartNeeded = ($dismCode -eq 3010 -or $finalState -eq 'EnablePending')
+            $result.RestartNeeded = $restartNeeded
+            $result.Outcome = Get-TMPCNetFx3Decision -InitialState $initialState -SourceStatus 'SOURCE_READY' -DismExitCode $dismCode -FinalState $finalState -RestartNeeded $restartNeeded
+            $level = if ($result.Outcome -in @('APPLIED', 'PENDING_REBOOT')) { 'SUCCESS' } else { 'WARNING' }
+            Write-NetFx3Log ("NetFx3 DISM exit code {0}; final state {1}; outcome {2}." -f $dismCode, $finalState, $result.Outcome) $level
+        }
+    } else {
+        $result.Outcome = 'UNKNOWN'
+        Write-NetFx3Log 'NetFx3 feature state could not be determined; no installation was attempted.' 'ERROR'
+    }
+} catch {
+    $result.Outcome = 'FAILED'
+    Write-NetFx3Log ("NetFx3 local-source operation failed ({0}, HRESULT 0x{1:X8})." -f $_.Exception.GetType().Name, $_.Exception.HResult) 'ERROR'
+}
+
+Write-TMPCNetFx3Status -Status $result
+exit 0]]></File>
   </Extensions>
 </unattend>

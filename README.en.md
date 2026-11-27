@@ -82,13 +82,18 @@ matrix, logs and exit codes are in the
 
 ## Download
 
-Download the latest published version from
-[GitHub Releases](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases).
-The next planned publication is v0.3.0 and it is not available yet.
+The latest published version is **v0.3.0**, available from the
+[historical v0.3.0 release](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.3.0)
+and [GitHub Releases](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases).
+Its four published assets are `autounattend.xml`, `ventoy.json`,
+`Apply-TMPCOptimizations.ps1` and `SHA256SUMS.txt`.
 
-Releases include `autounattend.xml`, `ventoy.json` and `SHA256SUMS.txt` so you
-can verify the download. There is no executable installer or remote command
-such as `irm ... | iex`.
+The files in this repository that include the R1/R1.1/R2 blocks are a **local
+candidate after v0.3.0** and are not published yet. Do not present them as the
+v0.3.0 release or mix their hashes with the historical assets.
+
+Releases include `SHA256SUMS.txt` to verify the download. There is no executable
+installer or remote command such as `irm ... | iex`.
 
 ## Essential warning
 
@@ -105,11 +110,13 @@ such as `irm ... | iex`.
 ## Validation status
 
 - Static validation and isolated test suite: **PASS** in the documented state.
-- Clean 26H2 installation with the latest XML changes: **revalidation pending**.
+- Clean 26H2 installation with the latest XML changes: **revalidation pending**;
+  `RUNTIME_VALIDATION = NOT_TESTED`.
 - Standalone runtime on host hardware: **NOT_TESTED**.
 - Historical runtime evidence: v0.1.5 baseline on Windows 11 Pro 25H2.
-- `RUNTIME_PASS` is not claimed for the current baseline. The static validator
-  and isolated tests are not equivalent to a real optimizer run.
+- `RUNTIME_PASS` is not claimed for the current baseline or for the local R2
+  candidate. The static validator and isolated tests are not equivalent to a
+  real optimizer run.
 
 ## Complete documentation
 

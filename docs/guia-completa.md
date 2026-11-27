@@ -83,7 +83,9 @@ Funciones de Windows:
 
 - Windows Update se mantiene activo para actualizaciones de calidad y
   seguridad, pero los drivers distribuidos mediante Windows Update quedan
-  excluidos;
+  excluidos. `NoAutoRebootWithLoggedOnUsers` solo evita el reinicio automático
+  mientras hay usuarios con sesión iniciada; no impide que una actualización
+  requiera reiniciar ni sustituye la decisión del usuario;
 - Microsoft Defender se mantiene activo; solo se reducen las notificaciones no
   críticas de Seguridad de Windows;
 - Microsoft Store se mantiene disponible para instalar aplicaciones, reparar y
@@ -97,7 +99,9 @@ Funciones de Windows:
   (Windows puede volver a activarlo con sus propias reglas automáticas;
   consulta [Limitaciones conocidas](#limitaciones-conocidas));
 - Game Mode se activa; Game DVR y los servicios complementarios de Xbox Live
-  se desactivan;
+  se desactivan. El servicio Xbox Live se configura con inicio manual
+  (`Start = 3`): los juegos que lo necesiten pueden iniciarlo, pero no se
+  mantiene residente por defecto;
 - el plan de energía es el plan Balanced estándar de Windows; hibernación y
   Fast Startup se desactivan (las opciones Suspender y Hibernar se ocultan del
   menú de energía de Inicio, el bloqueo de Windows sigue disponible);
@@ -194,14 +198,17 @@ del medio de instalación y de las herramientas de recuperación de Windows.
 
 ## Descarga y versiones
 
-Descarga los archivos desde
-[GitHub Releases](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases).
-La siguiente publicación prevista es v0.3.0 y todavía no está disponible; hasta
-que se publique, usa la última versión que aparezca en Releases.
+La última versión publicada es **v0.3.0**. Descarga sus cuatro assets desde la
+[release histórica v0.3.0](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.3.0)
+o desde [GitHub Releases](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases):
+`autounattend.xml`, `ventoy.json`, `Apply-TMPCOptimizations.ps1` y
+`SHA256SUMS.txt`. Los assets publicados son inmutables y conservan sus hashes
+históricos.
 
-Las releases publican como mínimo `autounattend.xml`, `ventoy.json` y
-`SHA256SUMS.txt`. También puedes obtener los archivos desde el repositorio,
-pero la descarga directa de una release permite verificar el conjunto completo.
+Los archivos de este repositorio con los bloques R1/R1.1/R2 son un **candidato
+local posterior a v0.3.0**, no una release publicada. No atribuyas sus hashes a
+v0.3.0. La descarga directa de una release permite verificar el conjunto
+completo con `SHA256SUMS.txt`.
 
 Este proyecto no ofrece un instalador ejecutable ni un comando remoto del tipo
 `irm ... | iex`. Si ves instrucciones así atribuidas a TMPC, no las ejecutes.
@@ -398,6 +405,53 @@ Esta parte es importante. El comportamiento del baseline validado es:
 Considera la instalación terminada cuando alcances el escritorio final después
 del reinicio automático.
 
+### Robustez del primer arranque (bloques R2)
+
+- **Red:** `NetworkGuard.ps1` guarda antes de modificar nada el GUID y el estado
+  de cada adaptador. Solo deshabilita los que estaban activos y solo restaura
+  los que TMPC deshabilitó, después de que OOBE haya terminado. Nunca ejecuta un
+  `Get-NetAdapter | Enable-NetAdapter` indiscriminado. Si queda un adaptador
+  presente sin restaurar, registra una tarea de recuperación **AtLogOn**
+  acotada; no crea una tarea AtStartup incondicional. La recuperación manual
+  consiste en activar el adaptador en `ncpa.cpl` o el Administrador de
+  dispositivos y retirar la tarea `TMPCNetworkRestoreRecovery` si sigue
+  presente. Los adaptadores que ya estaban deshabilitados antes de TMPC se
+  conservan así. Antes de copiar el script y registrar la tarea de recuperación
+  se verifican propietario, ACL efectiva y ausencia de reparse points en el
+  origen, los ancestros y el destino; si no existe una ubicación segura
+  verificable, no se registra la tarea y se conserva la recuperación manual
+  documentada.
+- **Preferencias HKCU:** la tarea de un solo uso conserva la identidad
+  verificada, registra cada operación completada y no vuelve a escribirla en un
+  reintento. Los reintentos automáticos están limitados a tres; los resultados
+  transitorios, permanentes, diferidos y no aplicables se distinguen y se
+  reflejan en `SetupSummary.json`. Un fallo permanente o el límite de intentos
+  retira la tarea: TMPC no queda como aplicación residente ni oculta el fallo.
+  Las guardas de Quiet Hours y del override de `GroupBy` de Downloads se
+  mantienen y las preferencias ya completadas no se sobrescriben.
+- **.NET Framework 3.5:** `NetFx3.ps1` consulta primero la característica, valida
+  que `sources\sxs` contenga el paquete NetFx3, ejecuta DISM con
+  `/LimitAccess /NoRestart`, comprueba el código de salida y vuelve a leer el
+  estado final. Distingue ya habilitado, origen ausente, reinicio pendiente y
+  fallo real. No descarga nada ni reinicia el equipo. El standalone conserva
+  `-NetFx3Source` y aplica las mismas comprobaciones.
+- **Identidad y ámbitos:** la fase SYSTEM nunca escribe HKCU. La fase HKCU se
+  ejecuta en la sesión del usuario interactivo, con SID y token verificados; si
+  la identidad es ambigua o no coincide, se difiere sin usar la primera cuenta
+  ni la primera ruta de perfil como fallback. OneDrive mantiene evidencia
+  independiente de máquina y usuario: un éxito de usuario no autoriza limpieza
+  de máquina, y `UNKNOWN` nunca se interpreta como ausencia.
+- **Diagnóstico y cleanup:** el resumen verificable vive en
+  `C:\ProgramData\TMPC-Windows-11-Optimization\Logs`, con ACL de directorio,
+  archivo y directorio padre comprobadas mediante máscaras numéricas de
+  derechos. El cleanup solo borra `C:\ProgramData\Autounattend` y
+  `HKLM\SOFTWARE\Autounattend` con resumen íntegro y estado global `SUCCESS`;
+  en cualquier otro estado conserva la evidencia y los logs para diagnóstico.
+
+Estas rutas están implementadas y cubiertas por pruebas aisladas, pero no se
+han ejecutado en una instalación limpia real en este bloque:
+`RUNTIME_VALIDATION = NOT_TESTED`.
+
 ## Después de la instalación
 
 Después del escritorio final:
@@ -453,7 +507,7 @@ estática descrita más abajo ni una prueba runtime controlada.
 
 `autounattend.xml` sigue siendo la vía para instalación limpia. El archivo
 autocontenido [`Apply-TMPCOptimizations.ps1`](../Apply-TMPCOptimizations.ps1),
-versión standalone 0.2.1, ofrece una vía post-install **sin formatear**,
+versión standalone 0.2.2, ofrece una vía post-install **sin formatear**,
 derivada directamente del archivo de respuestas (v0.1.5 más los bloques
 26H2: política de pins de Inicio, contenido optimizado en la nube y vista de
 Todas las aplicaciones). No necesita otros archivos del repositorio,
@@ -596,7 +650,7 @@ Hashes del baseline documentado actual:
 
 ```text
 autounattend.xml
-2E85E8DD733434364AEFF17BFBB27A5869F771CB1C3DE1942722F8439D470B36
+0F48BE9ED9AF00039C5581687F1144EF084872FD7C5AF97C6749A8DEDE605F68
 
 ventoy.json
 058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B
@@ -626,6 +680,15 @@ con cada revisión del script y no forma parte del par XML/Ventoy del baseline.
   se aceptan como `NOT_RUNTIME_TESTED` y pueden requerir revalidación.
 - No se incluyen drivers específicos del hardware. Prepara tú mismo los
   drivers de chipset, red, audio y GPU.
+- .NET Framework 3.5 solo se habilita si Windows lo tiene deshabilitado y existe
+  un origen local `sources\sxs` con el paquete NetFx3 en el medio de instalación
+  o en `-NetFx3Source`. Si el origen no está disponible, TMPC no descarga nada y
+  registra el resultado; habilítalo después con un medio local o deja la
+  característica deshabilitada.
+- Hay operaciones no reversibles: el disco elegido se formatea, OneDrive se
+  elimina/bloquea y se aplican políticas de máquina. No hay rollback automático;
+  la recuperación depende de tu backup y del medio de instalación. Revisa el
+  perfil antes de usarlo.
 - El perfil no instala software de terceros.
 - `IQuietHoursSettings`, usada para desactivar "No molestar", es una interfaz
   COM interna no documentada; puede cambiar en futuras builds de Windows.
@@ -756,12 +819,34 @@ Estado técnico del baseline actual:
 - Estos cambios están validados estáticamente y cubiertos por la suite aislada;
   no se han ejecutado en una instalación limpia y el nuevo hash del XML no
   equivale al de ninguna versión probada anteriormente.
+- El bloque local R1 posterior a v0.3.0 (candidato no publicado) corrige H02,
+  H03, H05 y H06: identidad interactiva por SID de Explorer y `ProfileList` por
+  SID, con verificación del token y del token elevado vinculado; resumen
+  verificable de fases SYSTEM/HKCU y cleanup condicionado a éxito global;
+  estados OneDrive `PRESENT`/`ABSENT_VERIFIED`/`UNKNOWN` con ámbitos separados y
+  protección incompleta diferida; y desmontaje verificado del hive Default antes
+  de escribir el marcador con esquema `R1`. Está cubierto por pruebas aisladas;
+  `RUNTIME_VALIDATION = NOT_TESTED` y `N4_RUNTIME_VALIDATION = PENDING`.
+- El micro-BUILD local R1.1 consolida H03: ACL de propietario/permisos del
+  directorio y archivo de diagnóstico, identidad de ejecución en HKLM,
+  esquema/revisión y recálculo de `OverallStatus`, verificación por lectura
+  posterior y estados `PRESENT`/`ABSENT_VERIFIED`/`UNKNOWN` de la tarea
+  one-shot. El cleanup solo borra con `ABSENT_VERIFIED` y todas las
+  comprobaciones; `UNKNOWN` se reintenta de forma acotada. No es una release
+  publicada; el runtime sigue pendiente.
+- El bloque local R2 añade H01, H04 y H07: restauración de red por GUID
+  condicionada a OOBE, reintentos HKCU finitos con operaciones completadas
+  preservadas y NetFx3 con origen local validado, código DISM y estado final.
+  Las ACL del resumen usan máscaras numéricas y se comprueba el directorio
+  padre. Resultado real: suite aislada **73 OK / 0 FAIL**; validador estático
+  **416 OK / 0 FAIL / 1 WARN** (árbol sucio esperado). El candidato local no se
+  ha publicado y `RUNTIME_VALIDATION = NOT_TESTED`.
 
 Hashes de referencia del código:
 
 ```text
 Apply-TMPCOptimizations.ps1
-338F9E4E62AAA61DE90D20FDF396241EFBAA32E1C07A98A99BFEF3304ACA7118
+41528EF61D872AC5AA106E456C4A1F5933C988E5743A1FAAD3B12A0989AD774F
 ```
 
 ## Estructura del repositorio

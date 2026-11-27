@@ -130,6 +130,30 @@ On the real repository files:
 - `ventoy.json` is valid JSON.
 - The findings of the technical review of the customization flow are fixed
   and statically verified.
+- The local post-v0.3.0 R1 block fixes H02, H03, H05 and H06 with isolated
+  tests: SID/session identity and token verification; phase summary and cleanup
+  gated on global success; OneDrive `UNKNOWN` and incomplete-protection deferral
+  with independent scopes; and verified Default hive unload before the `R1`
+  marker. It is not a published release and its runtime validation is pending.
+- The R1.1 micro-build consolidates H03 with directory/file ACL checks, an
+  execution identity in HKLM, schema/revision validation, `OverallStatus`
+  recalculation, read-back verification, and `PRESENT`/`ABSENT_VERIFIED`/
+  `UNKNOWN` one-shot task states. Cleanup deletes only with `ABSENT_VERIFIED`
+  and every check passing; `UNKNOWN` is retried with a bounded limit.
+- The local R2 block adds H01 (network), H04 (HKCU retries) and H07 (NetFx3)
+  with isolated tests. Network changes are planned by GUID, preserve the prior
+  state and restore only what TMPC disabled after OOBE; recovery is a bounded
+  AtLogOn task, not an unconditional AtStartup task. HKCU records completed
+  operations, limits retries to three, distinguishes
+  transient/permanent/deferred/not-applicable outcomes and integrates them in
+  `SetupSummary.json` (local revision `R2-local`). NetFx3 validates the local
+  `sources\sxs` payload, the DISM exit code and the final state, and
+  distinguishes source unavailable from pending reboot. Summary ACLs use numeric
+  rights masks and the parent directory is checked too. The network recovery task
+  is registered only after verifying owner, effective ACL and the absence of
+  reparse points on the source, ancestors and destination; if the gate fails,
+  the task is not registered and manual recovery remains. All of this is static
+  and isolated validation; it was not executed in a clean installation.
 - The analyzed embedded scripts have not been executed on any system.
 - The local static validator `scripts/validate-baseline.ps1` reproduces these
   checks in read-only mode and without executing the embedded scripts; it
@@ -138,7 +162,7 @@ On the real repository files:
 SHA-256 hashes of the current baseline:
 
 - `autounattend.xml`:
-  `2E85E8DD733434364AEFF17BFBB27A5869F771CB1C3DE1942722F8439D470B36`.
+  `0F48BE9ED9AF00039C5581687F1144EF084872FD7C5AF97C6749A8DEDE605F68`.
 - `ventoy.json`:
   `058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B`.
 

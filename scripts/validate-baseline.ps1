@@ -354,6 +354,137 @@ function Test-XmlHardening {
         } else { Add-Fail 'OneDrive XML: hay llamadas al desinstalador sin ambito de maquina' }
     }
 
+    # H02: identity is resolved from the Explorer owner SID and ProfileList BY
+    # SID. The old name/profile suffix coupling and first-account fallback are
+    # forbidden by construction.
+    if (@($sysErrors).Count -eq 0) {
+        try {
+            $resolver=(Get-StaticFunction $sysAst 'Resolve-TMPCInteractiveIdentity').Extent.Text
+            $identity=(Get-StaticFunction $sysAst 'Get-TMPCInteractiveIdentity').Extent.Text
+            $launcher=(Get-StaticFunction $sysAst 'Start-ProcessAsUser').Extent.Text
+            $identityOk = $resolver.Contains('OwnerSid') -and
+                $resolver.Contains('ProfileImagePath') -and
+                $resolver.Contains('AMBIGUOUS_SESSION') -and
+                $resolver.Contains('AMBIGUOUS_IDENTITY') -and
+                $resolver.Contains('PROFILE_NOT_FOUND') -and
+                $resolver.Contains('IDENTITY_MISMATCH') -and
+                $identity.Contains('GetOwnerSid') -and
+                $identity.Contains('ProfileList')
+            if ($identityOk) { Add-Ok 'XML identity: SID desde propietario Explorer y ProfileList por SID' }
+            else { Add-Fail 'XML identity: resolucion de identidad incompleta' }
+            if ($launcher.Contains('TargetSessionId') -and $launcher.Contains('ExpectedSid') -and
+                $launcher.Contains('Test-TMPCIdentityMatch') -and $launcher.Contains('tokenSid')) {
+                Add-Ok 'XML identity: sesion, SID esperado y token verificado antes de crear el proceso'
+            } else { Add-Fail 'XML identity: falta la verificacion de sesion/SID/token' }
+            if (-not $SystemText.Contains('Get-UserSID') -and -not $SystemText.Contains('EndsWith("\$Username")') -and
+                $SystemText.Contains('-ExpectedSid')) {
+                Add-Ok 'XML identity: sin acoplamiento nombre/perfil; SID esperado transmitido al hijo'
+            } else { Add-Fail 'XML identity: permanece el acoplamiento nombre/perfil o falta ExpectedSid' }
+        } catch { Add-Fail ("XML identity AST: {0}" -f $_.Exception.Message) }
+    }
+
+    # H05: XML OneDrive scope plan, UNKNOWN handling and protection readiness.
+    if (@($odErrors).Count -eq 0) {
+        try {
+            $odState=(Get-StaticFunction $odAst 'Get-TMPCOneDriveRegistrationState').Extent.Text
+            $odPlan=(Get-StaticFunction $odAst 'Get-TMPCOneDriveCleanupPlan').Extent.Text
+            $odReady = $odState.Contains('UNKNOWN') -and $odState.Contains('ABSENT_VERIFIED') -and
+                $odPlan.Contains('CanApplyUser') -and $odPlan.Contains('RemoveMachineConfiguration') -and
+                $odPlan.Contains('RemoveUserConfiguration')
+            if ($odReady) { Add-Ok 'XML OneDrive: PRESENT/ABSENT_VERIFIED/UNKNOWN y plan de ambitos independiente' }
+            else { Add-Fail 'XML OneDrive: falta el estado desconocido o la separacion de ambitos' }
+            if (-not $OneDriveText.Contains('$userScopedPresent') -and
+                -not $OneDriveText.Contains('Get-UserSID') -and
+                -not $OneDriveText.Contains('C:\Users\$targetUser')) {
+                Add-Ok 'XML OneDrive: sin inferencia de presencia por nombre/perfil'
+            } else { Add-Fail 'XML OneDrive: permanece una inferencia por nombre/perfil' }
+            if ($OneDriveText.Contains('$script:OneDriveProtectionReady') -and
+                $OneDriveText.Contains('configuration and remnant deletion deferred') -and
+                $OneDriveText.Contains('OneDrive runtime state is')) {
+                Add-Ok 'XML OneDrive: proteccion incompleta y estado de ejecucion se difieren'
+            } else { Add-Fail 'XML OneDrive: faltan los diferimientos de proteccion/estado' }
+            $runtimeIndex=$OneDriveText.IndexOf('OneDrive runtime state is')
+            $appxIndex=$OneDriveText.IndexOf('Remove-AppxPackage')
+            if ($runtimeIndex -ge 0 -and $appxIndex -gt $runtimeIndex) {
+                Add-Ok 'XML OneDrive: la comprobacion de ejecucion precede a las mutaciones'
+            } else { Add-Fail 'XML OneDrive: la comprobacion de ejecucion no precede a las mutaciones' }
+        } catch { Add-Fail ("XML OneDrive AST: {0}" -f $_.Exception.Message) }
+    }
+
+    # H06: the default hive marker is written only after verified unload.
+    if (@($odErrors).Count -eq 0) {
+        try {
+            $odDefault=(Get-StaticFunction $odAst 'Invoke-DefaultOneDrivePolicy').Extent.Text
+            $unloadIndex=$odDefault.IndexOf('Invoke-TMPCDefaultHiveUnload')
+            $markerIndex=$odDefault.IndexOf("Set-TMPCRegistryEntryValue -Path `$markerKey -Name 'DefaultUserConfigured'")
+            if ($unloadIndex -ge 0 -and $markerIndex -gt $unloadIndex -and
+                $odDefault.Contains('Test-TMPCDefaultHiveMounted') -and
+                $odDefault.Contains('unload was not verified') -and
+                $odDefault.Contains("'R1|'")) {
+                Add-Ok 'XML Default hive: desmontaje verificado antes del marcador R1'
+            } else { Add-Fail 'XML Default hive: el marcador no depende de un desmontaje verificado' }
+        } catch { Add-Fail ("XML Default hive AST: {0}" -f $_.Exception.Message) }
+    }
+
+    # H03: phase summary and cleanup decision are explicit; cleanup does not
+    # delete before verifying overall success.
+    if (@($sysErrors).Count -eq 0) {
+        try {
+            $summary=(Get-StaticFunction $sysAst 'Write-TMPCSetupSummary').Extent.Text
+            $cleanup=(Get-StaticFunction $sysAst 'Get-TMPCCleanupCommand').Extent.Text
+            $register=(Get-StaticFunction $sysAst 'Register-AutounattendCleanupTask').Extent.Text
+            if ($summary.Contains('SetupSummary.json') -and $SystemText.Contains('OverallStatus') -and
+                $summary.Contains('TimestampUtc') -and -not $summary.Contains('$env:USERNAME')) {
+                Add-Ok 'XML H03: resumen compacto con estado global y sin nombre de usuario'
+            } else { Add-Fail 'XML H03: resumen incompleto o con datos personales' }
+            if ($cleanup.Contains('Get-TMPCCleanupDecision') -and $cleanup.Contains('Test-TMPCSetupSummarySchema') -and
+                $cleanup.Contains('Test-TMPCSetupExecutionIdentity') -and $cleanup.Contains('Get-TMPCCleanupTaskState') -and
+                $cleanup.Contains('Test-Path -LiteralPath') -and
+                $cleanup.Contains('IN_PROGRESS') -and $cleanup.Contains('CleanupStatus')) {
+                Add-Ok 'XML H03: cleanup condicionado a decision verificada y con comprobacion de borrado'
+            } else { Add-Fail 'XML H03: cleanup sin decision verificada o sin comprobacion de borrado' }
+            if ($register.Contains('Read-TMPCSetupSummary') -and $register.Contains('Get-TMPCCleanupCommand') -and
+                $register.Contains('Test-TMPCSetupSummarySchema') -and $register.Contains('Test-TMPCSetupExecutionIdentity') -and
+                $register.Contains('Test-TMPCDiagnosticAclSnapshot') -and $register.Contains("HkcUserPhase -ne 'SUCCESS'")) {
+                Add-Ok 'XML H03: la tarea de cleanup exige resumen, ejecucion, ACL y fase HKCU verificados'
+            } else { Add-Fail 'XML H03: la tarea de cleanup no exige resumen/ejecucion/ACL/fase verificados' }
+
+            $acl=(Get-StaticFunction $sysAst 'Test-TMPCDiagnosticAclSnapshot').Extent.Text
+            $schema=(Get-StaticFunction $sysAst 'Test-TMPCSetupSummarySchema').Extent.Text
+            $summaryWrite=(Get-StaticFunction $sysAst 'Write-TMPCSetupSummary').Extent.Text
+            $taskState=(Get-StaticFunction $sysAst 'Resolve-TMPCCleanupTaskState').Extent.Text
+            $decision=(Get-StaticFunction $sysAst 'Get-TMPCCleanupDecision').Extent.Text
+            if ($acl.Contains('Test-TMPCDirectoryAclSnapshot') -and $acl.Contains('Test-TMPCFileAclSnapshot')) {
+                Add-Ok 'XML H03: ACL de directorio y archivo final verificadas'
+            } else { Add-Fail 'XML H03: falta la verificacion ACL de directorio/archivo' }
+            $dirAcl=(Get-StaticFunction $sysAst 'Test-TMPCDirectoryAclSnapshot').Extent.Text
+            $fileAcl=(Get-StaticFunction $sysAst 'Test-TMPCFileAclSnapshot').Extent.Text
+            if ($dirAcl.Contains('RightsValue') -and $fileAcl.Contains('RightsValue')) {
+                Add-Ok 'XML H03: permisos interpretados por mascara de derechos'
+            } else { Add-Fail 'XML H03: permisos no interpretados por mascara de derechos' }
+            if ($schema.Contains('ExecutionId') -and $schema.Contains('OverallStatus') -and
+                $schema.Contains('Get-TMPCOverallStatus') -and $schema.Contains('CleanupAttempts') -and
+                $schema.Contains('HkcAttempts') -and $schema.Contains('HkcRetryExhausted')) {
+                Add-Ok 'XML H03: esquema, ejecucion, estado global y reintentos HKCU'
+            } else { Add-Fail 'XML H03: esquema o recalculo de estado incompleto' }
+            if ($summaryWrite.Contains('Test-TMPCFileAclSnapshot') -and $summaryWrite.Contains('read-back content mismatch') -and
+                $summaryWrite.Contains('Get-TMPCAclSnapshot')) {
+                Add-Ok 'XML H03: escritura verificada por lectura posterior y ACL del archivo'
+            } else { Add-Fail 'XML H03: escritura sin verificacion de contenido/ACL' }
+            if ($SystemText.Contains('execution identity invalidated') -and
+                $SystemText.Contains("Remove-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Autounattend'")) {
+                Add-Ok 'XML H03: un fallo de resumen invalida la identidad de ejecucion'
+            } else { Add-Fail 'XML H03: el fallo de resumen no invalida la identidad de ejecucion' }
+            if ($taskState.Contains('ABSENT_VERIFIED') -and $taskState.Contains('PRESENT') -and $taskState.Contains('UNKNOWN')) {
+                Add-Ok 'XML H03: tarea one-shot con estados PRESENT/ABSENT_VERIFIED/UNKNOWN'
+            } else { Add-Fail 'XML H03: estados de tarea one-shot incompletos' }
+            if ($decision.Contains('Test-TMPCDiagnosticAclSnapshot') -and $decision.Contains('Test-TMPCSetupExecutionIdentity') -and
+                $decision.Contains('ABSENT_VERIFIED') -and $decision.Contains('RETRY') -and $decision.Contains('ALLOW')) {
+                Add-Ok 'XML H03: decision de cleanup ligada a ACL, identidad, estado y tarea'
+            } else { Add-Fail 'XML H03: decision de cleanup incompleta' }
+        } catch { Add-Fail ("XML H03 AST: {0}" -f $_.Exception.Message) }
+    }
+
     # Embedded registry engine (mirror of the standalone idempotent contract).
     if (@($sysErrors).Count -eq 0) {
         try {
@@ -501,7 +632,7 @@ function Test-PostInstallStandalone {
         Add-Ok 'Standalone: SOURCE_AUTOUNATTEND_SHA256 coincide; deriva futura bloqueada'
     } else { Add-Fail 'Standalone: hash fuente ausente/ambiguo/desincronizado' }
     $fixedHashes=@{
-        'autounattend.xml'='2E85E8DD733434364AEFF17BFBB27A5869F771CB1C3DE1942722F8439D470B36'
+        'autounattend.xml'='0F48BE9ED9AF00039C5581687F1144EF084872FD7C5AF97C6749A8DEDE605F68'
         'ventoy.json'='058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B'
     }
     foreach ($file in $fixedHashes.Keys) {
@@ -1277,6 +1408,12 @@ function Test-GuideContentPreservation {
         @{ Path = 'docs/guia-completa.md'; Snippet = 'DisableCloudOptimizedContent'; Description = 'Guia ES: politica CloudContent' },
         @{ Path = 'docs/guia-completa.md'; Snippet = 'AllAppsViewMode'; Description = 'Guia ES: vista de Todas las aplicaciones' },
         @{ Path = 'docs/guia-completa.md'; Snippet = 'RUNTIME_EXISTING_PROFILE = PASS'; Description = 'Guia ES: estado runtime existente' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'releases/tag/v0.3.0'; Description = 'Guia ES: enlace a release historica v0.3.0' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'NetworkGuard.ps1'; Description = 'Guia ES: restauracion de red documentada' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'NoAutoRebootWithLoggedOnUsers'; Description = 'Guia ES: alcance de NoAutoReboot documentado' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'Start = 3'; Description = 'Guia ES: inicio manual de Xbox Live' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'SetupSummary.json'; Description = 'Guia ES: diagnostico persistente documentado' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'Antes de copiar el script y registrar la tarea'; Description = 'Guia ES: gate de integridad de recuperacion' },
         @{ Path = 'docs/guia-completa.md'; Snippet = 'CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED'; Description = 'Guia ES: estado de instalacion limpia' },
         @{ Path = 'docs/guia-completa.md'; Snippet = 'STANDALONE_RUNTIME = NOT_TESTED'; Description = 'Guia ES: runtime del standalone no probado' },
         @{ Path = 'docs/guia-completa.md'; Snippet = 'IQuietHoursSettings'; Description = 'Guia ES: limitacion COM Quiet Hours' },
@@ -1300,6 +1437,12 @@ function Test-GuideContentPreservation {
         @{ Path = 'docs/full-guide.md'; Snippet = 'DisableCloudOptimizedContent'; Description = 'Guia EN: politica CloudContent' },
         @{ Path = 'docs/full-guide.md'; Snippet = 'AllAppsViewMode'; Description = 'Guia EN: vista de Todas las aplicaciones' },
         @{ Path = 'docs/full-guide.md'; Snippet = 'RUNTIME_EXISTING_PROFILE = PASS'; Description = 'Guia EN: estado runtime existente' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'releases/tag/v0.3.0'; Description = 'Guia EN: enlace a release historica v0.3.0' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'NetworkGuard.ps1'; Description = 'Guia EN: restauracion de red documentada' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'NoAutoRebootWithLoggedOnUsers'; Description = 'Guia EN: alcance de NoAutoReboot documentado' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'Start = 3'; Description = 'Guia EN: inicio manual de Xbox Live' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'SetupSummary.json'; Description = 'Guia EN: diagnostico persistente documentado' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'source, ancestors and destination'; Description = 'Guia EN: gate de integridad de recuperacion' },
         @{ Path = 'docs/full-guide.md'; Snippet = 'CLEAN_INSTALL_AUTOMATIC_LIST = NOT_TESTED'; Description = 'Guia EN: estado de instalacion limpia' },
         @{ Path = 'docs/full-guide.md'; Snippet = 'STANDALONE_RUNTIME = NOT_TESTED'; Description = 'Guia EN: runtime del standalone no probado' },
         @{ Path = 'docs/full-guide.md'; Snippet = 'IQuietHoursSettings'; Description = 'Guia EN: limitacion COM Quiet Hours' },
@@ -1311,9 +1454,17 @@ function Test-GuideContentPreservation {
         @{ Path = 'docs/full-guide.md'; Snippet = 'preparacion-previa-instalacion.md'; Description = 'Guia EN: enlace a preparacion ES' },
         @{ Path = 'docs/full-guide.md'; Snippet = 'configuracion-pruebas-limitaciones-fuentes.md'; Description = 'Guia EN: enlace a configuracion ES' },
         @{ Path = 'docs/full-guide.md'; Snippet = 'comprobaciones-posteriores-instalacion.md'; Description = 'Guia EN: enlace a comprobaciones ES' },
+        @{ Path = 'docs/configuracion-pruebas-limitaciones-fuentes.md'; Snippet = 'R2-local'; Description = 'Doc ES: bloque R2 documentado' },
+        @{ Path = 'docs/configuration-testing-limitations-sources.md'; Snippet = 'R2-local'; Description = 'Doc EN: bloque R2 documentado' },
+        @{ Path = 'docs/guia-completa.md'; Snippet = 'RUNTIME_VALIDATION = NOT_TESTED'; Description = 'Guia ES: runtime no probado' },
+        @{ Path = 'docs/full-guide.md'; Snippet = 'RUNTIME_VALIDATION = NOT_TESTED'; Description = 'Guia EN: runtime no probado' },
         @{ Path = 'README.md'; Snippet = 'docs/guia-completa.md'; Description = 'README ES: enlace a guia completa' },
+        @{ Path = 'README.md'; Snippet = 'releases/tag/v0.3.0'; Description = 'README ES: enlace a release historica v0.3.0' },
+        @{ Path = 'README.md'; Snippet = 'SHA256SUMS.txt'; Description = 'README ES: assets publicados' },
         @{ Path = 'README.md'; Snippet = 'Apply-TMPCOptimizations.ps1'; Description = 'README ES: enlace al standalone' },
         @{ Path = 'README.en.md'; Snippet = 'docs/full-guide.md'; Description = 'README EN: enlace a guia completa' },
+        @{ Path = 'README.en.md'; Snippet = 'releases/tag/v0.3.0'; Description = 'README EN: enlace a release historica v0.3.0' },
+        @{ Path = 'README.en.md'; Snippet = 'SHA256SUMS.txt'; Description = 'README EN: assets publicados' },
         @{ Path = 'README.en.md'; Snippet = 'Apply-TMPCOptimizations.ps1'; Description = 'README EN: enlace al standalone' }
     )
     foreach ($check in $checks) {
@@ -1559,6 +1710,66 @@ if ($null -ne $doc) {
 # PowerShell embebido
 # ---------------------------------------------------------------------------
 
+function Test-R2Hardening {
+    param([string]$SystemText, [string]$NetworkText, [string]$NetFx3Text)
+    $xmlRecord = Get-FileRecord -RelativePath 'autounattend.xml'
+    $standaloneRecord = Get-FileRecord -RelativePath 'Apply-TMPCOptimizations.ps1'
+    $xml = if ($xmlRecord.Exists -and $xmlRecord.DecodeOk) { $xmlRecord.Text } else { '' }
+    $standalone = if ($standaloneRecord.Exists -and $standaloneRecord.DecodeOk) { $standaloneRecord.Text } else { '' }
+    $aclMaskOk = $false
+    if ($null -ne $SystemText) {
+        $r2Tokens = $null; $r2Errors = $null
+        $r2Ast = [System.Management.Automation.Language.Parser]::ParseInput($SystemText, [ref]$r2Tokens, [ref]$r2Errors)
+        if (@($r2Errors).Count -eq 0) {
+            try { $aclMaskOk = (Get-StaticFunction $r2Ast 'Test-TMPCDirectoryAclSnapshot').Extent.Text.Contains('RightsValue') } catch { $aclMaskOk = $false }
+        }
+    }
+    $recoveryGateOrder = $false
+    $recoveryGateControls = $false
+    if ($null -ne $NetworkText) {
+        $preCopy = $NetworkText.IndexOf('$location = Test-TMPCNetworkRecoveryLocation')
+        $copy = $NetworkText.IndexOf('Copy-Item -LiteralPath $PSCommandPath')
+        $postCopy = $NetworkText.IndexOf('$afterCopy = Test-TMPCNetworkRecoveryLocation')
+        $register = $NetworkText.IndexOf('Register-ScheduledTask -TaskName $script:RecoveryTaskName')
+        $recoveryGateOrder = ($preCopy -ge 0 -and $copy -gt $preCopy -and $postCopy -gt $copy -and $register -gt $postCopy)
+        $recoveryGateControls = $NetworkText.Contains('Get-TMPCNetworkFileAclSnapshot') -and
+            $NetworkText.Contains('Test-TMPCNetworkPathAclSnapshot') -and
+            $NetworkText.Contains('IsReparse') -and
+            $NetworkText.Contains('Recovery location is not trusted') -and
+            $NetworkText.Contains('unsafeTask') -and
+            -not $NetworkText.Contains('New-Item -Path $script:RecoveryDir')
+    }
+    $checks = @(
+        @{ Ok = ($null -ne $NetworkText); Description = 'H01 NetworkGuard.ps1 disponible' },
+        @{ Ok = ($null -ne $NetFx3Text); Description = 'H07 NetFx3.ps1 disponible' },
+        @{ Ok = ($xml.Contains('NetworkGuard.ps1" -Mode Disable')); Description = 'H01 specialize usa NetworkGuard Disable' },
+        @{ Ok = ($xml.Contains('NetworkGuard.ps1" -Mode Restore')); Description = 'H01 first logon usa NetworkGuard Restore' },
+        @{ Ok = ($xml -notmatch 'Get-NetAdapter\s*\|\s*(Enable|Disable)-NetAdapter'); Description = 'H01 sin restauracion/deshabilitacion indiscriminada' },
+        @{ Ok = ($null -ne $NetworkText -and $NetworkText.Contains('InterfaceGuid')); Description = 'H01 identifica adaptadores por GUID' },
+        @{ Ok = ($null -ne $NetworkText -and $NetworkText.Contains('DisableAttempted')); Description = 'H01 persiste intentos parciales' },
+        @{ Ok = ($null -ne $NetworkText -and $NetworkText.Contains('Test-TMPCNetworkOobeComplete')); Description = 'H01 recuperacion condicionada a OOBE' },
+        @{ Ok = ($null -ne $NetworkText -and $NetworkText.Contains('New-ScheduledTaskTrigger -AtLogOn') -and -not $NetworkText.Contains('New-ScheduledTaskTrigger -AtStartup')); Description = 'H01 recuperacion solo AtLogOn' },
+        @{ Ok = ($null -ne $NetworkText -and $NetworkText.Contains('STATE_ACL_UNTRUSTED')); Description = 'H01 estado de red con ACL verificada' },
+        @{ Ok = $recoveryGateOrder; Description = 'H01 gate de integridad antes de copiar y registrar' },
+        @{ Ok = $recoveryGateControls; Description = 'H01 propietario, ACL, reparse y tarea previa verificados' },
+        @{ Ok = ($null -ne $SystemText -and $SystemText.Contains('Get-TMPCUserRetryDecision') -and $SystemText.Contains('MaxAttempts = 3')); Description = 'H04 reintentos HKCU finitos' },
+        @{ Ok = ($null -ne $SystemText -and $SystemText.Contains('Initialize-TMPCAppliedOperations') -and $SystemText.Contains('ALREADY_COMPLETED_PREVIOUS_RUN')); Description = 'H04 no reaplica ajustes completados' },
+        @{ Ok = ($null -ne $SystemText -and $SystemText.Contains('HkcAttempts') -and $SystemText.Contains('HkcRetryExhausted')); Description = 'H04 estados integrados en SetupSummary' },
+        @{ Ok = ($null -ne $SystemText -and $SystemText.Contains('Remove-TMPCAutounattendUserCustomizationsTask')); Description = 'H04 no deja una tarea residente' },
+        @{ Ok = ($null -ne $SystemText -and $SystemText.Contains('PermanentErrorCount') -and $SystemText.Contains('exit 3')); Description = 'H04 distingue errores permanentes' },
+        @{ Ok = $aclMaskOk; Description = 'R4 ACL evaluada por mascara numerica' },
+        @{ Ok = ($xml.Contains("TMPC-Windows-11-Optimization'")) ; Description = 'R4 cleanup revalida el directorio padre' },
+        @{ Ok = ($null -ne $NetFx3Text -and $NetFx3Text.Contains('microsoft-windows-netfx3-ondemand-package')); Description = 'H07 valida el payload NetFx3 local' },
+        @{ Ok = ($null -ne $NetFx3Text -and $NetFx3Text.Contains('/LimitAccess') -and $NetFx3Text.Contains('/NoRestart')); Description = 'H07 DISM local sin reinicio' },
+        @{ Ok = ($null -ne $NetFx3Text -and $NetFx3Text.Contains('LASTEXITCODE') -and $NetFx3Text.Contains('Get-TMPCNetFx3FeatureState')); Description = 'H07 codigo DISM y estado final' },
+        @{ Ok = ($standalone.Contains('Invoke-TMPCNetFx3 -SourcePath $NetFx3Source') -and $standalone.Contains('-NoRestart')); Description = 'H07 standalone conserva fuente local y sin reinicio' },
+        @{ Ok = ($standalone.Contains('Get-TMPCNetFx3Decision')); Description = 'H07 standalone usa la decision verificable' }
+    )
+    foreach ($check in $checks) {
+        if ($check.Ok) { Add-Ok $check.Description } else { Add-Fail $check.Description }
+    }
+}
+
 Write-Section 'POWERSHELL EMBEBIDO'
 
 if ($null -eq $doc) {
@@ -1595,6 +1806,8 @@ if ($null -eq $doc) {
 
     $bloatText = $null
     $oneDriveText = $null
+    $networkText = $null
+    $netfxText = $null
     if ($null -eq $sysText) {
         Add-Fail 'BloatRemoval.ps1: no se puede extraer sin SystemCustomizations.ps1'
         Add-Fail 'OneDriveRemoval.ps1: no se puede extraer sin SystemCustomizations.ps1'
@@ -1625,6 +1838,24 @@ if ($null -eq $doc) {
         }
     }
 
+    foreach ($embedded in @(
+        @{ Name='NetworkGuard.ps1'; Suffix='NetworkGuard.ps1' },
+        @{ Name='NetFx3.ps1'; Suffix='NetFx3.ps1' }
+    )) {
+        $nodes = @($fileNodes | Where-Object { $_.GetAttribute('path').EndsWith($embedded.Suffix, [System.StringComparison]::Ordinal) })
+        if ($nodes.Count -ne 1) {
+            Add-Fail ("{0}: se esperaba 1 nodo File; encontrados {1}" -f $embedded.Name, $nodes.Count)
+            continue
+        }
+        $text = $nodes[0].InnerText.Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            Add-Fail ("{0}: contenido vacio" -f $embedded.Name)
+            continue
+        }
+        Add-Ok ("{0}: nodo File encontrado con contenido" -f $embedded.Name)
+        if ($embedded.Name -eq 'NetworkGuard.ps1') { $networkText = $text } else { $netfxText = $text }
+    }
+
     if ($null -ne $extractText) {
         Test-PowerShellBlock -Name 'ExtractScript' -Text $extractText
     }
@@ -1637,11 +1868,20 @@ if ($null -eq $doc) {
     if ($null -ne $oneDriveText) {
         Test-PowerShellBlock -Name 'OneDriveRemoval.ps1' -Text $oneDriveText
     }
+    if ($null -ne $networkText) {
+        Test-PowerShellBlock -Name 'NetworkGuard.ps1' -Text $networkText
+    }
+    if ($null -ne $netfxText) {
+        Test-PowerShellBlock -Name 'NetFx3.ps1' -Text $netfxText
+    }
 
     if ($null -ne $sysText) {
         Write-Section 'EXPLORER DEFAULTS'
         Test-ExplorerDefaults -Text $sysText
     }
+
+    Write-Section 'R2 HARDENING (H01/H04/H07)'
+    Test-R2Hardening -SystemText $sysText -NetworkText $networkText -NetFx3Text $netfxText
 
     Write-Section 'XML HARDENING (ONENOTE/ONEDRIVE)'
     if ($null -ne $sysText -and $null -ne $bloatText -and $null -ne $oneDriveText) {

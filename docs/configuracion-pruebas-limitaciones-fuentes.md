@@ -138,6 +138,31 @@ Sobre los archivos reales del repositorio:
 - `ventoy.json` es JSON válido.
 - Los hallazgos de la revisión técnica del flujo de personalización están
   corregidos y comprobados estáticamente.
+- El bloque local R1 posterior a v0.3.0 corrige H02, H03, H05 y H06 con pruebas
+  aisladas: identidad por SID/sesión y token verificado; resumen de fases y
+  cleanup condicionado a éxito global; ámbitos OneDrive con `UNKNOWN` y
+  protección incompleta diferida; y desmontaje verificado del hive Default antes
+  del marcador `R1`. No es una release publicada y su runtime sigue pendiente.
+- El micro-BUILD R1.1 consolida H03 con ACL de directorio y archivo,
+  identidad de ejecución en HKLM, esquema/revisión, recálculo de
+  `OverallStatus`, lectura posterior de verificación y estados
+  `PRESENT`/`ABSENT_VERIFIED`/`UNKNOWN` de la tarea one-shot. El cleanup solo
+  borra con `ABSENT_VERIFIED` y todas las comprobaciones; `UNKNOWN` se reintenta
+  de forma acotada.
+- El bloque local R2 añade H01 (red), H04 (reintentos HKCU) y H07 (NetFx3) con
+  pruebas aisladas. La red se planifica por GUID, conserva el estado previo y
+  solo restaura lo que TMPC deshabilitó tras OOBE; la recuperación es una tarea
+  AtLogOn acotada y no una tarea AtStartup incondicional. HKCU registra las
+  operaciones completadas, limita los reintentos a tres, distingue resultados
+  transitorios/permanentes/diferidos/no aplicables y los integra en
+  `SetupSummary.json` (revisión local `R2-local`). NetFx3 valida el origen
+  `sources\sxs`, el código de DISM y el estado final, y distingue origen ausente
+  y reinicio pendiente. Las ACL del resumen se interpretan con máscaras
+  numéricas de derechos y se comprueba también el directorio padre. La tarea de
+  recuperación de red solo se registra tras verificar propietario, ACL efectiva
+  y ausencia de reparse points en origen, ancestros y destino; si el gate falla,
+  no se registra y queda la recuperación manual. Todo ello es validación
+  estática y aislada; no se ejecutó en una instalación limpia.
 - Los scripts embebidos analizados no se han ejecutado sobre ningún sistema.
 - El validador estático local `scripts/validate-baseline.ps1` reproduce estas
   comprobaciones en modo de solo lectura y sin ejecutar los scripts embebidos;
@@ -146,7 +171,7 @@ Sobre los archivos reales del repositorio:
 Hashes SHA-256 del baseline actual:
 
 - `autounattend.xml`:
-  `2E85E8DD733434364AEFF17BFBB27A5869F771CB1C3DE1942722F8439D470B36`.
+  `0F48BE9ED9AF00039C5581687F1144EF084872FD7C5AF97C6749A8DEDE605F68`.
 - `ventoy.json`:
   `058F0FB83D2BD9EBBB471E518040E04C0CD9D1A752CBBCEC5904166B9EB5908B`.
 

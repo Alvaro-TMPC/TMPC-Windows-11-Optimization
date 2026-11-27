@@ -16,7 +16,7 @@
 .PARAMETER NetFx3Source
     Optional local sources\sxs directory from matching Windows media. No download.
 .NOTES
-    Standalone version: 0.2.1. Source profile: v0.1.5 plus the 26H2 candidate blocks
+    Standalone version: 0.2.2. Source profile: v0.1.5 plus the 26H2 candidate blocks
     (Start pins policy, cloud content policy and All apps view), now with an idempotent,
     verified registry engine: every inventory entry is read first, written only when it
     differs and re-read to verify the result. Per-operation states: ALREADY_COMPLIANT,
@@ -41,7 +41,7 @@
     (historical reference). This standalone has static validation plus an isolated,
     registry-free automated test suite (scripts/tests); it has no host runtime validation.
     Project: https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization
-    SOURCE_AUTOUNATTEND_SHA256 = 2E85E8DD733434364AEFF17BFBB27A5869F771CB1C3DE1942722F8439D470B36
+    SOURCE_AUTOUNATTEND_SHA256 = 0F48BE9ED9AF00039C5581687F1144EF084872FD7C5AF97C6749A8DEDE605F68
     validate-baseline.ps1 checks this binding AND the registry/removal inventories.
     Derived from autounattend.xml, including material based on
     memstechtips/UnattendedWinstall, revision cca752363772a845eb0fed9d3a5b89b5d0a10d20.
@@ -178,6 +178,8 @@ function Invoke-Operation {
         switch ([string]$state) {
             'ALREADY_COMPLIANT' { Write-Log ("{0}: ALREADY_COMPLIANT; no write performed." -f $Operation) 'COMPLIANT' }
             'SKIPPED_NOT_APPLICABLE' { Write-Log ("{0}: SKIPPED_NOT_APPLICABLE." -f $Operation) 'SKIPPED' }
+            'PENDING_REBOOT' { Write-Log ("{0}: PENDING_REBOOT; staged and verified, completion requires a restart." -f $Operation) 'WARNING' }
+            'FAILED' { Write-Log ("{0}: FAILED; inspect this operation locally." -f $Operation) 'ERROR' }
             default { Write-Log ("{0}: APPLIED." -f $Operation) 'SUCCESS' }
         }
     } catch {
@@ -1603,6 +1605,114 @@ function Invoke-OneDriveRemoval {
     }
 }
 
+function Get-TMPCNetFx3SourceAssessment {
+    param(
+        [string]$Path,
+        [bool]$DirectoryExists,
+        [bool]$IsReparsePoint,
+        [string[]]$FileNames
+    )
+    if (-not $DirectoryExists) { return [pscustomobject]@{ Usable = $false; Status = 'SOURCE_NOT_FOUND'; Detail = 'sources\sxs is not present.' } }
+    if ($IsReparsePoint) { return [pscustomobject]@{ Usable = $false; Status = 'SOURCE_REPARSE'; Detail = 'sources\sxs is a reparse point.' } }
+    $payload = @($FileNames | Where-Object { $_ -and [string]::Equals([System.IO.Path]::GetExtension($_), '.cab', [StringComparison]::OrdinalIgnoreCase) -and $_ -match '^microsoft-windows-netfx3-ondemand-package.*\.cab$' })
+    if ($payload.Count -eq 0) {
+        return [pscustomobject]@{ Usable = $false; Status = 'SOURCE_PAYLOAD_MISSING'; Detail = 'No NetFx3 on-demand package CAB was found.' }
+    }
+    return [pscustomobject]@{ Usable = $true; Status = 'SOURCE_READY'; Detail = ('Found {0} NetFx3 package file(s).' -f $payload.Count) }
+}
+
+function Get-TMPCNetFx3Decision {
+    param(
+        [string]$InitialState,
+        [string]$SourceStatus,
+        [int]$DismExitCode,
+        [string]$FinalState,
+        [bool]$RestartNeeded
+    )
+    if ($InitialState -eq 'Enabled') { return 'ALREADY_ENABLED' }
+    if ($InitialState -eq 'EnablePending') { return 'PENDING_REBOOT' }
+    if ($InitialState -eq 'DisablePending') { return 'NOT_APPLICABLE' }
+    if ($InitialState -eq 'Unknown') { return 'UNKNOWN' }
+    if ($SourceStatus -ne 'SOURCE_READY') { return 'SOURCE_UNAVAILABLE' }
+    if ($FinalState -eq 'Enabled') { return 'APPLIED' }
+    if ($RestartNeeded -or $DismExitCode -eq 3010 -or $FinalState -eq 'EnablePending') { return 'PENDING_REBOOT' }
+    if ($DismExitCode -ne 0) { return 'FAILED' }
+    return 'FAILED'
+}
+
+function Test-TMPCNetFx3SourcePath {
+    param([string]$SourcePath)
+    if ([string]::IsNullOrWhiteSpace($SourcePath)) { return [pscustomobject]@{ Usable = $false; Status = 'SOURCE_NOT_FOUND'; Detail = 'No source was supplied.' } }
+    if ($SourcePath -match '^\\\\') { return [pscustomobject]@{ Usable = $false; Status = 'SOURCE_NETWORK'; Detail = 'Network sources are not accepted.' } }
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) { return [pscustomobject]@{ Usable = $false; Status = 'SOURCE_NOT_FOUND'; Detail = 'The supplied source is not a directory.' } }
+    try {
+        $resolved = (Resolve-Path -LiteralPath $SourcePath).ProviderPath
+        $drive = New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($resolved))
+        if ($drive.DriveType -notin @('Fixed', 'Removable', 'CDRom')) {
+            return [pscustomobject]@{ Usable = $false; Status = 'SOURCE_NETWORK'; Detail = 'Network or virtual sources are not accepted.' }
+        }
+        $item = Get-Item -LiteralPath $SourcePath -Force -ErrorAction Stop
+        $isReparse = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+    } catch { return [pscustomobject]@{ Usable = $false; Status = 'SOURCE_UNREADABLE'; Detail = 'The supplied source could not be inspected.' } }
+    $names = @()
+    try { $names = @(Get-ChildItem -LiteralPath $SourcePath -Filter '*.cab' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) } catch { }
+    return (Get-TMPCNetFx3SourceAssessment -Path $SourcePath -DirectoryExists $true -IsReparsePoint $isReparse -FileNames $names)
+}
+
+function Invoke-TMPCNetFx3 {
+    param([string]$SourcePath)
+    $feature = Get-WindowsOptionalFeature -Online -FeatureName NetFx3 -ErrorAction Stop
+    $initialState = [string]$feature.State
+    if ($initialState -eq 'Enabled') {
+        Write-Log 'NetFx3 is already enabled; no installation was attempted.' 'INFO'
+        return 'ALREADY_COMPLIANT'
+    }
+    if ($initialState -eq 'EnablePending') {
+        Write-Log 'NetFx3 is already staged and requires a restart; no installation was attempted.' 'WARNING'
+        $script:RestartNeeded = $true
+        return 'PENDING_REBOOT'
+    }
+    if ($initialState -eq 'DisablePending') {
+        Write-Log 'NetFx3 has a pending disable operation; it is not applicable in this run.' 'WARNING'
+        return 'SKIPPED_NOT_APPLICABLE'
+    }
+    if ($initialState -ne 'Disabled') {
+        Write-Log 'NetFx3 feature state could not be determined; no installation was attempted.' 'ERROR'
+        return 'FAILED'
+    }
+    if ([string]::IsNullOrWhiteSpace($SourcePath)) {
+        Write-Log 'NetFx3 is not enabled; supply -NetFx3Source with matching local sources\sxs media. No download was attempted.' 'WARNING'
+        return 'SKIPPED_NOT_APPLICABLE'
+    }
+    $source = Test-TMPCNetFx3SourcePath -SourcePath $SourcePath
+    if (-not $source.Usable) {
+        Write-Log ("NetFx3 source is not suitable ({0}: {1}); no download was attempted." -f $source.Status, $source.Detail) 'ERROR'
+        return 'FAILED'
+    }
+    $result = $null
+    try {
+        $result = Enable-WindowsOptionalFeature -Online -FeatureName NetFx3 -All -LimitAccess -Source $SourcePath -NoRestart -ErrorAction Stop
+    } catch {
+        Write-Log ("NetFx3 enable command failed ({0}, HRESULT 0x{1:X8}); final state will be checked." -f $_.Exception.GetType().Name, $_.Exception.HResult) 'ERROR'
+    }
+    $finalState = [string](Get-WindowsOptionalFeature -Online -FeatureName NetFx3 -ErrorAction Stop).State
+    $restartNeeded = ($finalState -eq 'EnablePending') -or ($null -ne $result -and [bool]$result.RestartNeeded)
+    $dismCode = if ($null -eq $result) { 1 } else { 0 }
+    $outcome = Get-TMPCNetFx3Decision -InitialState $initialState -SourceStatus $source.Status -DismExitCode $dismCode -FinalState $finalState -RestartNeeded $restartNeeded
+    switch ($outcome) {
+        'APPLIED' { Write-Log 'NetFx3 was enabled and verified from the local source.' 'INFO' }
+        'PENDING_REBOOT' { Write-Log 'NetFx3 was staged and verified; it completes after a restart.' 'WARNING'; $script:RestartNeeded = $true }
+        'SOURCE_UNAVAILABLE' { Write-Log 'NetFx3 source was not usable; no installation was attempted.' 'ERROR' }
+        default { Write-Log ("NetFx3 did not reach the enabled state (final {0})." -f $finalState) 'ERROR' }
+    }
+    switch ($outcome) {
+        'APPLIED' { return 'APPLIED' }
+        'PENDING_REBOOT' { return 'PENDING_REBOOT' }
+        'SOURCE_UNAVAILABLE' { return 'SKIPPED_NOT_APPLICABLE' }
+        default { return 'FAILED' }
+    }
+}
+
 function Invoke-SystemPhase {
     # A partial run may already change servicing/power/policies: retain advice
     # even if a later enumeration or log operation aborts the phase.
@@ -1717,28 +1827,7 @@ function Invoke-SystemPhase {
             return 'APPLIED'
         }
     }
-    Invoke-Operation '.NET Framework 3.5 local-source check' {
-        $feature = Get-WindowsOptionalFeature -Online -FeatureName NetFx3
-        if ($feature.State -eq 'Enabled') { return 'ALREADY_COMPLIANT' }
-        if (-not $NetFx3Source) {
-            Write-Log 'NetFx3 is not enabled; supply -NetFx3Source with matching local sources\sxs media. No download attempted.' 'WARNING'
-            return 'SKIPPED_NOT_APPLICABLE'
-        }
-        if ($NetFx3Source -match '^\\\\' -or -not (Test-Path -LiteralPath $NetFx3Source -PathType Container)) { throw 'A local NetFx3 source is required.' }
-        $sourcePath = (Resolve-Path -LiteralPath $NetFx3Source).ProviderPath
-        $drive = New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($sourcePath))
-        if ($drive.DriveType -notin @('Fixed','Removable','CDRom')) { throw 'Network sources are not accepted.' }
-        Assert-NoReparsePath $NetFx3Source
-        $result = Enable-WindowsOptionalFeature -Online -FeatureName NetFx3 -All -LimitAccess -Source $NetFx3Source -NoRestart
-        if ($result.RestartNeeded) { $script:RestartNeeded=$true }
-        $after = Get-WindowsOptionalFeature -Online -FeatureName NetFx3
-        if ($after.State -eq 'Enabled') { return 'APPLIED' }
-        if ($result.RestartNeeded) {
-            Write-Log 'NetFx3 was staged; it completes after the next restart.' 'WARNING'
-            return 'APPLIED'
-        }
-        throw 'VERIFY_FAILED'
-    }
+    Invoke-Operation '.NET Framework 3.5 local-source check' { Invoke-TMPCNetFx3 -SourcePath $NetFx3Source }
     $script:RestartNeeded = $true
     Write-Log 'CONFIGURATION_STAGED = PASS for the ADMX Start pins pair; START_PINS_CLEAN_INSTALL_RUNTIME = PENDING. It takes effect at the next sign-in; the Start result is not claimed without runtime validation. Existing encryption is not undone.' 'WARNING'
 }
@@ -1774,7 +1863,7 @@ try {
     New-Item -Path $logs -ItemType Directory -Force | Out-Null
     Assert-NoReparsePath $logs
     $script:LogPath = Join-Path $logs ('Apply-{0}-{1}-{2}.log' -f $script:Mode,(Get-Date -Format 'yyyyMMdd-HHmmss'),[Guid]::NewGuid().ToString('N'))
-    Write-Log "Standalone 0.2.1; mode $script:Mode; $($preflight.Summary)"
+    Write-Log "Standalone 0.2.2; mode $script:Mode; $($preflight.Summary)"
     if (-not $preflight.TestedReference) { Write-Log $preflight.UntestedNote 'WARNING' }
     if (-not $UserOnly) { Invoke-SystemPhase }
     if ($script:CanApplyUser) { Invoke-UserPhase }

@@ -62,6 +62,12 @@ $doc.Load((Join-Path $RepoRoot 'autounattend.xml'))
 $sysNode = @($doc.SelectNodes("//*[local-name()='File' and @path]") | Where-Object { $_.GetAttribute('path').EndsWith('SystemCustomizations.ps1', [System.StringComparison]::Ordinal) })
 if ($sysNode.Count -ne 1) { throw 'SystemCustomizations.ps1: expected exactly one File node' }
 $sysText = $sysNode[0].InnerText.Trim()
+$networkNode = @($doc.SelectNodes("//*[local-name()='File' and @path]") | Where-Object { $_.GetAttribute('path').EndsWith('NetworkGuard.ps1', [System.StringComparison]::Ordinal) })
+if ($networkNode.Count -ne 1) { throw 'NetworkGuard.ps1: expected exactly one File node' }
+$networkText = $networkNode[0].InnerText.Trim()
+$netfxNode = @($doc.SelectNodes("//*[local-name()='File' and @path]") | Where-Object { $_.GetAttribute('path').EndsWith('NetFx3.ps1', [System.StringComparison]::Ordinal) })
+if ($netfxNode.Count -ne 1) { throw 'NetFx3.ps1: expected exactly one File node' }
+$netfxText = $netfxNode[0].InnerText.Trim()
 $bloatText = Get-TMPCHereStringBody -Text $sysText -VariableName 'bloatRemovalContent'
 $oneDriveText = Get-TMPCHereStringBody -Text $sysText -VariableName 'oneDriveRemovalContent'
 
@@ -86,6 +92,35 @@ $xmlRegistryFunctions = @(
     'Write-Log','ConvertTo-RegistryValueName','Test-RegistryValueName',
     'Get-RegistryEntryState','Test-RegistryStateEqual','Get-RegistryErrorReason',
     'Write-RegistryValue','Set-RegistryValue'
+)
+$xmlIdentityFunctions = @(
+    'Resolve-TMPCInteractiveIdentity','Test-TMPCIdentityMatch'
+)
+$xmlOneDriveScopeFunctions = @(
+    'Write-Log','Get-RegistryEntryState','Get-TMPCOneDriveRegistrationState',
+    'Get-TMPCOneDriveCleanupPlan'
+)
+$xmlDefaultHiveFunctions = @(
+    'Write-Log','Get-RegistryEntryState','Get-RegistryErrorReason',
+    'Remove-RegistryEntryIfPresent','Get-TMPCPathItem','Assert-NoReparsePath',
+    'Get-TMPCDefaultHivePath','Test-TMPCDefaultHiveMounted',
+    'Invoke-TMPCDefaultHiveLoad','Invoke-TMPCDefaultHiveUnload',
+    'New-TMPCRegistryKey','Set-TMPCRegistryEntryValue','Invoke-DefaultOneDrivePolicy'
+)
+$xmlH03Functions = @(
+    'Get-TMPCPrivilegedSidList','Test-TMPCPrivilegedSid','Get-TMPCAclSnapshot',
+    'Test-TMPCDirectoryAclSnapshot','Test-TMPCFileAclSnapshot','Test-TMPCDiagnosticAclSnapshot',
+    'Test-TMPCPropertyPresent','Get-TMPCOverallStatus','Test-TMPCSetupSummarySchema',
+    'Test-TMPCSetupExecutionIdentity','Resolve-TMPCCleanupTaskState','Get-TMPCCleanupTaskState',
+    'Get-TMPCCleanupDecision'
+)
+$xmlCleanupCommandFunctions = @(
+    $xmlH03Functions +
+    @('Get-TMPCDiagnosticDirectory','Get-TMPCSetupSummaryPath','Read-TMPCSetupSummary',
+      'Write-TMPCSetupSummary','Get-TMPCSetupExecutionId','Get-TMPCCleanupCommand')
+)
+$xmlSummaryFunctions = @(
+    $xmlCleanupCommandFunctions + @('Update-TMPCUserPhaseSummary')
 )
 
 # ---------------------------------------------------------------------------
@@ -661,6 +696,505 @@ Invoke-TMPCTestCase 'D24g' 'XML OneDrive: reparse point, sync root and allowlist
     Assert-TestThrows { Remove-OneDriveRemnant -Path 'C:\Users\TMPC-Test\Documents' -AllowedRoots @() -ProtectedRoots @() } 'Deletion target rejected' 'path outside the allowlist'
 }
 
+$productionFunctions = New-TMPCFunctionsScriptBlock -Text $sysText -Names $xmlIdentityFunctions
+. $productionFunctions
+
+Invoke-TMPCTestCase 'D31' 'Identity: SID from Explorer/ProfileList, not the profile name' {
+    $profiles = @([pscustomobject]@{ Sid = 'S-1-5-21-1001'; ProfileImagePath = 'C:\Users\OldName' })
+    $explorers = @([pscustomobject]@{ SessionId = 2; OwnerSid = 'S-1-5-21-1001'; OwnerUser = 'NewName' })
+    $identity = Resolve-TMPCInteractiveIdentity -ExplorerProcesses $explorers -Profiles $profiles
+    Assert-TestEqual 'OK' $identity.Status 'renamed account and different profile folder must resolve'
+    Assert-TestEqual 'S-1-5-21-1001' $identity.Sid 'SID must come from the owner'
+    Assert-TestEqual 'C:\Users\OldName' $identity.ProfilePath 'profile path must come from ProfileList by SID'
+    Assert-TestEqual 'NewName' $identity.UserName 'owner name is informative only'
+
+    $msaProfiles = @([pscustomobject]@{ Sid = 'S-1-5-21-2002'; ProfileImagePath = 'C:\Users\alvar' })
+    $msaExplorers = @([pscustomobject]@{ SessionId = 3; OwnerSid = 'S-1-5-21-2002'; OwnerUser = 'alvaro@example.com' })
+    $msa = Resolve-TMPCInteractiveIdentity -ExplorerProcesses $msaExplorers -Profiles $msaProfiles
+    Assert-TestEqual 'OK' $msa.Status 'Microsoft account simulation must resolve by SID'
+    Assert-TestEqual 'C:\Users\alvar' $msa.ProfilePath 'MSA profile folder may differ from the account name'
+
+    $sameSidExplorers = @(
+        [pscustomobject]@{ SessionId = 4; OwnerSid = 'S-1-5-21-3003'; OwnerUser = 'User' },
+        [pscustomobject]@{ SessionId = 4; OwnerSid = 'S-1-5-21-3003'; OwnerUser = 'User' }
+    )
+    $sameSid = Resolve-TMPCInteractiveIdentity -ExplorerProcesses $sameSidExplorers -Profiles @([pscustomobject]@{ Sid = 'S-1-5-21-3003'; ProfileImagePath = 'C:\Users\User' })
+    Assert-TestEqual 'OK' $sameSid.Status 'multiple Explorer processes with the same SID are valid'
+
+    $otherSession = @(
+        [pscustomobject]@{ SessionId = 5; OwnerSid = 'S-1-5-21-4004'; OwnerUser = 'User' },
+        [pscustomobject]@{ SessionId = 6; OwnerSid = 'S-1-5-21-4004'; OwnerUser = 'User' }
+    )
+    $other = Resolve-TMPCInteractiveIdentity -ExplorerProcesses $otherSession -Profiles @([pscustomobject]@{ Sid = 'S-1-5-21-4004'; ProfileImagePath = 'C:\Users\User' })
+    Assert-TestEqual 'AMBIGUOUS_SESSION' $other.Status 'more than one interactive session must defer'
+
+    $differentIdentities = @(
+        [pscustomobject]@{ SessionId = 7; OwnerSid = 'S-1-5-21-5005'; OwnerUser = 'UserA' },
+        [pscustomobject]@{ SessionId = 7; OwnerSid = 'S-1-5-21-6006'; OwnerUser = 'UserB' }
+    )
+    $different = Resolve-TMPCInteractiveIdentity -ExplorerProcesses $differentIdentities -Profiles @()
+    Assert-TestEqual 'AMBIGUOUS_IDENTITY' $different.Status 'different SIDs in one session must defer'
+
+    $noExplorer = Resolve-TMPCInteractiveIdentity -ExplorerProcesses @() -Profiles @()
+    Assert-TestEqual 'NO_EXPLORER' $noExplorer.Status 'no Explorer is not a fallback account'
+
+    $unknownProfile = Resolve-TMPCInteractiveIdentity -ExplorerProcesses $explorers -Profiles @()
+    Assert-TestEqual 'PROFILE_NOT_FOUND' $unknownProfile.Status 'SID without ProfileList entry must defer'
+
+    $mismatch = Resolve-TMPCInteractiveIdentity -ExplorerProcesses $explorers -Profiles $profiles -CurrentSid 'S-1-5-21-9999'
+    Assert-TestEqual 'IDENTITY_MISMATCH' $mismatch.Status 'a mismatched current SID must defer'
+}
+
+Invoke-TMPCTestCase 'D31b' 'Identity: selected and linked tokens must match the expected SID' {
+    Assert-TestTrue (Test-TMPCIdentityMatch -ExpectedSid 'S-1-5-21-1' -ActualSid 'S-1-5-21-1') 'matching token'
+    Assert-TestTrue (-not (Test-TMPCIdentityMatch -ExpectedSid 'S-1-5-21-1' -ActualSid 'S-1-5-21-2')) 'different token SID'
+    Assert-TestTrue (-not (Test-TMPCIdentityMatch -ExpectedSid 'S-1-5-21-1' -ActualSid 'S-1-5-21-1' -LinkedSid 'S-1-5-21-2')) 'different linked token SID'
+    Assert-TestTrue (-not (Test-TMPCIdentityMatch -ExpectedSid 'S-1-5-21-1' -ActualSid '')) 'unknown token SID'
+}
+
+$productionFunctions = New-TMPCFunctionsScriptBlock -Text $oneDriveText -Names $xmlDefaultHiveFunctions
+. $productionFunctions
+. (Join-Path $script:TestsRoot 'TMPC.Tests.Helpers.ps1')
+
+function Reset-TestDefaultHiveState {
+    $script:TestDefaultMountPresent = $false
+    $script:TestDefaultUnloadExit = 0
+    $script:TestDefaultKeepMounted = $false
+    $script:TestDefaultLoadExit = 0
+    $script:TestDefaultLoadCalls = 0
+    $script:TestDefaultUnloadCalls = 0
+    $script:TestDefaultMountName = $null
+    $script:TestFailDefaultValueWrite = $false
+    $script:TestFailMarkerWrite = $false
+}
+function Get-TMPCDefaultHivePath { return 'C:\Users\Default\NTUSER.DAT' }
+function Test-TMPCDefaultHiveMounted { param([string]$MountName) return [bool]$script:TestDefaultMountPresent }
+function Invoke-TMPCDefaultHiveLoad {
+    param([string]$MountName, [string]$HivePath)
+    $script:TestDefaultLoadCalls++
+    if ($script:TestDefaultLoadExit -ne 0) { return [int]$script:TestDefaultLoadExit }
+    $script:TestDefaultMountName = $MountName
+    $script:TestDefaultMountPresent = $true
+    $run = "Registry::HKEY_USERS\$MountName\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+    $thdf = "Registry::HKEY_USERS\$MountName\SOFTWARE\Microsoft\OneDrive"
+    Add-TestRegistryKey -Path $run
+    Add-TestRegistryKey -Path $thdf
+    Set-TestRegistryValue -Path $run -Name 'OneDriveSetup' -Kind String -Value 'present'
+    Set-TestRegistryValue -Path $thdf -Name 'EnableTHDFFeatures' -Kind DWord -Value 1
+    return 0
+}
+function Invoke-TMPCDefaultHiveUnload {
+    param([string]$MountName)
+    $script:TestDefaultUnloadCalls++
+    if ($script:TestDefaultUnloadExit -eq 0 -and -not $script:TestDefaultKeepMounted) { $script:TestDefaultMountPresent = $false }
+    return [int]$script:TestDefaultUnloadExit
+}
+function New-TMPCRegistryKey { param([string]$Path) Add-TestRegistryKey -Path $Path }
+function Set-TMPCRegistryEntryValue {
+    param([string]$Path, [string]$Name, [string]$Type, $Value)
+    if ($script:TestFailDefaultValueWrite) { throw 'value write denied by test double' }
+    if ($script:TestFailMarkerWrite -and $Path -eq 'HKLM:\SOFTWARE\Autounattend\OneDriveRemoval') { throw 'marker write denied by test double' }
+    $kind = switch ($Type) {
+        'DWord' { [Microsoft.Win32.RegistryValueKind]::DWord }
+        'String' { [Microsoft.Win32.RegistryValueKind]::String }
+        default { throw 'Unsupported registry type.' }
+    }
+    Set-TestRegistryValue -Path $Path -Name $Name -Kind $kind -Value $Value
+}
+
+Invoke-TMPCTestCase 'D32' 'Default hive: load, write and unload verified before marker' {
+    Reset-TestDefaultHiveState
+    Add-TestPathChain -Path 'C:\Users\Default\NTUSER.DAT' -LeafIsContainer $false
+    $result = Invoke-DefaultOneDrivePolicy
+    Assert-TestEqual 'APPLIED' $result 'verified lifecycle must apply'
+    Assert-TestTrue (-not $script:TestDefaultMountPresent) 'temporary mount must be gone'
+    $marker = Get-TestRegistryValue -Path 'HKLM:\SOFTWARE\Autounattend\OneDriveRemoval' -Name 'DefaultUserConfigured'
+    Assert-TestTrue ($null -ne $marker) 'marker must exist after verified unload'
+    $run = Get-TestRegistryValue -Path ("Registry::HKEY_USERS\$($script:TestDefaultMountName)\SOFTWARE\Microsoft\Windows\CurrentVersion\Run") -Name 'OneDriveSetup'
+    Assert-TestTrue ($null -eq $run) 'OneDriveSetup Run value must be removed'
+    $thdf = Get-TestRegistryValue -Path ("Registry::HKEY_USERS\$($script:TestDefaultMountName)\SOFTWARE\Microsoft\OneDrive") -Name 'EnableTHDFFeatures'
+    Assert-TestEqual 0 $thdf.Value 'EnableTHDFFeatures must be 0'
+}
+
+Invoke-TMPCTestCase 'D32b' 'Default hive: load failure does not write the marker' {
+    Reset-TestDefaultHiveState
+    $script:TestDefaultLoadExit = 1
+    Add-TestPathChain -Path 'C:\Users\Default\NTUSER.DAT' -LeafIsContainer $false
+    $result = Invoke-DefaultOneDrivePolicy
+    Assert-TestEqual 'FAILED' $result 'load failure is a failure'
+    Assert-TestEqual 1 $script:TestDefaultLoadCalls 'load attempted once'
+    Assert-TestTrue ($null -eq (Get-TestRegistryValue -Path 'HKLM:\SOFTWARE\Autounattend\OneDriveRemoval' -Name 'DefaultUserConfigured')) 'no marker on load failure'
+}
+
+Invoke-TMPCTestCase 'D32c' 'Default hive: unload nonzero or still mounted prevents success' {
+    Reset-TestDefaultHiveState
+    $script:TestDefaultUnloadExit = 1
+    $script:TestDefaultKeepMounted = $true
+    Add-TestPathChain -Path 'C:\Users\Default\NTUSER.DAT' -LeafIsContainer $false
+    $result = Invoke-DefaultOneDrivePolicy
+    Assert-TestEqual 'FAILED' $result 'unload failure is not success'
+    Assert-TestTrue ($script:TestDefaultUnloadCalls -ge 3) 'unload retries must be bounded but attempted'
+    Assert-TestTrue ($null -eq (Get-TestRegistryValue -Path 'HKLM:\SOFTWARE\Autounattend\OneDriveRemoval' -Name 'DefaultUserConfigured')) 'no marker after unload failure'
+}
+
+Invoke-TMPCTestCase 'D32d' 'Default hive: unload code zero with key still present prevents success' {
+    Reset-TestDefaultHiveState
+    $script:TestDefaultUnloadExit = 0
+    $script:TestDefaultKeepMounted = $true
+    Add-TestPathChain -Path 'C:\Users\Default\NTUSER.DAT' -LeafIsContainer $false
+    $result = Invoke-DefaultOneDrivePolicy
+    Assert-TestEqual 'FAILED' $result 'a remaining mount is not a verified unload'
+    Assert-TestEqual 3 $script:TestDefaultUnloadCalls 'the bounded retry count must be exhausted'
+    Assert-TestTrue ($null -eq (Get-TestRegistryValue -Path 'HKLM:\SOFTWARE\Autounattend\OneDriveRemoval' -Name 'DefaultUserConfigured')) 'no marker while the mount remains'
+}
+
+Invoke-TMPCTestCase 'D32e' 'Default hive: a preexisting foreign mount is not touched' {
+    Reset-TestDefaultHiveState
+    $script:TestDefaultMountPresent = $true
+    Add-TestPathChain -Path 'C:\Users\Default\NTUSER.DAT' -LeafIsContainer $false
+    $result = Invoke-DefaultOneDrivePolicy
+    Assert-TestEqual 'DEFERRED' $result 'preexisting mount must defer'
+    Assert-TestEqual 0 $script:TestDefaultLoadCalls 'no load on a preexisting mount'
+    Assert-TestTrue ($null -eq (Get-TestRegistryValue -Path 'HKLM:\SOFTWARE\Autounattend\OneDriveRemoval' -Name 'DefaultUserConfigured')) 'no marker on deferral'
+}
+
+Invoke-TMPCTestCase 'D32f' 'Default hive: value or marker write failure prevents success' {
+    Reset-TestDefaultHiveState
+    $script:TestFailDefaultValueWrite = $true
+    Add-TestPathChain -Path 'C:\Users\Default\NTUSER.DAT' -LeafIsContainer $false
+    Assert-TestEqual 'FAILED' (Invoke-DefaultOneDrivePolicy) 'value write failure must fail'
+    Assert-TestTrue ($null -eq (Get-TestRegistryValue -Path 'HKLM:\SOFTWARE\Autounattend\OneDriveRemoval' -Name 'DefaultUserConfigured')) 'no marker on value failure'
+
+    Reset-TestDefaultHiveState
+    $script:TestFailMarkerWrite = $true
+    Add-TestPathChain -Path 'C:\Users\Default\NTUSER.DAT' -LeafIsContainer $false
+    Assert-TestEqual 'FAILED' (Invoke-DefaultOneDrivePolicy) 'marker write failure must fail'
+    Assert-TestTrue (-not $script:TestDefaultMountPresent) 'unload must still be verified'
+}
+
+Invoke-TMPCTestCase 'D32g' 'Default hive: a legacy marker is revalidated after verified unload' {
+    Reset-TestDefaultHiveState
+    Set-TestRegistryValue -Path 'HKLM:\SOFTWARE\Autounattend\OneDriveRemoval' -Name 'DefaultUserConfigured' -Kind String -Value '2026-01-01 00:00:00'
+    Add-TestPathChain -Path 'C:\Users\Default\NTUSER.DAT' -LeafIsContainer $false
+    $result = Invoke-DefaultOneDrivePolicy
+    Assert-TestEqual 'APPLIED' $result 'legacy marker must not be trusted'
+    $marker = Get-TestRegistryValue -Path 'HKLM:\SOFTWARE\Autounattend\OneDriveRemoval' -Name 'DefaultUserConfigured'
+    Assert-TestTrue ([string]$marker.Value).StartsWith('R1|') 'the replacement marker must carry the R1 schema'
+    Assert-TestTrue (-not $script:TestDefaultMountPresent) 'verified unload required before the new marker'
+}
+
+$productionFunctions = New-TMPCFunctionsScriptBlock -Text $oneDriveText -Names $xmlOneDriveScopeFunctions
+. $productionFunctions
+. (Join-Path $script:TestsRoot 'TMPC.Tests.Helpers.ps1')
+
+Invoke-TMPCTestCase 'D33' 'XML OneDrive: UNKNOWN is not absence and scopes stay independent' {
+    Set-TestRegistryValue -Path 'HKLM:\TMPC-OD-Machine' -Name 'UninstallString' -Kind String -Value 'present'
+    Assert-TestEqual 'PRESENT' (Get-TMPCOneDriveRegistrationState -Path 'HKLM:\TMPC-OD-Machine') 'present registration'
+    Assert-TestEqual 'ABSENT_VERIFIED' (Get-TMPCOneDriveRegistrationState -Path 'HKLM:\TMPC-OD-Missing') 'missing key is verified absence'
+    $script:TestFailRead = $true
+    Assert-TestEqual 'UNKNOWN' (Get-TMPCOneDriveRegistrationState -Path 'HKLM:\TMPC-OD-Machine') 'denied read is unknown'
+    $script:TestFailRead = $false
+
+    $machineOnly = Get-TMPCOneDriveCleanupPlan -MachineUninstalled $true -UserUninstalled $false -MachineAbsentVerified $false -UserAbsentVerified $false -CanApplyUser $true
+    Assert-TestTrue ($machineOnly.RemoveMachineConfiguration -and -not $machineOnly.RemoveUserConfiguration) 'machine evidence only authorizes machine cleanup'
+    $userOnly = Get-TMPCOneDriveCleanupPlan -MachineUninstalled $false -UserUninstalled $true -MachineAbsentVerified $false -UserAbsentVerified $false -CanApplyUser $true
+    Assert-TestTrue ($userOnly.RemoveUserConfiguration -and -not $userOnly.RemoveMachineConfiguration) 'user evidence only authorizes user cleanup'
+    $noIdentity = Get-TMPCOneDriveCleanupPlan -MachineUninstalled $false -UserUninstalled $true -MachineAbsentVerified $false -UserAbsentVerified $false -CanApplyUser $false
+    Assert-TestTrue (-not $noIdentity.RemoveUserConfiguration -and -not $noIdentity.RemoveUserRemnants) 'no verified identity means no user cleanup'
+    $absent = Get-TMPCOneDriveCleanupPlan -MachineUninstalled $false -UserUninstalled $false -MachineAbsentVerified $true -UserAbsentVerified $true -CanApplyUser $true
+    Assert-TestTrue ($absent.RemoveMachineConfiguration -and $absent.RemoveMachineRemnants -and $absent.RemoveUserConfiguration -and $absent.RemoveUserRemnants) 'independent verified absence authorizes each scope'
+}
+
+$productionFunctions = New-TMPCFunctionsScriptBlock -Text $sysText -Names $xmlSummaryFunctions
+. $productionFunctions
+
+$script:TestExecutionId = '11111111-1111-1111-1111-111111111111'
+function New-TestH03Summary {
+    param([string]$SystemPhase = 'SUCCESS', [string]$HkcUserPhase = 'PENDING')
+    $bloat = 'SUCCESS'
+    $oneDrive = 'SUCCESS'
+    $systemErrors = $false
+    $systemDeferred = $false
+    switch ($SystemPhase) {
+        'PARTIAL_SUCCESS' { $oneDrive = 'FAILED'; $systemErrors = $true }
+        'FAILED' { $bloat = 'FAILED'; $oneDrive = 'FAILED'; $systemErrors = $true }
+        'DEFERRED' { $bloat = 'DEFERRED'; $oneDrive = 'DEFERRED'; $systemDeferred = $true }
+    }
+    $hkcErrors = ($HkcUserPhase -eq 'FAILED')
+    $hkcDeferred = ($HkcUserPhase -eq 'DEFERRED')
+    $hkcAttempts = if ($HkcUserPhase -eq 'PENDING') { 0 } else { 1 }
+    $hkcOutcome = switch ($HkcUserPhase) {
+        'SUCCESS' { 'SUCCESS' }
+        'FAILED' { 'TRANSIENT' }
+        'DEFERRED' { 'DEFERRED' }
+        default { 'PENDING' }
+    }
+    $overall = if ($HkcUserPhase -eq 'PENDING') { 'UNKNOWN_OR_INTERRUPTED' } else { Get-TMPCOverallStatus -SystemPhase $SystemPhase -HkcUserPhase $HkcUserPhase }
+    return [pscustomobject]@{
+        SchemaVersion       = 1
+        Profile             = 'TMPC-Windows-11-Optimization'
+        Revision            = 'R2-local'
+        ExecutionId         = [string]$script:TestExecutionId
+        SystemPhase         = $SystemPhase
+        SystemHadErrors     = $systemErrors
+        SystemDeferred      = $systemDeferred
+        BloatStatus         = $bloat
+        OneDriveStatus      = $oneDrive
+        UserTaskRegistration = 'SUCCESS'
+        HkcUserPhase        = $HkcUserPhase
+        HkcHadErrors        = $hkcErrors
+        HkcDeferred         = $hkcDeferred
+        HkcAttempts         = $hkcAttempts
+        HkcOutcome          = $hkcOutcome
+        HkcRetryExhausted   = $false
+        HkcReason           = ''
+        CleanupStatus       = 'PENDING'
+        CleanupAttempts     = 0
+        CleanupReason       = ''
+        CleanupTimestampUtc = ''
+        OverallStatus       = $overall
+        TimestampUtc        = (Get-Date).ToUniversalTime().ToString('o')
+    }
+}
+function Read-TMPCSetupSummary {
+    return $script:TestSummaryObject
+}
+function Write-TMPCSetupSummary {
+    param([hashtable]$Values, [switch]$Reset)
+    foreach ($key in $Values.Keys) {
+        $script:TestSummaryObject | Add-Member -NotePropertyName $key -NotePropertyValue $Values[$key] -Force
+    }
+    $script:TestLastSummaryValues = $Values
+    return 'test-summary'
+}
+function Get-TMPCSetupExecutionId {
+    return [string]$script:TestExecutionId
+}
+
+Invoke-TMPCTestCase 'D34' 'Summary: a later HKCU success cannot erase a SYSTEM failure' {
+    $script:TestSummaryObject = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'PENDING'
+    $result = Update-TMPCUserPhaseSummary -Phase 'SUCCESS' -HadErrors $false -Deferred $false
+    Assert-TestEqual 'test-summary' $result 'summary update path'
+    Assert-TestEqual 'SUCCESS' $script:TestLastSummaryValues.OverallStatus 'both phases successful'
+
+    $script:TestSummaryObject = New-TestH03Summary -SystemPhase 'PARTIAL_SUCCESS' -HkcUserPhase 'PENDING'
+    $null = Update-TMPCUserPhaseSummary -Phase 'SUCCESS' -HadErrors $false -Deferred $false
+    Assert-TestEqual 'PARTIAL_SUCCESS' $script:TestLastSummaryValues.OverallStatus 'SYSTEM partial plus HKCU success remains partial'
+
+    $script:TestSummaryObject = New-TestH03Summary -SystemPhase 'FAILED' -HkcUserPhase 'PENDING'
+    $null = Update-TMPCUserPhaseSummary -Phase 'SUCCESS' -HadErrors $false -Deferred $false
+    Assert-TestEqual 'PARTIAL_SUCCESS' $script:TestLastSummaryValues.OverallStatus 'SYSTEM failure is not converted to global success'
+
+    $script:TestSummaryObject = New-TestH03Summary -SystemPhase 'FAILED' -HkcUserPhase 'PENDING'
+    $null = Update-TMPCUserPhaseSummary -Phase 'FAILED' -HadErrors $true -Deferred $false
+    Assert-TestEqual 'FAILED' $script:TestLastSummaryValues.OverallStatus 'both phases failed'
+
+    $script:TestSummaryObject = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'PENDING'
+    $null = Update-TMPCUserPhaseSummary -Phase 'DEFERRED' -HadErrors $false -Deferred $true
+    Assert-TestEqual 'DEFERRED' $script:TestLastSummaryValues.OverallStatus 'deferred user phase'
+
+    $script:TestSummaryObject = New-TestH03Summary -SystemPhase 'DEFERRED' -HkcUserPhase 'PENDING'
+    $null = Update-TMPCUserPhaseSummary -Phase 'FAILED' -HadErrors $true -Deferred $false
+    Assert-TestEqual 'PARTIAL_SUCCESS' $script:TestLastSummaryValues.OverallStatus 'a failure is not hidden by a deferral'
+
+    $script:TestSummaryObject = New-TestH03Summary -SystemPhase 'UNKNOWN_OR_INTERRUPTED' -HkcUserPhase 'PENDING'
+    $null = Update-TMPCUserPhaseSummary -Phase 'SUCCESS' -HadErrors $false -Deferred $false
+    Assert-TestEqual 'UNKNOWN_OR_INTERRUPTED' $script:TestLastSummaryValues.OverallStatus 'unknown SYSTEM state stays unknown'
+
+    $script:TestSummaryObject = $null
+    Assert-TestThrows { Update-TMPCUserPhaseSummary -Phase 'SUCCESS' -HadErrors $false -Deferred $false } 'missing or invalid' 'missing summary must not be accepted'
+}
+
+$productionFunctions = New-TMPCFunctionsScriptBlock -Text $sysText -Names $xmlCleanupCommandFunctions
+. $productionFunctions
+
+Invoke-TMPCTestCase 'D34b' 'Cleanup: only trusted SUCCESS authorizes deletion' {
+    $command = Get-TMPCCleanupCommand
+    Assert-TestTrue ($command.Contains('Get-TMPCCleanupDecision')) 'cleanup must use the decision helper'
+    Assert-TestTrue ($command.Contains('Test-TMPCSetupSummarySchema')) 'cleanup must validate the summary schema'
+    Assert-TestTrue ($command.Contains('Test-TMPCSetupExecutionIdentity')) 'cleanup must validate the execution identity'
+    Assert-TestTrue ($command.Contains('Get-TMPCCleanupTaskState')) 'cleanup must classify the one-shot task'
+    Assert-TestTrue ($command.Contains('ABSENT_VERIFIED')) 'cleanup must require verified absence'
+    Assert-TestTrue ($command.Contains('PRESENT') -and $command.Contains('UNKNOWN')) 'cleanup must distinguish present and unknown task states'
+    Assert-TestTrue ($command.Contains('Get-TMPCAclSnapshot')) 'cleanup must revalidate ACLs'
+    Assert-TestTrue ($command.Contains("TMPC-Windows-11-Optimization")) 'cleanup must revalidate the parent directory ACL'
+    Assert-TestTrue ($command.Contains('CleanupStatus')) 'cleanup must persist its real status'
+    Assert-TestTrue ($command.Contains('Test-Path -LiteralPath')) 'cleanup must verify deletion'
+    Assert-TestTrue ($command.Contains('Unregister-ScheduledTask')) 'cleanup must unregister only after handling'
+    Assert-TestTrue ($command.Contains('IN_PROGRESS')) 'cleanup must record an in-progress state before deletion'
+    Assert-TestTrue (-not ($command -match 'S-1-5-21-\d+-\d+-\d+-\d+')) 'cleanup command must not contain user SIDs'
+    Assert-TestTrue (-not $command.Contains('$env:USERNAME')) 'cleanup command must not contain user names'
+}
+
+Invoke-TMPCTestCase 'D34c' 'Cleanup command parses with the Windows PowerShell 5.1 parser' {
+    $command = Get-TMPCCleanupCommand
+    Assert-TestTrue (-not $command.Contains('"')) 'cleanup command must not contain double quotes'
+    Assert-TestTrue ($command.Length -lt 30000) 'cleanup command must fit the task argument budget'
+    $tokens = $null
+    $errors = $null
+    [System.Management.Automation.Language.Parser]::ParseInput($command, [ref]$tokens, [ref]$errors) | Out-Null
+    Assert-TestEqual 0 @($errors).Count 'the cleanup command must be syntactically valid'
+}
+
+function New-TestAclSnapshot {
+    param(
+        [bool]$IsContainer,
+        [string]$OwnerSid = 'S-1-5-18',
+        [string]$UserRights = 'ReadAndExecute, Synchronize',
+        [System.IO.FileAttributes]$Attributes = [System.IO.FileAttributes]::Normal
+    )
+    $rightsValue = [int][System.Security.AccessControl.FileSystemRights]$UserRights
+    return [pscustomobject]@{
+        Path        = 'C:\Test'
+        Exists      = $true
+        IsContainer = $IsContainer
+        Attributes  = $Attributes
+        OwnerSid    = $OwnerSid
+        Rules       = @(
+            [pscustomobject]@{ Identity = 'S-1-5-18'; Rights = 'FullControl'; RightsValue = 2032127; Type = 'Allow' },
+            [pscustomobject]@{ Identity = 'S-1-5-32-544'; Rights = 'FullControl'; RightsValue = 2032127; Type = 'Allow' },
+            [pscustomobject]@{ Identity = 'S-1-5-32-545'; Rights = $UserRights; RightsValue = $rightsValue; Type = 'Allow' }
+        )
+    }
+}
+
+Invoke-TMPCTestCase 'D35' 'Diagnostic ACL: owner and effective write rights are enforced' {
+    $directory = New-TestAclSnapshot -IsContainer $true -Attributes ([System.IO.FileAttributes]::Directory)
+    $file = New-TestAclSnapshot -IsContainer $false
+    Assert-TestTrue (Test-TMPCDiagnosticAclSnapshot -DirectorySnapshot $directory -FileSnapshot $file) 'trusted SYSTEM ACL'
+
+    $unsafeDirectory = New-TestAclSnapshot -IsContainer $true -UserRights 'Modify' -Attributes ([System.IO.FileAttributes]::Directory)
+    Assert-TestTrue (-not (Test-TMPCDiagnosticAclSnapshot -DirectorySnapshot $unsafeDirectory -FileSnapshot $file)) 'directory Modify is unsafe'
+
+    $unsafeFile = New-TestAclSnapshot -IsContainer $false -UserRights 'Write'
+    Assert-TestTrue (-not (Test-TMPCDiagnosticAclSnapshot -DirectorySnapshot $directory -FileSnapshot $unsafeFile)) 'file write is unsafe'
+
+    $untrustedOwner = New-TestAclSnapshot -IsContainer $false -OwnerSid 'S-1-1-0'
+    Assert-TestTrue (-not (Test-TMPCDiagnosticAclSnapshot -DirectorySnapshot $directory -FileSnapshot $untrustedOwner)) 'untrusted owner is rejected'
+
+    $reparse = New-TestAclSnapshot -IsContainer $false -Attributes ([System.IO.FileAttributes]::ReparsePoint)
+    Assert-TestTrue (-not (Test-TMPCDiagnosticAclSnapshot -DirectorySnapshot $directory -FileSnapshot $reparse)) 'reparse point is rejected'
+    Assert-TestTrue (-not (Test-TMPCDiagnosticAclSnapshot -DirectorySnapshot $null -FileSnapshot $file)) 'missing ACL snapshot is rejected'
+
+    # Numeric masks are authoritative: a deceptive friendly name cannot hide
+    # an effective Modify grant, and a missing mask fails closed.
+    $masked = New-TestAclSnapshot -IsContainer $true -Attributes ([System.IO.FileAttributes]::Directory)
+    $masked.Rules[2].Rights = 'ReadAndExecute, Synchronize'
+    $masked.Rules[2].RightsValue = [int][System.Security.AccessControl.FileSystemRights]::Modify
+    Assert-TestTrue (-not (Test-TMPCDirectoryAclSnapshot -Snapshot $masked)) 'effective Modify mask is rejected despite a read-only label'
+    $masked.Rules[2].RightsValue = [int][System.Security.AccessControl.FileSystemRights]::ReadAndExecute
+    Assert-TestTrue (Test-TMPCDirectoryAclSnapshot -Snapshot $masked) 'read-only mask is accepted'
+    $masked.Rules[2].PSObject.Properties.Remove('RightsValue')
+    Assert-TestTrue (-not (Test-TMPCDirectoryAclSnapshot -Snapshot $masked)) 'missing numeric mask fails closed'
+}
+
+Invoke-TMPCTestCase 'D35b' 'Summary schema: required fields and phase consistency' {
+    $summary = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'SUCCESS'
+    Assert-TestTrue (Test-TMPCSetupSummarySchema -Summary $summary) 'valid summary'
+
+    $missing = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'SUCCESS'
+    $missing.PSObject.Properties.Remove('ExecutionId')
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $missing)) 'missing execution id'
+
+    $revision = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'SUCCESS'
+    $revision.Revision = 'R1-local'
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $revision)) 'incompatible revision'
+    $contradiction = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'FAILED'
+    $contradiction.OverallStatus = 'SUCCESS'
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $contradiction)) 'overall status contradiction'
+
+    $systemErrors = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'SUCCESS'
+    $systemErrors.SystemHadErrors = $true
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $systemErrors)) 'SYSTEM success with errors'
+
+    $systemSubstatus = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'SUCCESS'
+    $systemSubstatus.BloatStatus = 'FAILED'
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $systemSubstatus)) 'SYSTEM success with failed substatus'
+
+    $hkcErrors = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'FAILED'
+    $hkcErrors.HkcHadErrors = $false
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $hkcErrors)) 'HKCU failure without error marker'
+
+    $hkcDeferred = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'DEFERRED'
+    $hkcDeferred.HkcDeferred = $false
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $hkcDeferred)) 'HKCU deferral without deferral marker'
+
+    $attempts = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'SUCCESS'
+    $attempts.CleanupAttempts = -1
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $attempts)) 'negative cleanup attempts'
+
+    $hkcAttempts = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'SUCCESS'
+    $hkcAttempts.HkcAttempts = 0
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $hkcAttempts)) 'successful HKCU phase with zero attempts'
+
+    $hkcOutcome = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'SUCCESS'
+    $hkcOutcome.HkcOutcome = 'TRANSIENT'
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $hkcOutcome)) 'successful HKCU phase with a non-success outcome'
+
+    $exhausted = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'FAILED'
+    $exhausted.HkcRetryExhausted = $true
+    $exhausted.HkcAttempts = 3
+    Assert-TestTrue (Test-TMPCSetupSummarySchema -Summary $exhausted) 'exhausted HKCU failure is valid'
+    $exhausted.HkcUserPhase = 'SUCCESS'
+    $exhausted.HkcAttempts = 1
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $exhausted)) 'exhausted flag on success is rejected'
+
+    $missingHkc = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'SUCCESS'
+    $missingHkc.PSObject.Properties.Remove('HkcOutcome')
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $missingHkc)) 'missing HKCU outcome is rejected'
+
+    $timestamp = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'SUCCESS'
+    $timestamp.TimestampUtc = 'not-a-date'
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $timestamp)) 'invalid timestamp'
+
+    $pending = New-TestH03Summary -SystemPhase 'PENDING' -HkcUserPhase 'PENDING'
+    Assert-TestTrue (-not (Test-TMPCSetupSummarySchema -Summary $pending)) 'interrupted SYSTEM phase is rejected'
+}
+
+Invoke-TMPCTestCase 'D35c' 'Execution identity: summary must match protected HKLM id' {
+    $summary = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'SUCCESS'
+    Assert-TestTrue (Test-TMPCSetupExecutionIdentity -Summary $summary -RegistryExecutionId $script:TestExecutionId) 'matching execution id'
+    Assert-TestTrue (Test-TMPCSetupExecutionIdentity -Summary $summary -RegistryExecutionId $script:TestExecutionId.ToUpperInvariant()) 'case-insensitive execution id'
+    Assert-TestTrue (-not (Test-TMPCSetupExecutionIdentity -Summary $summary -RegistryExecutionId '22222222-2222-2222-2222-222222222222')) 'different execution id'
+    Assert-TestTrue (-not (Test-TMPCSetupExecutionIdentity -Summary $summary -RegistryExecutionId 'INVALID')) 'invalidated execution id'
+    Assert-TestTrue (-not (Test-TMPCSetupExecutionIdentity -Summary $summary -RegistryExecutionId $null)) 'missing registry execution id'
+}
+
+Invoke-TMPCTestCase 'D35d' 'One-shot task state: present, absent verified and unknown' {
+    Assert-TestEqual 'PRESENT' (Resolve-TMPCCleanupTaskState -QuerySucceeded $true -TaskFound $true -ErrorIsNotFound $false) 'present task'
+    Assert-TestEqual 'UNKNOWN' (Resolve-TMPCCleanupTaskState -QuerySucceeded $true -TaskFound $false -ErrorIsNotFound $false) 'unexpected null is unknown'
+    Assert-TestEqual 'ABSENT_VERIFIED' (Resolve-TMPCCleanupTaskState -QuerySucceeded $false -TaskFound $false -ErrorIsNotFound $true) 'not-found error is verified absence'
+    Assert-TestEqual 'UNKNOWN' (Resolve-TMPCCleanupTaskState -QuerySucceeded $false -TaskFound $false -ErrorIsNotFound $false) 'access error is unknown'
+}
+
+Invoke-TMPCTestCase 'D35e' 'Cleanup decision: ACL, schema, identity, status and task state' {
+    $directory = New-TestAclSnapshot -IsContainer $true -Attributes ([System.IO.FileAttributes]::Directory)
+    $file = New-TestAclSnapshot -IsContainer $false
+    $summary = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'SUCCESS'
+    Assert-TestEqual 'ALLOW' (Get-TMPCCleanupDecision -Summary $summary -RegistryExecutionId $script:TestExecutionId -DirectoryAcl $directory -FileAcl $file -TaskState 'ABSENT_VERIFIED') 'all conditions allow cleanup'
+    Assert-TestEqual 'RETRY' (Get-TMPCCleanupDecision -Summary $summary -RegistryExecutionId $script:TestExecutionId -DirectoryAcl $directory -FileAcl $file -TaskState 'PRESENT') 'present task retries'
+    Assert-TestEqual 'RETRY' (Get-TMPCCleanupDecision -Summary $summary -RegistryExecutionId $script:TestExecutionId -DirectoryAcl $directory -FileAcl $file -TaskState 'UNKNOWN') 'unknown task retries'
+    Assert-TestEqual 'STOP' (Get-TMPCCleanupDecision -Summary $summary -RegistryExecutionId $script:TestExecutionId -DirectoryAcl $directory -FileAcl (New-TestAclSnapshot -IsContainer $false -UserRights 'Modify') -TaskState 'ABSENT_VERIFIED') 'unsafe ACL stops'
+    Assert-TestEqual 'STOP' (Get-TMPCCleanupDecision -Summary $summary -RegistryExecutionId '22222222-2222-2222-2222-222222222222' -DirectoryAcl $directory -FileAcl $file -TaskState 'ABSENT_VERIFIED') 'execution mismatch stops'
+    $partial = New-TestH03Summary -SystemPhase 'PARTIAL_SUCCESS' -HkcUserPhase 'SUCCESS'
+    Assert-TestEqual 'STOP' (Get-TMPCCleanupDecision -Summary $partial -RegistryExecutionId $script:TestExecutionId -DirectoryAcl $directory -FileAcl $file -TaskState 'ABSENT_VERIFIED') 'non-success overall stops'
+}
+
+function Read-TMPCSetupSummary { return $script:TestSummaryObject }
+function Write-TMPCSetupSummary {
+    param([hashtable]$Values, [switch]$Reset)
+    $script:TestSummaryObject.HkcUserPhase = 'FAILED'
+    $script:TestSummaryObject.HkcHadErrors = $false
+    $script:TestSummaryObject.OverallStatus = 'SUCCESS'
+    return 'test-summary'
+}
+function Get-TMPCSetupExecutionId { return [string]$script:TestExecutionId }
+
+Invoke-TMPCTestCase 'D35f' 'Summary write-back: inconsistent persisted state is rejected' {
+    $script:TestSummaryObject = New-TestH03Summary -SystemPhase 'SUCCESS' -HkcUserPhase 'PENDING'
+    Assert-TestThrows { Update-TMPCUserPhaseSummary -Phase 'FAILED' -HadErrors $false -Deferred $false } 'schema verification failed' 'read-back inconsistency must fail'
+}
+
 $productionFunctions = New-TMPCFunctionsScriptBlock -Text $sysText -Names $xmlRegistryFunctions
 . $productionFunctions
 . (Join-Path $script:TestsRoot 'TMPC.Tests.Helpers.ps1')
@@ -718,6 +1252,240 @@ Invoke-TMPCTestCase 'D29c' 'XML GetValueNames model: empty string is the default
     Assert-TestTrue (-not (Test-RegistryValueName -ValueNames @('(Default)') -Name '(Default)')) 'a literal "(Default)" value must not be mistaken for the default'
     Assert-TestTrue (-not (Test-RegistryValueName -ValueNames @('') -Name $null)) 'a null probe must not be treated as a value'
     Assert-TestTrue (-not (Test-RegistryValueName -ValueNames @('') -Name '(Default)Value')) 'similar names must not be rewritten'
+}
+
+# ---------------------------------------------------------------------------
+# Phase 4b: H01 network restore, H04 bounded retries, H07 NetFx3
+# ---------------------------------------------------------------------------
+
+Write-Host ''
+Write-Host '--- Phase 4b: H01/H04/H07 hardening ---'
+
+$networkFunctions = @(
+    'Test-TMPCPrivilegedSid','Get-TMPCNetworkAdapterGuid','Get-TMPCNetworkDisablePlan',
+    'Get-TMPCNetworkRestorePlan','Test-TMPCNetworkStateSchema','Test-TMPCNetworkStateAclSnapshot',
+    'Get-TMPCNetworkFileAclSnapshot','Test-TMPCNetworkPathAclSnapshot',
+    'Test-TMPCNetworkRecoveryLocationDecision','Test-TMPCNetworkRecoveryLocation'
+)
+$productionFunctions = New-TMPCFunctionsScriptBlock -Text $networkText -Names $networkFunctions
+. $productionFunctions
+
+Invoke-TMPCTestCase 'D36' 'H01 network: GUID plan preserves preexisting administrative state' {
+    $up = [pscustomobject]@{ InterfaceGuid = 'AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA'; InterfaceDescription = 'Ethernet'; Status = 'Up'; AdminStatus = 'Up' }
+    $wifi = [pscustomobject]@{ InterfaceGuid = 'BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB'; InterfaceDescription = 'Wi-Fi'; Status = 'Disconnected'; AdminStatus = 'Up' }
+    $already = [pscustomobject]@{ InterfaceGuid = 'CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC'; InterfaceDescription = 'Disabled NIC'; Status = 'Disabled'; AdminStatus = 'Down' }
+    $absent = [pscustomobject]@{ InterfaceGuid = 'DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD'; InterfaceDescription = 'USB NIC'; Status = 'Not Present'; AdminStatus = 'Down' }
+    $invalid = [pscustomobject]@{ InterfaceGuid = 'not-a-guid'; InterfaceDescription = 'Invalid'; Status = 'Up'; AdminStatus = 'Up' }
+    $plan = Get-TMPCNetworkDisablePlan -Adapters @($up, $wifi, $already, $absent, $invalid)
+    Assert-TestEqual 2 @($plan.Selected).Count 'only enabled, present adapters are selected'
+    Assert-TestTrue (@($plan.Selected | Where-Object { $_.InterfaceGuid -eq 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }).Count -eq 1) 'GUID identifies the selected adapter'
+    Assert-TestTrue (@($plan.Skipped | Where-Object { $_.Reason -eq 'ALREADY_DISABLED' }).Count -eq 1) 'already disabled adapter is preserved'
+    Assert-TestTrue (@($plan.Skipped | Where-Object { $_.Reason -eq 'NOT_PRESENT' }).Count -eq 1) 'not-present adapter is preserved'
+    Assert-TestTrue (@($plan.Skipped | Where-Object { $_.Reason -eq 'INVALID_GUID' }).Count -eq 1) 'invalid GUID is never selected'
+    Assert-TestEqual 'Up' $plan.Selected[0].PreviousStatus 'previous status is persisted'
+}
+
+Invoke-TMPCTestCase 'D36b' 'H01 restore: only TMPC-disabled GUIDs, OOBE gated' {
+    $persisted = @(
+        [pscustomobject]@{ InterfaceGuid = 'AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA'; Description = 'Ethernet'; PreviousStatus = 'Up'; DisableAttempted = $true; DisabledByTmpc = $true; RestoreStatus = 'PENDING' },
+        [pscustomobject]@{ InterfaceGuid = 'BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB'; Description = 'Wi-Fi'; PreviousStatus = 'Up'; DisableAttempted = $true; DisabledByTmpc = $true; RestoreStatus = 'PENDING' },
+        [pscustomobject]@{ InterfaceGuid = 'CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC'; Description = 'User disabled'; PreviousStatus = 'Disabled'; DisableAttempted = $false; DisabledByTmpc = $false; RestoreStatus = 'NOT_DISABLED' }
+    )
+    $current = @(
+        [pscustomobject]@{ InterfaceGuid = 'AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA'; Status = 'Disabled' },
+        [pscustomobject]@{ InterfaceGuid = 'BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB'; Status = 'Up' }
+    )
+    $plan = Get-TMPCNetworkRestorePlan -PersistedAdapters $persisted -CurrentAdapters $current -OobeComplete $true
+    Assert-TestEqual 'RESTORE' $plan.Decision 'eligible adapters produce a restore plan'
+    Assert-TestEqual 2 @($plan.Actions).Count 'only the two TMPC-guided entries are considered'
+    Assert-TestEqual 'ENABLE' @($plan.Actions | Where-Object { $_.InterfaceGuid -eq 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' })[0].Action 'disabled TMPC adapter is enabled'
+    Assert-TestEqual 'ALREADY_ENABLED' @($plan.Actions | Where-Object { $_.InterfaceGuid -eq 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' })[0].Action 'user re-enabled adapter is not touched'
+    Assert-TestTrue (@($plan.Actions | Where-Object { $_.InterfaceGuid -eq 'cccccccc-cccc-cccc-cccc-cccccccccccc' }).Count -eq 0) 'an adapter that was already disabled is never restored'
+
+    $absentPlan = Get-TMPCNetworkRestorePlan -PersistedAdapters @($persisted[0]) -CurrentAdapters @() -OobeComplete $true
+    Assert-TestEqual 'ABSENT' $absentPlan.Actions[0].Action 'missing adapter is not guessed'
+    $deferred = Get-TMPCNetworkRestorePlan -PersistedAdapters $persisted -CurrentAdapters $current -OobeComplete $false
+    Assert-TestEqual 'DEFER' $deferred.Decision 'OOBE gate defers restore'
+}
+
+Invoke-TMPCTestCase 'D36c' 'H01 state: schema, GUID and trusted ACL are enforced' {
+    $entry = [pscustomobject]@{ InterfaceGuid = 'AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA'; Description = 'Ethernet'; PreviousStatus = 'Up'; DisableAttempted = $true; DisabledByTmpc = $true; RestoreStatus = 'PENDING' }
+    $state = [pscustomobject]@{
+        SchemaVersion = 1; RequestId = '11111111-1111-1111-1111-111111111111'; Phase = 'DISABLED'
+        CreatedUtc = (Get-Date).ToUniversalTime().ToString('o'); UpdatedUtc = (Get-Date).ToUniversalTime().ToString('o'); Adapters = @($entry)
+    }
+    Assert-TestTrue (Test-TMPCNetworkStateSchema -State $state) 'valid state schema'
+    $badBool = $state.PSObject.Copy(); $badBool.Adapters = @([pscustomobject]@{ InterfaceGuid = 'AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA'; Description = 'Ethernet'; PreviousStatus = 'Up'; DisableAttempted = $true; DisabledByTmpc = 'true'; RestoreStatus = 'PENDING' })
+    Assert-TestTrue (-not (Test-TMPCNetworkStateSchema -State $badBool)) 'string boolean is rejected'
+    $badGuid = $state.PSObject.Copy(); $badGuid.Adapters = @([pscustomobject]@{ InterfaceGuid = 'bad'; Description = 'Ethernet'; PreviousStatus = 'Up'; DisableAttempted = $true; DisabledByTmpc = $true; RestoreStatus = 'PENDING' })
+    Assert-TestTrue (-not (Test-TMPCNetworkStateSchema -State $badGuid)) 'invalid GUID is rejected'
+    $badPhase = $state.PSObject.Copy(); $badPhase.Phase = 'ENABLE_ALL'
+    Assert-TestTrue (-not (Test-TMPCNetworkStateSchema -State $badPhase)) 'unknown phase is rejected'
+
+    $trusted = [pscustomobject]@{ OwnerSid = 'S-1-5-18'; Rules = @([pscustomobject]@{ Identity = 'S-1-5-32-545'; Rights = [int][System.Security.AccessControl.RegistryRights]::ReadKey; Type = 'Allow' }) }
+    Assert-TestTrue (Test-TMPCNetworkStateAclSnapshot -Snapshot $trusted) 'read-only users ACL is trusted'
+    $untrusted = [pscustomobject]@{ OwnerSid = 'S-1-5-18'; Rules = @([pscustomobject]@{ Identity = 'S-1-5-21-1000-2000-3000-1001'; Rights = [int][System.Security.AccessControl.RegistryRights]::SetValue; Type = 'Allow' }) }
+    Assert-TestTrue (-not (Test-TMPCNetworkStateAclSnapshot -Snapshot $untrusted)) 'non-privileged SetValue is rejected'
+    $badOwner = [pscustomobject]@{ OwnerSid = 'S-1-5-21-1000-2000-3000-1001'; Rules = @() }
+    Assert-TestTrue (-not (Test-TMPCNetworkStateAclSnapshot -Snapshot $badOwner)) 'untrusted owner is rejected'
+}
+
+Invoke-TMPCTestCase 'D36d' 'H01 XML: no indiscriminate restore and conditional recovery' {
+    Assert-TestTrue ($xmlText.Contains('NetworkGuard.ps1" -Mode Disable')) 'specialize uses the stateful disable guard'
+    Assert-TestTrue ($xmlText.Contains('NetworkGuard.ps1" -Mode Restore')) 'first logon uses the stateful restore guard'
+    Assert-TestTrue (-not $xmlText.Contains('Get-NetAdapter | Enable-NetAdapter')) 'no indiscriminate enable command remains'
+    Assert-TestTrue (-not $xmlText.Contains('Get-NetAdapter | Disable-NetAdapter')) 'no indiscriminate disable command remains'
+    Assert-TestTrue ($networkText.Contains('AtLogOn')) 'recovery uses a logon trigger'
+    Assert-TestTrue (-not $networkText.Contains('New-ScheduledTaskTrigger -AtStartup')) 'no AtStartup recovery task is created'
+    Assert-TestTrue ($networkText.Contains('Test-TMPCNetworkOobeComplete')) 'recovery is conditioned on OOBE completion'
+    Assert-TestTrue ($networkText.Contains('Register-TMPCNetworkRecoveryTask')) 'recovery task registration exists only for pending restore'
+    Assert-TestTrue ($networkText.Contains('RestoreStatus') -and $networkText.Contains('DisabledByTmpc')) 'restore tracks per-adapter ownership'
+}
+
+Invoke-TMPCTestCase 'D36e' 'H01 recovery script: owner, ACL, reparse and substitution gate' {
+    $read = [int][System.Security.AccessControl.FileSystemRights]::ReadAndExecute
+    $append = [int][System.Security.AccessControl.FileSystemRights]::AppendData
+    $write = [int][System.Security.AccessControl.FileSystemRights]::WriteData
+    $deleteSub = [int][System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
+    function New-NetworkFileSnapshot {
+        param([bool]$IsContainer, [int]$Rights, [string]$Owner = 'S-1-5-18', [bool]$Reparse = $false)
+        return [pscustomobject]@{
+            Path = 'C:\Test'; Exists = $true; IsContainer = $IsContainer
+            IsReparse = $Reparse; OwnerSid = $Owner
+            Rules = @([pscustomobject]@{ Identity = 'S-1-5-32-545'; Rights = $Rights; Type = 'Allow'; Inherited = $true })
+        }
+    }
+    $ancestor = New-NetworkFileSnapshot -IsContainer $true -Rights $append
+    $directory = New-NetworkFileSnapshot -IsContainer $true -Rights $read
+    $sourceDir = New-NetworkFileSnapshot -IsContainer $true -Rights $read
+    $sourceFile = New-NetworkFileSnapshot -IsContainer $false -Rights $read
+    $targetFile = New-NetworkFileSnapshot -IsContainer $false -Rights $read
+    $safe = Test-TMPCNetworkRecoveryLocationDecision -AncestorSnapshots @($ancestor) -DirectorySnapshot $directory -SourceDirectorySnapshot $sourceDir -SourceSnapshot $sourceFile -TargetSnapshot $null
+    Assert-TestTrue $safe.Safe 'standard create-folder ancestor right is accepted'
+
+    $badAncestor = New-NetworkFileSnapshot -IsContainer $true -Rights $deleteSub
+    $unsafe = Test-TMPCNetworkRecoveryLocationDecision -AncestorSnapshots @($badAncestor) -DirectorySnapshot $directory -SourceDirectorySnapshot $sourceDir -SourceSnapshot $sourceFile -TargetSnapshot $null
+    Assert-TestEqual 'ANCESTOR_ACL_UNTRUSTED' $unsafe.Reason 'ancestor delete-subtree right is rejected'
+    $badDirectory = New-NetworkFileSnapshot -IsContainer $true -Rights $append
+    $unsafe = Test-TMPCNetworkRecoveryLocationDecision -AncestorSnapshots @($ancestor) -DirectorySnapshot $badDirectory -SourceDirectorySnapshot $sourceDir -SourceSnapshot $sourceFile -TargetSnapshot $null
+    Assert-TestEqual 'DESTINATION_DIRECTORY_UNTRUSTED' $unsafe.Reason 'destination directory append right is rejected'
+    $badSource = New-NetworkFileSnapshot -IsContainer $false -Rights $write
+    $unsafe = Test-TMPCNetworkRecoveryLocationDecision -AncestorSnapshots @($ancestor) -DirectorySnapshot $directory -SourceDirectorySnapshot $sourceDir -SourceSnapshot $badSource -TargetSnapshot $null
+    Assert-TestEqual 'SOURCE_SCRIPT_UNTRUSTED' $unsafe.Reason 'writable source script is rejected'
+    $badTarget = New-NetworkFileSnapshot -IsContainer $false -Rights $write
+    $unsafe = Test-TMPCNetworkRecoveryLocationDecision -AncestorSnapshots @($ancestor) -DirectorySnapshot $directory -SourceDirectorySnapshot $sourceDir -SourceSnapshot $sourceFile -TargetSnapshot $badTarget
+    Assert-TestEqual 'DESTINATION_SCRIPT_UNTRUSTED' $unsafe.Reason 'writable existing destination is rejected'
+    $reparse = New-NetworkFileSnapshot -IsContainer $false -Rights $read -Reparse $true
+    Assert-TestTrue (-not (Test-TMPCNetworkPathAclSnapshot -Snapshot $reparse -Kind 'File')) 'reparse point is rejected'
+    $untrustedOwner = New-NetworkFileSnapshot -IsContainer $false -Rights $read -Owner 'S-1-5-21-1000-2000-3000-1001'
+    Assert-TestTrue (-not (Test-TMPCNetworkPathAclSnapshot -Snapshot $untrustedOwner -Kind 'File')) 'unprivileged owner is rejected'
+    $missingMask = New-NetworkFileSnapshot -IsContainer $false -Rights $read
+    $missingMask.Rules[0].PSObject.Properties.Remove('Rights')
+    Assert-TestTrue (-not (Test-TMPCNetworkPathAclSnapshot -Snapshot $missingMask -Kind 'File')) 'missing numeric mask fails closed'
+
+    $preCopy = $networkText.IndexOf('$location = Test-TMPCNetworkRecoveryLocation')
+    $copy = $networkText.IndexOf('Copy-Item -LiteralPath $PSCommandPath')
+    $postCopy = $networkText.IndexOf('$afterCopy = Test-TMPCNetworkRecoveryLocation')
+    $register = $networkText.IndexOf('Register-ScheduledTask -TaskName $script:RecoveryTaskName')
+    Assert-TestTrue ($preCopy -ge 0 -and $copy -gt $preCopy -and $postCopy -gt $copy -and $register -gt $postCopy) 'gate runs before copy and before task registration'
+    Assert-TestTrue (-not $networkText.Contains('New-Item -Path $script:RecoveryDir')) 'no directory is created before the security gate'
+    Assert-TestTrue ($networkText.Contains('unsafeTask') -and $networkText.Contains('Unregister-ScheduledTask')) 'a failed gate removes any older task'
+    Assert-TestTrue ($networkText.Contains('Recovery task action does not reference the verified script copy')) 'registered action is verified'
+}
+
+$h04Functions = @(
+    'Get-TMPCUserPhaseOutcome','Get-TMPCUserRetryDecision','Get-TMPCOperationKey',
+    'Test-TMPCAppliedOperation','Add-TMPCAppliedOperation','Initialize-TMPCAppliedOperations',
+    'ConvertTo-RegistryValueName','Test-RegistryValueName','Get-RegistryEntryState',
+    'Test-RegistryStateEqual','Write-RegistryValue','Get-RegistryErrorReason','Set-RegistryValue'
+)
+$productionFunctions = New-TMPCFunctionsScriptBlock -Text $sysText -Names $h04Functions
+. $productionFunctions
+. (Join-Path $script:TestsRoot 'TMPC.Tests.Helpers.ps1')
+
+Invoke-TMPCTestCase 'D37' 'H04 outcome: transient, permanent, deferred and not applicable are distinct' {
+    Assert-TestEqual 'SUCCESS' (Get-TMPCUserPhaseOutcome -ExitCode 0 -HadErrors $false -Deferred $false) 'success'
+    Assert-TestEqual 'TRANSIENT' (Get-TMPCUserPhaseOutcome -ExitCode 1 -HadErrors $true -Deferred $false) 'exit 1 is transient'
+    Assert-TestEqual 'PERMANENT' (Get-TMPCUserPhaseOutcome -ExitCode 3 -HadErrors $true -Deferred $false) 'exit 3 is permanent'
+    Assert-TestEqual 'NOT_APPLICABLE' (Get-TMPCUserPhaseOutcome -ExitCode 4 -HadErrors $true -Deferred $false) 'exit 4 is not applicable'
+    Assert-TestEqual 'DEFERRED' (Get-TMPCUserPhaseOutcome -ExitCode 2 -HadErrors $false -Deferred $false) 'exit 2 is deferred'
+    Assert-TestEqual 'DEFERRED' (Get-TMPCUserPhaseOutcome -ExitCode 0 -HadErrors $false -Deferred $true) 'explicit deferral'
+    Assert-TestEqual 'TRANSIENT' (Get-TMPCUserPhaseOutcome -ExitCode 0 -HadErrors $true -Deferred $false) 'errors never become success'
+    Assert-TestEqual 'UNKNOWN' (Get-TMPCUserPhaseOutcome -ExitCode 99 -HadErrors $true -Deferred $false) 'unknown exit is not success'
+}
+
+Invoke-TMPCTestCase 'D37b' 'H04 retry: bounded, marker-aware and permanent-stop' {
+    Assert-TestEqual 'RUN' (Get-TMPCUserRetryDecision -MarkerApplied $false -Attempts 0 -LastOutcome 'PENDING') 'first attempt runs'
+    Assert-TestEqual 'RUN' (Get-TMPCUserRetryDecision -MarkerApplied $false -Attempts 2 -LastOutcome 'TRANSIENT') 'third attempt runs'
+    Assert-TestEqual 'EXHAUSTED' (Get-TMPCUserRetryDecision -MarkerApplied $false -Attempts 3 -LastOutcome 'TRANSIENT') 'attempt limit stops retries'
+    Assert-TestEqual 'STOP_PERMANENT' (Get-TMPCUserRetryDecision -MarkerApplied $false -Attempts 1 -LastOutcome 'PERMANENT') 'permanent error stops retries'
+    Assert-TestEqual 'STOP_PERMANENT' (Get-TMPCUserRetryDecision -MarkerApplied $false -Attempts 1 -LastOutcome 'NOT_APPLICABLE') 'not applicable stops retries'
+    Assert-TestEqual 'ALREADY_APPLIED' (Get-TMPCUserRetryDecision -MarkerApplied $true -Attempts 3 -LastOutcome 'TRANSIENT') 'verified marker wins over the retry limit'
+}
+
+Invoke-TMPCTestCase 'D37c' 'H04 completed operations: a retry does not overwrite completed preferences' {
+    $script:TrackAppliedOperations = $true
+    $script:CustomizationHadErrors = $false
+    $script:AppliedOperationKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    Set-RegistryValue -Path 'HKCU:\TMPC-H04' -Name 'Alpha' -Type 'DWord' -Value 1 -Description 'initial preference'
+    $first = Get-TestRegistryValue -Path 'HKCU:\TMPC-H04' -Name 'Alpha'
+    Assert-TestTrue ($null -ne $first -and [int]$first.Value -eq 1) 'initial value applied'
+    $writesAfterFirst = $script:TestWriteAttempts.Count
+    Assert-TestTrue ($writesAfterFirst -ge 2) 'value and completed-operation state were written'
+    Set-TestRegistryValue -Path 'HKCU:\TMPC-H04' -Name 'Alpha' -Kind DWord -Value 9
+    Set-RegistryValue -Path 'HKCU:\TMPC-H04' -Name 'Alpha' -Type 'DWord' -Value 1 -Description 'retry preference'
+    $afterRetry = Get-TestRegistryValue -Path 'HKCU:\TMPC-H04' -Name 'Alpha'
+    Assert-TestEqual 9 $afterRetry.Value 'user change is preserved on retry'
+    Assert-TestEqual $writesAfterFirst $script:TestWriteAttempts.Count 'completed operation is not rewritten'
+    Assert-TestLogContains 'ALREADY_COMPLETED_PREVIOUS_RUN'
+    Set-RegistryValue -Path 'HKCU:\TMPC-H04' -Name 'Beta' -Type 'DWord' -Value 2 -Description 'new operation'
+    $beta = Get-TestRegistryValue -Path 'HKCU:\TMPC-H04' -Name 'Beta'
+    Assert-TestTrue ($null -ne $beta -and [int]$beta.Value -eq 2) 'different operation still applies'
+    Assert-TestEqual (Get-TMPCOperationKey -Operation 'SET' -Path 'HKCU:\TMPC-H04' -Name 'Alpha' -Type 'DWord' -Value '1') (Get-TMPCOperationKey -Operation 'SET' -Path 'HKCU:\TMPC-H04' -Name 'Alpha' -Type 'DWord' -Value '1') 'operation key is stable'
+    Assert-TestTrue ((Get-TMPCOperationKey -Operation 'SET' -Path 'HKCU:\TMPC-H04' -Name 'Alpha' -Type 'DWord' -Value '1') -ne (Get-TMPCOperationKey -Operation 'SET' -Path 'HKCU:\TMPC-H04' -Name 'Alpha' -Type 'DWord' -Value '2')) 'operation key includes the expected value'
+    $script:TrackAppliedOperations = $false
+}
+
+$netfxFunctions = @('Get-TMPCNetFx3SourceAssessment','Get-TMPCNetFx3Decision')
+$productionFunctions = New-TMPCFunctionsScriptBlock -Text $netfxText -Names $netfxFunctions
+. $productionFunctions
+
+Invoke-TMPCTestCase 'D38' 'H07 XML: source suitability and DISM/final-state decisions' {
+    $ready = Get-TMPCNetFx3SourceAssessment -Path 'D:\sources\sxs' -DirectoryExists $true -IsReparsePoint $false -FileNames @('microsoft-windows-netfx3-ondemand-package~31bf3856ad364e35~amd64~~.cab','other.cab')
+    Assert-TestTrue $ready.Usable 'NetFx3 payload is accepted'
+    Assert-TestEqual 'SOURCE_READY' $ready.Status 'ready status'
+    $noPayload = Get-TMPCNetFx3SourceAssessment -Path 'D:\sources\sxs' -DirectoryExists $true -IsReparsePoint $false -FileNames @('other.cab')
+    Assert-TestTrue (-not $noPayload.Usable) 'unrelated CABs are not a NetFx3 source'
+    Assert-TestEqual 'SOURCE_PAYLOAD_MISSING' $noPayload.Status 'payload missing is distinct'
+    $missing = Get-TMPCNetFx3SourceAssessment -Path 'D:\sources\sxs' -DirectoryExists $false -IsReparsePoint $false -FileNames @()
+    Assert-TestEqual 'SOURCE_NOT_FOUND' $missing.Status 'missing source is distinct'
+    $linked = Get-TMPCNetFx3SourceAssessment -Path 'D:\sources\sxs' -DirectoryExists $true -IsReparsePoint $true -FileNames @('microsoft-windows-netfx3-ondemand-package~31bf3856ad364e35~amd64~~.cab')
+    Assert-TestEqual 'SOURCE_REPARSE' $linked.Status 'reparse source is rejected'
+
+    Assert-TestEqual 'ALREADY_ENABLED' (Get-TMPCNetFx3Decision -InitialState 'Enabled' -SourceStatus 'SOURCE_READY' -DismExitCode 0 -FinalState 'Enabled' -RestartNeeded $false) 'enabled feature is not reinstalled'
+    Assert-TestEqual 'PENDING_REBOOT' (Get-TMPCNetFx3Decision -InitialState 'EnablePending' -SourceStatus 'SOURCE_READY' -DismExitCode 0 -FinalState 'EnablePending' -RestartNeeded $true) 'already staged feature is pending reboot'
+    Assert-TestEqual 'SOURCE_UNAVAILABLE' (Get-TMPCNetFx3Decision -InitialState 'Disabled' -SourceStatus 'SOURCE_NOT_FOUND' -DismExitCode 0 -FinalState 'Disabled' -RestartNeeded $false) 'missing source is not a failed install'
+    Assert-TestEqual 'APPLIED' (Get-TMPCNetFx3Decision -InitialState 'Disabled' -SourceStatus 'SOURCE_READY' -DismExitCode 0 -FinalState 'Enabled' -RestartNeeded $false) 'final enabled state verifies success'
+    Assert-TestEqual 'PENDING_REBOOT' (Get-TMPCNetFx3Decision -InitialState 'Disabled' -SourceStatus 'SOURCE_READY' -DismExitCode 3010 -FinalState 'EnablePending' -RestartNeeded $true) 'DISM 3010 and pending state are distinguished'
+    Assert-TestEqual 'FAILED' (Get-TMPCNetFx3Decision -InitialState 'Disabled' -SourceStatus 'SOURCE_READY' -DismExitCode 1603 -FinalState 'Disabled' -RestartNeeded $false) 'failed DISM is a real failure'
+    Assert-TestEqual 'FAILED' (Get-TMPCNetFx3Decision -InitialState 'Disabled' -SourceStatus 'SOURCE_READY' -DismExitCode 0 -FinalState 'Disabled' -RestartNeeded $false) 'unverified final state is failure'
+    Assert-TestEqual 'NOT_APPLICABLE' (Get-TMPCNetFx3Decision -InitialState 'DisablePending' -SourceStatus 'SOURCE_READY' -DismExitCode 0 -FinalState 'DisablePending' -RestartNeeded $false) 'pending disable is not applicable'
+}
+
+$productionFunctions = New-TMPCFunctionsScriptBlock -Text $standaloneText -Names $netfxFunctions
+. $productionFunctions
+
+Invoke-TMPCTestCase 'D38b' 'H07 standalone: same decisions and preserved -NetFx3Source' {
+    $ready = Get-TMPCNetFx3SourceAssessment -Path 'E:\sources\sxs' -DirectoryExists $true -IsReparsePoint $false -FileNames @('MICROSOFT-WINDOWS-NETFX3-ONDEMAND-PACKAGE~31BF3856AD364E35~AMD64~~.CAB')
+    Assert-TestTrue $ready.Usable 'case-insensitive NetFx3 payload is accepted'
+    Assert-TestEqual 'PENDING_REBOOT' (Get-TMPCNetFx3Decision -InitialState 'Disabled' -SourceStatus 'SOURCE_READY' -DismExitCode 3010 -FinalState 'EnablePending' -RestartNeeded $true) 'standalone pending reboot'
+    Assert-TestEqual 'SOURCE_UNAVAILABLE' (Get-TMPCNetFx3Decision -InitialState 'Disabled' -SourceStatus 'SOURCE_PAYLOAD_MISSING' -DismExitCode 0 -FinalState 'Disabled' -RestartNeeded $false) 'standalone source unavailable'
+    Assert-TestEqual 'ALREADY_ENABLED' (Get-TMPCNetFx3Decision -InitialState 'Enabled' -SourceStatus 'SOURCE_READY' -DismExitCode 0 -FinalState 'Enabled' -RestartNeeded $false) 'standalone enabled'
+    Assert-TestTrue ($standaloneText.Contains('-NetFx3Source')) 'standalone parameter preserved'
+    Assert-TestTrue ($standaloneText.Contains('Invoke-TMPCNetFx3 -SourcePath $NetFx3Source')) 'standalone uses the verified helper'
+    Assert-TestTrue ($standaloneText.Contains('Enable-WindowsOptionalFeature') -and $standaloneText.Contains('-NoRestart')) 'standalone never restarts automatically'
+    Assert-TestTrue ($netfxText.Contains('dism.exe') -and $netfxText.Contains('/LimitAccess') -and $netfxText.Contains('/NoRestart')) 'XML DISM uses a local source without reboot'
+    Assert-TestTrue ($netfxText.Contains('LASTEXITCODE') -and $netfxText.Contains('Get-TMPCNetFx3FeatureState')) 'DISM exit code and final state are checked'
 }
 
 # ---------------------------------------------------------------------------

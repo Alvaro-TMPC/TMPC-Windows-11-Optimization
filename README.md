@@ -83,13 +83,18 @@ de cobertura, los logs y los códigos de salida están en la
 
 ## Descarga
 
-Descarga la última versión publicada desde
-[GitHub Releases](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases).
-La próxima publicación prevista es v0.3.0 y todavía no está disponible.
+La última versión publicada es **v0.3.0**, disponible en la
+[release histórica v0.3.0](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.3.0)
+y en [GitHub Releases](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases).
+Sus cuatro assets publicados son `autounattend.xml`, `ventoy.json`,
+`Apply-TMPCOptimizations.ps1` y `SHA256SUMS.txt`.
 
-Las releases incluyen `autounattend.xml`, `ventoy.json` y `SHA256SUMS.txt` para
-verificar la descarga. No hay instalador ejecutable ni comando remoto del tipo
-`irm ... | iex`.
+Los archivos de este repositorio que incorporan los bloques R1/R1.1/R2 son un
+**candidato local posterior a v0.3.0**, todavía no publicado. No los presentes
+como la release v0.3.0 ni mezcles sus hashes con los assets históricos.
+
+Las releases incluyen `SHA256SUMS.txt` para verificar la descarga. No hay
+instalador ejecutable ni comando remoto del tipo `irm ... | iex`.
 
 ## Advertencia esencial
 
@@ -109,11 +114,12 @@ verificar la descarga. No hay instalador ejecutable ni comando remoto del tipo
 
 - Validación estática y suite aislada: **PASS** en el estado documentado.
 - Instalación limpia 26H2 con los últimos cambios del XML: **pendiente de
-  revalidación**.
+  revalidación**; `RUNTIME_VALIDATION = NOT_TESTED`.
 - Runtime del standalone en hardware anfitrión: **NOT_TESTED**.
 - Evidencia runtime histórica: baseline v0.1.5 en Windows 11 Pro 25H2.
-- No se declara `RUNTIME_PASS` para el baseline actual. El validador estático y
-  las pruebas aisladas no equivalen a una ejecución real del optimizador.
+- No se declara `RUNTIME_PASS` para el baseline actual ni para el candidato
+  local R2. El validador estático y las pruebas aisladas no equivalen a una
+  ejecución real del optimizador.
 
 ## Documentación completa
 
