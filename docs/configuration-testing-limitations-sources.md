@@ -130,11 +130,15 @@ On the real repository files:
 - `ventoy.json` is valid JSON.
 - The findings of the technical review of the customization flow are fixed
   and statically verified.
-- The local post-v0.3.0 R1 block fixes H02, H03, H05 and H06 with isolated
+- The local post-v0.3.0 R1 block, published as the `v0.4.0-rc.1` prerelease,
+  fixes H02, H03, H05 and H06 with isolated
   tests: SID/session identity and token verification; phase summary and cleanup
   gated on global success; OneDrive `UNKNOWN` and incomplete-protection deferral
   with independent scopes; and verified Default hive unload before the `R1`
-  marker. It is not a published release and its runtime validation is pending.
+  marker. Its runtime validation remains `NOT_TESTED`.
+- The published BUILD of `v0.4.0-rc.1` (commit `ca3ba37`) obtained **73 isolated
+  tests OK / 0 FAIL** and **416 static checks OK / 0 FAIL**. Runtime of the exact
+  candidate remains `NOT_TESTED` and N4 validation is `DEFERRED_BY_USER`.
 - The R1.1 micro-build consolidates H03 with directory/file ACL checks, an
   execution identity in HKLM, schema/revision validation, `OverallStatus`
   recalculation, read-back verification, and `PRESENT`/`ABSENT_VERIFIED`/
@@ -433,9 +437,10 @@ documented slate anomaly; their registry values were verified.
 **A static validation does not replace a real clean installation.** The
 published `v0.1.5` XML completed real clean installations on the historical
 Windows 11 Pro 25H2 reference. The current answer file targets Windows 11 Pro
-26H2 (build base 26300) and includes the unreleased Start pins, cloud
-optimized content policy and All apps view candidates: the ADMX-exact Start
-pins pair passed a manual test on Windows 11 26H2 (empty Pinned section at the
+26H2 (build base 26300) and includes the Start pins and cloud optimized content
+policies and the All apps view preference, included in the `v0.4.0-rc.1`
+prerelease: the ADMX-exact Start pins pair passed a manual test on Windows 11
+26H2 (empty Pinned section at the
 next sign-in and later user pins preserved), the cloud optimized content policy
 was visually checked with a new user on the same build, and the initial All
 apps List preference was verified on an existing profile of the same build

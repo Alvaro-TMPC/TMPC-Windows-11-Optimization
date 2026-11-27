@@ -138,11 +138,16 @@ Sobre los archivos reales del repositorio:
 - `ventoy.json` es JSON válido.
 - Los hallazgos de la revisión técnica del flujo de personalización están
   corregidos y comprobados estáticamente.
-- El bloque local R1 posterior a v0.3.0 corrige H02, H03, H05 y H06 con pruebas
+- El bloque local R1 posterior a v0.3.0, publicado como prerelease
+  `v0.4.0-rc.1`, corrige H02, H03, H05 y H06 con pruebas
   aisladas: identidad por SID/sesión y token verificado; resumen de fases y
   cleanup condicionado a éxito global; ámbitos OneDrive con `UNKNOWN` y
   protección incompleta diferida; y desmontaje verificado del hive Default antes
-  del marcador `R1`. No es una release publicada y su runtime sigue pendiente.
+  del marcador `R1`. Su runtime sigue `NOT_TESTED`.
+- El BUILD publicado de `v0.4.0-rc.1` (commit `ca3ba37`) obtuvo **73 pruebas
+  aisladas OK / 0 FAIL** y **416 comprobaciones estáticas OK / 0 FAIL**. El
+  runtime del candidato exacto queda `NOT_TESTED` y la validación N4
+  `DEFERRED_BY_USER`.
 - El micro-BUILD R1.1 consolida H03 con ACL de directorio y archivo,
   identidad de ejecución en HKLM, esquema/revisión, recálculo de
   `OverallStatus`, lectura posterior de verificación y estados
@@ -448,10 +453,10 @@ documentada; sus valores de Registro sí se comprobaron.
 **Una validación estática no sustituye una instalación limpia real.** El XML
 publicado `v0.1.5` completó instalaciones limpias reales en la referencia
 histórica Windows 11 Pro 25H2. El archivo de respuestas actual tiene como
-objetivo Windows 11 Pro 26H2 (build base 26300) e incluye los candidatos no
-publicados de la política de pins de Inicio, de contenido optimizado en la nube
-y de la vista de Todas las aplicaciones: el par ADMX exacto de pins superó una
-prueba manual
+objetivo Windows 11 Pro 26H2 (build base 26300) e incluye las políticas de pins
+de Inicio y de contenido optimizado en la nube, además de la preferencia de la
+vista de Todas las aplicaciones, incluidas en la prerelease `v0.4.0-rc.1`: el
+par ADMX exacto de pins superó una prueba manual
 en Windows 11 26H2 (Pinned vacío en el siguiente inicio de sesión y pins
 posteriores del usuario conservados), la política de contenido optimizado se
 comprobó visualmente con un usuario nuevo en esa misma build y la preferencia

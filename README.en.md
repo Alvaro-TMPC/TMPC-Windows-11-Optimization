@@ -82,18 +82,18 @@ matrix, logs and exit codes are in the
 
 ## Download
 
-The latest published version is **v0.3.0**, available from the
-[historical v0.3.0 release](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.3.0)
-and [GitHub Releases](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases).
-Its four published assets are `autounattend.xml`, `ventoy.json`,
-`Apply-TMPCOptimizations.ps1` and `SHA256SUMS.txt`.
+The latest stable version is **v0.3.0**, available from the
+[v0.3.0 stable release](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.3.0).
+The **v0.4.0-rc.1** prerelease, published on 27 November 2026, is available
+from the
+[v0.4.0-rc.1 release](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.4.0-rc.1).
 
-The files in this repository that include the R1/R1.1/R2 blocks are a **local
-candidate after v0.3.0** and are not published yet. Do not present them as the
-v0.3.0 release or mix their hashes with the historical assets.
-
-Releases include `SHA256SUMS.txt` to verify the download. There is no executable
-installer or remote command such as `irm ... | iex`.
+Both releases publish four downloadable assets with the same names:
+`autounattend.xml`, `ventoy.json`, `Apply-TMPCOptimizations.ps1` and
+`SHA256SUMS.txt`. The `v0.3.0` assets are immutable and keep their historical
+hashes; the `v0.4.0-rc.1` assets have their own hashes. Verify each download
+with `SHA256SUMS.txt`; there is no executable installer or remote command such
+as `irm ... | iex`.
 
 ## Essential warning
 
@@ -109,14 +109,15 @@ installer or remote command such as `irm ... | iex`.
 
 ## Validation status
 
-- Static validation and isolated test suite: **PASS** in the documented state.
-- Clean 26H2 installation with the latest XML changes: **revalidation pending**;
-  `RUNTIME_VALIDATION = NOT_TESTED`.
-- Standalone runtime on host hardware: **NOT_TESTED**.
+- Published BUILD of `v0.4.0-rc.1` (commit `ca3ba37`): **73 isolated tests
+  OK / 0 FAIL** and **416 static checks OK / 0 FAIL**.
+- Runtime of the exact `v0.4.0-rc.1` candidate: **NOT_TESTED**. No clean
+  installation or optimizer run on the host has been performed.
 - Historical runtime evidence: v0.1.5 baseline on Windows 11 Pro 25H2.
-- `RUNTIME_PASS` is not claimed for the current baseline or for the local R2
-  candidate. The static validator and isolated tests are not equivalent to a
-  real optimizer run.
+- The static validator and isolated tests are not equivalent to a real run;
+  `RUNTIME_PASS` is not claimed for `v0.3.0` or `v0.4.0-rc.1`.
+- N4 runtime validation is deferred by the user's decision
+  (`N4_RUNTIME_VALIDATION = DEFERRED_BY_USER`).
 
 ## Complete documentation
 

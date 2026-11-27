@@ -83,18 +83,17 @@ de cobertura, los logs y los códigos de salida están en la
 
 ## Descarga
 
-La última versión publicada es **v0.3.0**, disponible en la
-[release histórica v0.3.0](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.3.0)
-y en [GitHub Releases](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases).
-Sus cuatro assets publicados son `autounattend.xml`, `ventoy.json`,
-`Apply-TMPCOptimizations.ps1` y `SHA256SUMS.txt`.
+La última versión estable es **v0.3.0**, disponible en la
+[release estable v0.3.0](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.3.0).
+La prerelease **v0.4.0-rc.1**, publicada el 27 de noviembre de 2026, está en la
+[release v0.4.0-rc.1](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.4.0-rc.1).
 
-Los archivos de este repositorio que incorporan los bloques R1/R1.1/R2 son un
-**candidato local posterior a v0.3.0**, todavía no publicado. No los presentes
-como la release v0.3.0 ni mezcles sus hashes con los assets históricos.
-
-Las releases incluyen `SHA256SUMS.txt` para verificar la descarga. No hay
-instalador ejecutable ni comando remoto del tipo `irm ... | iex`.
+Ambas releases publican cuatro assets descargables con los mismos nombres:
+`autounattend.xml`, `ventoy.json`, `Apply-TMPCOptimizations.ps1` y
+`SHA256SUMS.txt`. Los assets de `v0.3.0` son inmutables y conservan sus hashes
+históricos; los de `v0.4.0-rc.1` tienen hashes propios. Verifica cada descarga
+con `SHA256SUMS.txt`; no hay instalador ejecutable ni comando remoto del tipo
+`irm ... | iex`.
 
 ## Advertencia esencial
 
@@ -112,14 +111,15 @@ instalador ejecutable ni comando remoto del tipo `irm ... | iex`.
 
 ## Estado de validación
 
-- Validación estática y suite aislada: **PASS** en el estado documentado.
-- Instalación limpia 26H2 con los últimos cambios del XML: **pendiente de
-  revalidación**; `RUNTIME_VALIDATION = NOT_TESTED`.
-- Runtime del standalone en hardware anfitrión: **NOT_TESTED**.
+- BUILD publicado de `v0.4.0-rc.1` (commit `ca3ba37`): **73 pruebas aisladas
+  OK / 0 FAIL** y **416 comprobaciones estáticas OK / 0 FAIL**.
+- Runtime del candidato exacto `v0.4.0-rc.1`: **NOT_TESTED**. No se ha
+  ejecutado una instalación limpia ni el optimizador sobre el anfitrión.
 - Evidencia runtime histórica: baseline v0.1.5 en Windows 11 Pro 25H2.
-- No se declara `RUNTIME_PASS` para el baseline actual ni para el candidato
-  local R2. El validador estático y las pruebas aisladas no equivalen a una
-  ejecución real del optimizador.
+- El validador estático y las pruebas aisladas no equivalen a una ejecución
+  real; no se declara `RUNTIME_PASS` para `v0.3.0` ni para `v0.4.0-rc.1`.
+- La validación runtime N4 queda aplazada por decisión del usuario
+  (`N4_RUNTIME_VALIDATION = DEFERRED_BY_USER`).
 
 ## Documentación completa
 

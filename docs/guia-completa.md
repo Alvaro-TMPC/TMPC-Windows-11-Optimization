@@ -198,17 +198,23 @@ del medio de instalación y de las herramientas de recuperación de Windows.
 
 ## Descarga y versiones
 
-La última versión publicada es **v0.3.0**. Descarga sus cuatro assets desde la
-[release histórica v0.3.0](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.3.0)
-o desde [GitHub Releases](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases):
-`autounattend.xml`, `ventoy.json`, `Apply-TMPCOptimizations.ps1` y
-`SHA256SUMS.txt`. Los assets publicados son inmutables y conservan sus hashes
-históricos.
+La última versión estable es **v0.3.0**, disponible en la
+[release estable v0.3.0](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.3.0).
+La prerelease **v0.4.0-rc.1**, publicada el 27 de noviembre de 2026, está en la
+[release v0.4.0-rc.1](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.4.0-rc.1).
 
-Los archivos de este repositorio con los bloques R1/R1.1/R2 son un **candidato
-local posterior a v0.3.0**, no una release publicada. No atribuyas sus hashes a
-v0.3.0. La descarga directa de una release permite verificar el conjunto
-completo con `SHA256SUMS.txt`.
+Ambas releases publican cuatro assets descargables con los mismos nombres:
+`autounattend.xml`, `ventoy.json`, `Apply-TMPCOptimizations.ps1` y
+`SHA256SUMS.txt`. Los assets de `v0.3.0` son inmutables y conservan sus hashes
+históricos; los de `v0.4.0-rc.1` tienen hashes propios. La descarga directa de
+una release permite verificar el conjunto completo con `SHA256SUMS.txt`.
+
+El BUILD publicado de `v0.4.0-rc.1` (commit `ca3ba37`) obtuvo **73 pruebas
+aisladas OK / 0 FAIL** y **416 comprobaciones estáticas OK / 0 FAIL**. El
+runtime del candidato exacto sigue **NOT_TESTED**: no se ha ejecutado una
+instalación limpia ni el optimizador sobre un equipo real. La validación N4
+queda aplazada por decisión del usuario
+(`N4_RUNTIME_VALIDATION = DEFERRED_BY_USER`).
 
 Este proyecto no ofrece un instalador ejecutable ni un comando remoto del tipo
 `irm ... | iex`. Si ves instrucciones así atribuidas a TMPC, no las ejecutes.
@@ -676,8 +682,11 @@ con cada revisión del script y no forma parte del par XML/Ventoy del baseline.
   base 26300). El archivo de respuestas integrado todavía no tiene una
   revalidación en instalación limpia de los últimos cambios y el standalone no
   tiene prueba runtime en anfitrión (solo validación estática más la suite de
-  pruebas aislada). Otras builds de Windows 11 cliente dentro del marco admitido
-  se aceptan como `NOT_RUNTIME_TESTED` y pueden requerir revalidación.
+  pruebas aislada). El candidato exacto `v0.4.0-rc.1` sigue
+  `RUNTIME_VALIDATION = NOT_TESTED`; la validación N4 está aplazada por
+  decisión del usuario (`DEFERRED_BY_USER`). Otras builds de Windows 11 cliente
+  dentro del marco admitido se aceptan como `NOT_RUNTIME_TESTED` y pueden
+  requerir revalidación.
 - No se incluyen drivers específicos del hardware. Prepara tú mismo los
   drivers de chipset, red, audio y GPU.
 - .NET Framework 3.5 solo se habilita si Windows lo tiene deshabilitado y existe
@@ -819,28 +828,30 @@ Estado técnico del baseline actual:
 - Estos cambios están validados estáticamente y cubiertos por la suite aislada;
   no se han ejecutado en una instalación limpia y el nuevo hash del XML no
   equivale al de ninguna versión probada anteriormente.
-- El bloque local R1 posterior a v0.3.0 (candidato no publicado) corrige H02,
-  H03, H05 y H06: identidad interactiva por SID de Explorer y `ProfileList` por
-  SID, con verificación del token y del token elevado vinculado; resumen
-  verificable de fases SYSTEM/HKCU y cleanup condicionado a éxito global;
-  estados OneDrive `PRESENT`/`ABSENT_VERIFIED`/`UNKNOWN` con ámbitos separados y
-  protección incompleta diferida; y desmontaje verificado del hive Default antes
-  de escribir el marcador con esquema `R1`. Está cubierto por pruebas aisladas;
-  `RUNTIME_VALIDATION = NOT_TESTED` y `N4_RUNTIME_VALIDATION = PENDING`.
+- El bloque local R1 posterior a v0.3.0 (publicado como prerelease
+  `v0.4.0-rc.1`) corrige H02, H03, H05 y H06: identidad interactiva por SID de
+  Explorer y `ProfileList` por SID, con verificación del token y del token
+  elevado vinculado; resumen verificable de fases SYSTEM/HKCU y cleanup
+  condicionado a éxito global; estados OneDrive
+  `PRESENT`/`ABSENT_VERIFIED`/`UNKNOWN` con ámbitos separados y protección
+  incompleta diferida; y desmontaje verificado del hive Default antes de
+  escribir el marcador con esquema `R1`. Está cubierto por pruebas aisladas;
+  `RUNTIME_VALIDATION = NOT_TESTED` y
+  `N4_RUNTIME_VALIDATION = DEFERRED_BY_USER`.
 - El micro-BUILD local R1.1 consolida H03: ACL de propietario/permisos del
   directorio y archivo de diagnóstico, identidad de ejecución en HKLM,
   esquema/revisión y recálculo de `OverallStatus`, verificación por lectura
   posterior y estados `PRESENT`/`ABSENT_VERIFIED`/`UNKNOWN` de la tarea
   one-shot. El cleanup solo borra con `ABSENT_VERIFIED` y todas las
-  comprobaciones; `UNKNOWN` se reintenta de forma acotada. No es una release
-  publicada; el runtime sigue pendiente.
+  comprobaciones; `UNKNOWN` se reintenta de forma acotada. Forma parte de la
+  prerelease `v0.4.0-rc.1`; el runtime sigue pendiente.
 - El bloque local R2 añade H01, H04 y H07: restauración de red por GUID
   condicionada a OOBE, reintentos HKCU finitos con operaciones completadas
   preservadas y NetFx3 con origen local validado, código DISM y estado final.
   Las ACL del resumen usan máscaras numéricas y se comprueba el directorio
-  padre. Resultado real: suite aislada **73 OK / 0 FAIL**; validador estático
-  **416 OK / 0 FAIL / 1 WARN** (árbol sucio esperado). El candidato local no se
-  ha publicado y `RUNTIME_VALIDATION = NOT_TESTED`.
+  padre. Resultado real del BUILD publicado: suite aislada **73 OK / 0 FAIL**;
+  validador estático **416 OK / 0 FAIL**. La prerelease `v0.4.0-rc.1` está
+  publicada y `RUNTIME_VALIDATION = NOT_TESTED`.
 
 Hashes de referencia del código:
 

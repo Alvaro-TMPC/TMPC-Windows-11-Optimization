@@ -184,17 +184,23 @@ backup, the installation media and the Windows recovery tools.
 
 ## Download and versions
 
-The latest published version is **v0.3.0**. Download its four assets from the
-[historical v0.3.0 release](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.3.0)
-or [GitHub Releases](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases):
-`autounattend.xml`, `ventoy.json`, `Apply-TMPCOptimizations.ps1` and
-`SHA256SUMS.txt`. Published assets are immutable and keep their historical
-hashes.
+The latest stable version is **v0.3.0**, available from the
+[v0.3.0 stable release](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.3.0).
+The **v0.4.0-rc.1** prerelease, published on 27 November 2026, is available
+from the
+[v0.4.0-rc.1 release](https://github.com/Alvaro-TMPC/TMPC-Windows-11-Optimization/releases/tag/v0.4.0-rc.1).
 
-The files in this repository with the R1/R1.1/R2 blocks are a **local candidate
-after v0.3.0**, not a published release. Do not attribute their hashes to
-v0.3.0. A direct release download lets you verify the complete set with
-`SHA256SUMS.txt`.
+Both releases publish four downloadable assets with the same names:
+`autounattend.xml`, `ventoy.json`, `Apply-TMPCOptimizations.ps1` and
+`SHA256SUMS.txt`. The `v0.3.0` assets are immutable and keep their historical
+hashes; the `v0.4.0-rc.1` assets have their own hashes. A direct release
+download lets you verify the complete set with `SHA256SUMS.txt`.
+
+The published BUILD of `v0.4.0-rc.1` (commit `ca3ba37`) obtained **73 isolated
+tests OK / 0 FAIL** and **416 static checks OK / 0 FAIL**. Runtime of the exact
+candidate remains **NOT_TESTED**: no clean installation or optimizer run on a
+real machine has been performed. N4 runtime validation is deferred by the
+user's decision (`N4_RUNTIME_VALIDATION = DEFERRED_BY_USER`).
 
 This project does not provide an executable installer or a remote command such
 as `irm ... | iex`. If you see instructions like that attributed to TMPC, do
@@ -629,8 +635,10 @@ script revision and is not part of the XML/Ventoy baseline pair.
   25H2 (historical reference); the current reference is Windows 11 Pro 26H2
   (build base 26300). The integrated answer file still lacks a clean-install
   revalidation of the latest changes and the standalone has no host runtime
-  test (static validation plus the isolated test suite only). Other Windows 11
-  client builds inside the supported envelope are accepted as
+  test (static validation plus the isolated test suite only). The exact
+  `v0.4.0-rc.1` candidate remains `RUNTIME_VALIDATION = NOT_TESTED`; N4
+  validation is deferred by the user's decision (`DEFERRED_BY_USER`). Other
+  Windows 11 client builds inside the supported envelope are accepted as
   `NOT_RUNTIME_TESTED` and may require revalidation.
 - No hardware-specific drivers are included. Prepare chipset, network, audio
   and GPU drivers yourself.
@@ -763,28 +771,29 @@ Technical status of the current baseline:
 - These changes are statically validated and covered by the isolated suite; they
   have not been exercised on a clean installation, and the new XML hash is not
   equivalent to any previously tested hash.
-- The local post-v0.3.0 R1 block (an unpublished candidate) fixes H02, H03, H05
-  and H06: interactive identity from the Explorer SID and `ProfileList` by SID,
+- The local post-v0.3.0 R1 block (published as the `v0.4.0-rc.1` prerelease)
+  fixes H02, H03, H05 and H06: interactive identity from the Explorer SID and `ProfileList` by SID,
   with selected and linked-elevated token verification; a verifiable SYSTEM/HKCU
   phase summary and cleanup gated on global success; OneDrive
   `PRESENT`/`ABSENT_VERIFIED`/`UNKNOWN` states with independent scopes and
   incomplete-protection deferral; and verified Default hive unload before the
   `R1`-schema marker. It is covered by isolated tests;
-  `RUNTIME_VALIDATION = NOT_TESTED` and `N4_RUNTIME_VALIDATION = PENDING`.
+  `RUNTIME_VALIDATION = NOT_TESTED` and
+  `N4_RUNTIME_VALIDATION = DEFERRED_BY_USER`.
 - The local R1.1 micro-build consolidates H03: owner/effective ACL checks for
   the diagnostic directory and final file, an execution identity in HKLM,
   schema/revision validation and `OverallStatus` recalculation, read-back
   verification, and `PRESENT`/`ABSENT_VERIFIED`/`UNKNOWN` one-shot task states.
   Cleanup deletes only with `ABSENT_VERIFIED` and every check passing; `UNKNOWN`
-  is retried with a bounded limit. It is not a published release and runtime
-  validation remains pending.
+  is retried with a bounded limit. It is part of the `v0.4.0-rc.1`
+  prerelease; runtime validation remains pending.
 - The local R2 block adds H01, H04 and H07: GUID-based network restoration
   gated on OOBE, bounded HKCU retries with completed operations preserved, and
   NetFx3 with a validated local source, DISM exit code and final state. Summary
   ACLs use numeric rights masks and the parent directory is checked. Actual
-  result: isolated suite **73 OK / 0 FAIL**; static validator
-  **416 OK / 0 FAIL / 1 WARN** (expected dirty tree). The local candidate is not
-  published and `RUNTIME_VALIDATION = NOT_TESTED`.
+  result of the published BUILD: isolated suite **73 OK / 0 FAIL**; static
+  validator **416 OK / 0 FAIL**. The `v0.4.0-rc.1` prerelease is published and
+  `RUNTIME_VALIDATION = NOT_TESTED`.
 
 Reference code hash:
 
